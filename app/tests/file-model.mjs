@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildRows, visibleWindow } from "../src/fileModel.ts";
+import { buildRows, nextSelectableRow, revealScroll, visibleWindow } from "../src/fileModel.ts";
 
 function file(id, group, display = `file-${id}.txt`) {
   return {
@@ -82,4 +82,22 @@ test("a 50k-file repository renders a bounded slice", () => {
   assert.equal(rows.length, 50002); // 50k files + worktree and untracked headings
   const slice = visibleWindow(rows.length, 25000 * 30, 600, 30, 6);
   assert.ok(slice.endIndex - slice.startIndex <= Math.ceil(600 / 30) + 2 * 6 + 1);
+});
+
+test("nextSelectableRow skips headings and clamps at both ends", () => {
+  const rows = buildRows([file(1, "staged"), file(2, "worktree"), file(3, "worktree")], new Set());
+  // rows: heading(staged), f1, heading(worktree), f2, f3
+  assert.equal(nextSelectableRow(rows, -1, 1), 1);
+  assert.equal(nextSelectableRow(rows, 1, 1), 3); // skips the worktree heading
+  assert.equal(nextSelectableRow(rows, 3, -1), 1);
+  assert.equal(nextSelectableRow(rows, 1, -1), 1); // top stays put
+  assert.equal(nextSelectableRow(rows, 4, 1), 4); // bottom stays put
+  assert.equal(nextSelectableRow(rows, 0, 1), 1); // from the first heading
+});
+
+test("revealScroll keeps a row fully visible without needless movement", () => {
+  assert.equal(revealScroll(0, 300, 5, 30), 0); // inside the viewport
+  assert.equal(revealScroll(300, 300, 3, 30), 90); // above: align to top
+  assert.equal(revealScroll(0, 300, 15, 30), 180); // below: align to bottom
+  assert.equal(revealScroll(0, 300, 8, 30), 0); // exactly at the edge
 });

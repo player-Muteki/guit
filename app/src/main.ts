@@ -5,6 +5,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import {
   buildRows,
+  nextSelectableRow,
+  revealScroll,
   visibleWindow,
   type FileGroupKey,
   type FileView,
@@ -78,7 +80,7 @@ app.innerHTML = `
     <h2>Recent</h2>
     <ul id="recent-list" class="recent"><li>None yet.</li></ul>
     <h2>Changes</h2>
-    <div id="file-list" class="files" role="list" aria-label="Changed files">
+    <div id="file-list" class="files" role="list" aria-label="Changed files" tabindex="0">
       <div id="file-virtual" class="virtual"><div id="file-rows" class="virtual-rows"></div></div>
     </div>
   </section>
@@ -140,6 +142,8 @@ const OVERSCAN = 6;
 let listRows: ListRow[] = [];
 let currentFiles: FileView[] = [];
 const collapsedGroups = new Set<FileGroupKey>();
+let selectedRow = -1;
+let selectedFileId: number | null = null;
 let sessionActive = false;
 let currentSnapshot: SnapshotView | null = null;
 let watchMode = "none";
@@ -236,6 +240,8 @@ function renderRecent(paths: string[]): void {
 function renderFilesPlaceholder(message: string): void {
   currentFiles = [];
   listRows = [];
+  selectedRow = -1;
+  selectedFileId = null;
   fileVirtual.style.height = "0px";
   fileRows.style.transform = "translateY(0px)";
   const item = document.createElement("div");
@@ -251,7 +257,20 @@ function renderFileList(files: FileView[]): void {
   }
   currentFiles = files;
   listRows = buildRows(files, collapsedGroups);
+  syncSelection();
   renderFileRows();
+}
+
+// Selection survives refreshes and collapsing through the stable file ID.
+function syncSelection(): void {
+  if (selectedFileId === null) {
+    selectedRow = -1;
+    return;
+  }
+  selectedRow = listRows.findIndex(
+    (row) => row.kind === "file" && row.file.id === selectedFileId,
+  );
+  if (selectedRow < 0) selectedFileId = null;
 }
 
 // Fixed-height virtual list: only the rows intersecting the viewport (plus
@@ -270,13 +289,19 @@ function renderFileRows(): void {
   fileRows.style.transform = `translateY(${slice.offsetY}px)`;
   const fragment = document.createDocumentFragment();
   for (let index = slice.startIndex; index < slice.endIndex; index++) {
-    fragment.append(createRow(listRows[index]));
+    fragment.append(createRow(listRows[index], index));
   }
   fileRows.replaceChildren(fragment);
+  if (selectedRow >= slice.startIndex && selectedRow < slice.endIndex) {
+    fileScroll.setAttribute("aria-activedescendant", `file-row-${selectedRow}`);
+  } else {
+    fileScroll.removeAttribute("aria-activedescendant");
+  }
 }
 
-function createRow(row: ListRow): HTMLElement {
+function createRow(row: ListRow, index: number): HTMLElement {
   const element = document.createElement("div");
+  element.id = `file-row-${index}`;
   element.setAttribute("role", "listitem");
   if (row.kind === "heading") {
     element.className = "file-row group-heading";
@@ -284,7 +309,9 @@ function createRow(row: ListRow): HTMLElement {
     element.addEventListener("click", () => toggleGroup(row.group));
     return element;
   }
-  element.className = "file-row";
+  const selected = index === selectedRow;
+  element.className = "file-row" + (selected ? " selected" : "");
+  element.setAttribute("aria-selected", String(selected));
   const file = row.file;
   const name = file.renameFrom ? `${file.renameFrom} → ${file.display}` : file.display;
   element.title = name;
@@ -301,6 +328,7 @@ function toggleGroup(group: FileGroupKey): void {
   if (collapsedGroups.has(group)) collapsedGroups.delete(group);
   else collapsedGroups.add(group);
   listRows = buildRows(currentFiles, collapsedGroups);
+  syncSelection();
   renderFileRows();
 }
 
@@ -313,6 +341,44 @@ fileScroll.addEventListener(
 );
 window.addEventListener("resize", () => {
   if (listRows.length > 0) renderFileRows();
+});
+
+// Keyboard navigation over the virtual list: arrows move between files
+// (headings skipped), Home/End jump, Enter toggles the selected file's group.
+fileScroll.addEventListener("keydown", (event) => {
+  if (listRows.length === 0) return;
+  const viewport = fileScroll.clientHeight || 320;
+  const edge = (delta: number) => nextSelectableRow(listRows, delta > 0 ? -1 : listRows.length, delta);
+  let target = -2;
+  switch (event.key) {
+    case "ArrowDown":
+      target = selectedRow < 0 ? edge(1) : nextSelectableRow(listRows, selectedRow, 1);
+      break;
+    case "ArrowUp":
+      target = selectedRow < 0 ? edge(-1) : nextSelectableRow(listRows, selectedRow, -1);
+      break;
+    case "Home":
+      target = edge(1);
+      break;
+    case "End":
+      target = edge(-1);
+      break;
+    case "Enter": {
+      const row = listRows[selectedRow];
+      if (row && row.kind === "file") toggleGroup(row.file.group);
+      event.preventDefault();
+      return;
+    }
+    default:
+      return;
+  }
+  event.preventDefault();
+  if (target < 0 || target === selectedRow) return;
+  const row = listRows[target];
+  selectedRow = target;
+  selectedFileId = row.kind === "file" ? row.file.id : null;
+  fileScroll.scrollTop = revealScroll(fileScroll.scrollTop, viewport, target, ROW_HEIGHT);
+  renderFileRows();
 });
 
 async function openRepository(path: string): Promise<void> {
@@ -331,12 +397,59 @@ async function openRepository(path: string): Promise<void> {
   }
 }
 
-openRepoButton.addEventListener("click", async () => {
+async function pickRepository(): Promise<void> {
   try {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected === "string") await openRepository(selected);
   } catch (error) {
     showError(error);
+  }
+}
+
+openRepoButton.addEventListener("click", () => void pickRepository());
+
+// Font scaling drives every rem-based size in the stylesheet; the choice is
+// persisted in the WebView's localStorage and restored on startup.
+const FONT_KEY = "guit.fontPx";
+const FONT_MIN = 12;
+const FONT_MAX = 24;
+const FONT_DEFAULT = 16;
+
+function currentFontPx(): number {
+  const stored = Number(localStorage.getItem(FONT_KEY));
+  return stored >= FONT_MIN && stored <= FONT_MAX ? stored : FONT_DEFAULT;
+}
+
+function applyFontPx(px: number): void {
+  const clamped = Math.min(FONT_MAX, Math.max(FONT_MIN, px));
+  document.documentElement.style.fontSize = `${clamped}px`;
+  try {
+    localStorage.setItem(FONT_KEY, String(clamped));
+  } catch {
+    // Storage may be unavailable in private mode; scaling still applies.
+  }
+}
+
+applyFontPx(currentFontPx());
+
+window.addEventListener("keydown", (event) => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+  const key = event.key.toLowerCase();
+  if (key === "r") {
+    event.preventDefault();
+    if (sessionActive) void refreshSession(false);
+  } else if (key === "o") {
+    event.preventDefault();
+    void pickRepository();
+  } else if (key === "=" || key === "+") {
+    event.preventDefault();
+    applyFontPx(currentFontPx() + 1);
+  } else if (key === "-") {
+    event.preventDefault();
+    applyFontPx(currentFontPx() - 1);
+  } else if (key === "0") {
+    event.preventDefault();
+    applyFontPx(FONT_DEFAULT);
   }
 });
 

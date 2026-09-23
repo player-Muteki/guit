@@ -26,5 +26,7 @@ button.recent-entry { padding: .35rem .6rem; background: transparent; border-col
 .file-row > span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .file-row.placeholder { height: auto; white-space: normal; overflow-wrap: anywhere; }
 .file-row.group-heading { color: #aeb9ca; font-weight: 600; cursor: pointer; user-select: none; }
+.file-row.selected { background: #2f3d55; box-shadow: inset 2px 0 0 #8cc7ff; }
+.files:focus-visible { outline: 2px solid #8cc7ff; outline-offset: 2px; }
 .file-status { font-family: monospace; color: #8cc7ff; min-width: 2.5ch; }
-@media (max-width: 480px) { header { display: block; } header span { display: block; margin-top: .3rem; } dl { grid-template-columns: 1fr; gap: .25rem; } dd { margin-bottom: .75rem; } }
+@media (max-width: 480px) { header { display: block; } header span { display: block; margin-top: .3rem; } dl { grid-template-columns: 1fr; gap: .25rem; } dd { margin-bottom: .75rem; } .card { margin: .5rem; padding: .75rem; } .actions { gap: .4rem; } .actions button, .actions label { flex: 1 1 auto; } .files { max-height: 45vh; } }

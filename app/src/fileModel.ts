@@ -58,9 +58,7 @@ export interface VisibleWindow {
   endIndex: number;
   offsetY: number;
   totalHeight: number;
-}
-
-/// Row slice a fixed-height virtual list must render for the current scroll
+}/// Row slice a fixed-height virtual list must render for the current scroll
 /// position. Rows outside the window are represented by total spacer height.
 export function visibleWindow(
   totalRows: number,
@@ -81,4 +79,40 @@ export function visibleWindow(
     offsetY: startIndex * rowHeight,
     totalHeight: totalRows * rowHeight,
   };
+}
+
+// Row movement for keyboard navigation: headings are skipped, moving past
+// either end keeps the current selection.
+export function nextSelectableRow(
+  rows: readonly ListRow[],
+  from: number,
+  delta: number,
+): number {
+  let index = from;
+  for (;;) {
+    index += delta;
+    if (index < 0 || index >= rows.length) {
+      return from;
+    }
+    if (rows[index].kind === "file") {
+      return index;
+    }
+  }
+}
+
+// Scroll position that brings a fixed-height row fully into view.
+export function revealScroll(
+  scrollTop: number,
+  viewportHeight: number,
+  index: number,
+  rowHeight: number,
+): number {
+  const top = index * rowHeight;
+  if (top < scrollTop) {
+    return top;
+  }
+  if (top + rowHeight > scrollTop + viewportHeight) {
+    return top + rowHeight - viewportHeight;
+  }
+  return scrollTop;
 }
