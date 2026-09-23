@@ -3,6 +3,13 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import {
+  buildRows,
+  visibleWindow,
+  type FileGroupKey,
+  type FileView,
+  type ListRow,
+} from "./fileModel";
 import "./style.css";
 
 type GitProbe = {
@@ -48,20 +55,6 @@ type BranchView = {
   behind: number | null;
 };
 
-type FileView = {
-  id: number;
-  display: string;
-  renameFrom: string | null;
-  group: "conflict" | "staged" | "worktree" | "untracked";
-  indexStatus: string;
-  worktreeStatus: string;
-  staged: boolean;
-  unstaged: boolean;
-  conflict: boolean;
-  untracked: boolean;
-  submodule: boolean;
-};
-
 type SnapshotView = {
   version: number;
   repo: RepoView;
@@ -85,7 +78,9 @@ app.innerHTML = `
     <h2>Recent</h2>
     <ul id="recent-list" class="recent"><li>None yet.</li></ul>
     <h2>Changes</h2>
-    <ul id="file-list" class="files"><li>Open a repository to list its working copy status.</li></ul>
+    <div id="file-list" class="files" role="list" aria-label="Changed files">
+      <div id="file-virtual" class="virtual"><div id="file-rows" class="virtual-rows"></div></div>
+    </div>
   </section>
   <section class="card">
     <h1>Environment check</h1>
@@ -133,10 +128,18 @@ let lastNormalBounds: Pick<WindowSettings, "width" | "height" | "frameWidth" | "
 
 const repoSummary = document.querySelector<HTMLElement>("#repo-summary")!;
 const recentList = document.querySelector<HTMLElement>("#recent-list")!;
-const fileList = document.querySelector<HTMLElement>("#file-list")!;
+const fileScroll = document.querySelector<HTMLElement>("#file-list")!;
+const fileVirtual = document.querySelector<HTMLElement>("#file-virtual")!;
+const fileRows = document.querySelector<HTMLElement>("#file-rows")!;
 const openRepoButton = document.querySelector<HTMLButtonElement>("#open-repo")!;
 const refreshRepoButton = document.querySelector<HTMLButtonElement>("#refresh-repo")!;
 const closeRepoButton = document.querySelector<HTMLButtonElement>("#close-repo")!;
+
+const ROW_HEIGHT = 30;
+const OVERSCAN = 6;
+let listRows: ListRow[] = [];
+let currentFiles: FileView[] = [];
+const collapsedGroups = new Set<FileGroupKey>();
 let sessionActive = false;
 let currentSnapshot: SnapshotView | null = null;
 let watchMode = "none";
@@ -190,8 +193,7 @@ function renderSnapshot(snapshot: SnapshotView | null): void {
   if (!snapshot) {
     recentList.replaceChildren();
     renderRecentPlaceholder("None yet.");
-    fileList.replaceChildren();
-    renderFilesPlaceholder();
+    renderFilesPlaceholder("Open a repository to list its working copy status.");
     return;
   }
   const addLine = (label: string, value: string) => {
@@ -205,19 +207,13 @@ function renderSnapshot(snapshot: SnapshotView | null): void {
   addLine("Path: ", snapshot.repo.root ?? snapshot.repo.gitDir);
   if (snapshot.repo.linkedWorktree) addLine("", "Linked worktree");
   if (watchMode !== "none") addLine("Monitor: ", watchMode === "poll" ? "polling" : "filesystem events");
-  renderFileGroups(snapshot.files);
+  renderFileList(snapshot.files);
 }
 
 function renderRecentPlaceholder(message: string): void {
   const item = document.createElement("li");
   item.textContent = message;
   recentList.replaceChildren(item);
-}
-
-function renderFilesPlaceholder(): void {
-  const item = document.createElement("li");
-  item.textContent = "Open a repository to list its working copy status.";
-  fileList.replaceChildren(item);
 }
 
 function renderRecent(paths: string[]): void {
@@ -237,43 +233,87 @@ function renderRecent(paths: string[]): void {
   recentList.replaceChildren(...items);
 }
 
-function renderFileGroups(files: FileView[]): void {
+function renderFilesPlaceholder(message: string): void {
+  currentFiles = [];
+  listRows = [];
+  fileVirtual.style.height = "0px";
+  fileRows.style.transform = "translateY(0px)";
+  const item = document.createElement("div");
+  item.className = "file-row placeholder";
+  item.textContent = message;
+  fileRows.replaceChildren(item);
+}
+
+function renderFileList(files: FileView[]): void {
   if (files.length === 0) {
-    const item = document.createElement("li");
-    item.textContent = "Working copy is clean.";
-    fileList.replaceChildren(item);
+    renderFilesPlaceholder("Working copy is clean.");
     return;
   }
-  const groups: Array<{ key: FileView["group"]; label: string }> = [
-    { key: "conflict", label: "Conflicts" },
-    { key: "staged", label: "Staged changes" },
-    { key: "worktree", label: "Changes" },
-    { key: "untracked", label: "Untracked files" },
-  ];
-  const items: HTMLElement[] = [];
-  for (const group of groups) {
-    const members = files.filter((file) => file.group === group.key);
-    if (members.length === 0) continue;
-    const heading = document.createElement("li");
-    heading.className = "group-heading";
-    heading.textContent = `${group.label} (${members.length})`;
-    items.push(heading);
-    for (const file of members) {
-      const item = document.createElement("li");
-      item.dataset.fileId = String(file.id);
-      const status = document.createElement("span");
-      status.className = "file-status";
-      status.textContent = `${file.indexStatus}${file.worktreeStatus}`;
-      const name = document.createElement("span");
-      name.textContent = file.renameFrom
-        ? `${file.renameFrom} → ${file.display}`
-        : file.display;
-      item.append(status, name);
-      items.push(item);
-    }
-  }
-  fileList.replaceChildren(...items);
+  currentFiles = files;
+  listRows = buildRows(files, collapsedGroups);
+  renderFileRows();
 }
+
+// Fixed-height virtual list: only the rows intersecting the viewport (plus
+// overscan) exist in the DOM, so a repository with tens of thousands of
+// changed files costs the same as one with dozens.
+function renderFileRows(): void {
+  const viewport = fileScroll.clientHeight || 320;
+  const slice = visibleWindow(
+    listRows.length,
+    fileScroll.scrollTop,
+    viewport,
+    ROW_HEIGHT,
+    OVERSCAN,
+  );
+  fileVirtual.style.height = `${slice.totalHeight}px`;
+  fileRows.style.transform = `translateY(${slice.offsetY}px)`;
+  const fragment = document.createDocumentFragment();
+  for (let index = slice.startIndex; index < slice.endIndex; index++) {
+    fragment.append(createRow(listRows[index]));
+  }
+  fileRows.replaceChildren(fragment);
+}
+
+function createRow(row: ListRow): HTMLElement {
+  const element = document.createElement("div");
+  element.setAttribute("role", "listitem");
+  if (row.kind === "heading") {
+    element.className = "file-row group-heading";
+    element.textContent = `${row.collapsed ? "▸" : "▾"} ${row.label} (${row.count})`;
+    element.addEventListener("click", () => toggleGroup(row.group));
+    return element;
+  }
+  element.className = "file-row";
+  const file = row.file;
+  const name = file.renameFrom ? `${file.renameFrom} → ${file.display}` : file.display;
+  element.title = name;
+  const status = document.createElement("span");
+  status.className = "file-status";
+  status.textContent = `${file.indexStatus}${file.worktreeStatus}`;
+  const label = document.createElement("span");
+  label.textContent = name;
+  element.append(status, label);
+  return element;
+}
+
+function toggleGroup(group: FileGroupKey): void {
+  if (collapsedGroups.has(group)) collapsedGroups.delete(group);
+  else collapsedGroups.add(group);
+  listRows = buildRows(currentFiles, collapsedGroups);
+  renderFileRows();
+}
+
+fileScroll.addEventListener(
+  "scroll",
+  () => {
+    if (listRows.length > 0) renderFileRows();
+  },
+  { passive: true },
+);
+window.addEventListener("resize", () => {
+  if (listRows.length > 0) renderFileRows();
+});
 
 async function openRepository(path: string): Promise<void> {
   openRepoButton.disabled = true;
