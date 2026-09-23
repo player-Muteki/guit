@@ -48,6 +48,12 @@ impl SessionState {
             .map(|active| active.identity.clone())
     }
 
+    /// Read-only view of the live snapshot, used by history paging to gate
+    /// unborn HEAD without a second Git probe.
+    pub(crate) fn current_view(&self) -> Option<SnapshotView> {
+        self.snapshot()
+    }
+
     fn snapshot(&self) -> Option<SnapshotView> {
         self.current
             .lock()

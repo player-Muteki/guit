@@ -2,6 +2,7 @@
 
 mod clone;
 mod extools;
+mod history;
 mod model;
 mod probe;
 mod repo;
@@ -513,6 +514,51 @@ fn cancel_exttool(state: State<'_, extools::ToolState>) {
     state.cancel();
 }
 
+#[tauri::command]
+async fn history_page(
+    app: tauri::AppHandle,
+    start: u64,
+    oid: Option<String>,
+) -> Result<history::HistoryPage, ProbeError> {
+    if let Some(target) = &oid {
+        if !history::valid_oid(target) {
+            return Err(ProbeError::new(
+                "history_target_invalid",
+                "History can only be requested for a full commit id from the current view.",
+            ));
+        }
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        let identity = sessions
+            .current_identity()
+            .ok_or_else(|| ProbeError::new("history_no_session", "No repository is open."))?;
+        let directory = if identity.is_bare {
+            identity.git_dir.as_path()
+        } else {
+            identity
+                .work_dir()
+                .map_err(|_| ProbeError::new("repo_worktree_missing", "The work tree is gone."))?
+        };
+        if oid.is_none()
+            && sessions
+                .current_view()
+                .and_then(|view| view.branch)
+                .is_some_and(|branch| branch.head_state == model::HeadState::Unborn)
+        {
+            // Unborn HEAD has no commits; Git would refuse the log outright.
+            return Ok(history::HistoryPage {
+                start,
+                commits: Vec::new(),
+                has_more: false,
+            });
+        }
+        history::page(directory, start, oid.as_deref(), history::PAGE_SIZE)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -550,7 +596,8 @@ fn main() {
             preview_clean,
             clean_files,
             open_external_tool,
-            cancel_exttool
+            cancel_exttool,
+            history_page
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

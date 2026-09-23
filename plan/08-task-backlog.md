@@ -1,6 +1,6 @@
 # 08 实施任务清单
 
-本清单把 [06-development-roadmap.md](06-development-roadmap.md) 的 M0–M6 拆成可独立评审的任务。方括号用于实施时跟踪；M0、M1 已完成（Linux 证据分别见 [M0-validation.md](M0-validation.md) 与 [M1-validation.md](M1-validation.md)，Windows/macOS 运行时验证为遗留交接门槛），M2 已完成（M2-01…M2-08，Linux 证据见 [M2-validation.md](M2-validation.md)，Windows/macOS 与键盘交互为遗留交接门槛）。每项完成时应附对应代码、自动化测试或平台验证记录，而不是只勾选功能演示。
+本清单把 [06-development-roadmap.md](06-development-roadmap.md) 的 M0–M6 拆成可独立评审的任务。方括号用于实施时跟踪；M0、M1 已完成（Linux 证据分别见 [M0-validation.md](M0-validation.md) 与 [M1-validation.md](M1-validation.md)，Windows/macOS 运行时验证为遗留交接门槛），M2 已完成（M2-01…M2-08，Linux 证据见 [M2-validation.md](M2-validation.md)，Windows/macOS 与键盘交互为遗留交接门槛），M3 进行中（Linux 单平台）。每项完成时应附对应代码、自动化测试或平台验证记录，而不是只勾选功能演示。
 
 ## M0 工程与技术探针
 
@@ -43,7 +43,7 @@ M1 已于 2026-09-23 在 Linux 主机完成交付验证，详见 [M1-validation.
 
 ## M3 历史、分支和标签
 
-- [ ] **M3-01** 设计固定字段的 `log` 输出协议和分页游标，测试含换行提交消息。
+- [x] **M3-01** 设计固定字段的 `log` 输出协议和分页游标，测试含换行提交消息。证据：`history.rs` 定义协议并经 Git 2.53 实测固化——`git log --no-color -z --topo-order --format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%D%x1f%B -n <limit+1> --skip <start> [oid] --`：字段间 0x1f、记录间 NUL（`-z`），提交边界不依赖行数；消息恒为末字段并按字段数上限切分，故消息内出现的 0x1f/换行/"On branch" 伪装饰行都不污染前序字段（实测确认）；NUL 作为记录分隔安全因为 Git 自身拒绝含 NUL 的提交消息（"a NUL byte in commit log message not allowed"，实测确认，`-F` 路径亦然）；解析不足 10 字段一律 `history_protocol_error` fail-closed，绝不猜测残缺记录。分页游标=图上确定序（topo-order，父提交必在子提交后）+ `--skip`/页大小 50，取 limit+1 判 `hasMore`，同一游标重复拉取逐字节一致。目标只接受完整小写十六进制 OID（40/64 位，`valid_oid`），前端永远无法传 revspec/选项/路径；无 OID 时读 HEAD，未出生分支由会话快照 `head_state` 闸门返回空页而非触发 Git 报错；输出超 8MB 上限拒绝（`history_truncated`）、Git 失败保留脱敏 stderr 首行（`history_page_failed`）。`main.rs` 注册 `history_page(start, oid)` 命令。7 项测试：多行含 0x1f 消息往返字节精确、7 提交按页遍历无重叠无遗漏且游标可复现、合并提交父序与拓扑序断言、短记录 fail-closed、未知 OID/空仓库结构化失败、OID 校验边界、装饰含分支/标签/远端 token。全量 101 项 Rust 测试、`cargo fmt --check` 通过（Linux 单平台；UI 在 M3-02 接入）。
 - [ ] **M3-02** 展示提交元数据、提交文件清单、复制 OID 与外部提交差异入口。
 - [ ] **M3-03** 使用 `for-each-ref` 构建本地/远端分支及标签列表；引用名按 Git 规则校验。
 - [ ] **M3-04** 实现分支创建、切换、重命名、删除；未提交改动与未合并提交显示正确拒绝/确认。
