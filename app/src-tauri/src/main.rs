@@ -3,6 +3,7 @@
 mod probe;
 mod repo;
 mod runner;
+mod status;
 mod util;
 
 use probe::{GitProbe, ProbeError, ToolProbe};

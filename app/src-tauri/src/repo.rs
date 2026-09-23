@@ -145,13 +145,17 @@ pub fn status_output(identity: &RepoIdentity, untracked: bool) -> Result<Vec<u8>
             .map_err(|_| ProbeError::new("repo_worktree_missing", "The work tree is gone."))?
     };
     let mut command = user_git_command(directory);
+    // Option values must use the `=` form: `--untracked-files all` would treat
+    // `all` as a pathspec and silently report an empty repository.
     command.args([
         "status",
         "--porcelain=v2",
         "-z",
         "--branch",
-        "--untracked-files",
-        if untracked { "all" } else { "normal" },
+        &format!(
+            "--untracked-files={}",
+            if untracked { "all" } else { "normal" }
+        ),
         "--ignored=no",
     ]);
     if identity.is_bare {
@@ -159,17 +163,24 @@ pub fn status_output(identity: &RepoIdentity, untracked: bool) -> Result<Vec<u8>
             .env("GIT_DIR", &identity.git_dir)
             .arg("--no-optional-locks");
     }
-    let output = runner::run(
+    let output = runner::run_with_limit(
         command,
         &AtomicBool::new(false),
         Duration::ZERO,
         Duration::from_secs(30),
+        runner::STATUS_OUTPUT_LIMIT,
         |_| {},
     )?;
     if !output.status.success() {
         return Err(ProbeError::new(
             "git_status_failed",
             String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    if output.truncated {
+        return Err(ProbeError::new(
+            "git_status_truncated",
+            "Status output exceeded the capture bound; refusing to parse a partial result.",
         ));
     }
     Ok(output.stdout)

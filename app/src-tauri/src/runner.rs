@@ -6,7 +6,11 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const OUTPUT_LIMIT: usize = 64 * 1024;
+pub const DEFAULT_OUTPUT_LIMIT: usize = 64 * 1024;
+/// `status --porcelain=v2` for very large repositories can exceed the default
+/// capture limit; parsing a truncated record would misreport the repository as
+/// clean, so status reads use this larger bound instead.
+pub const STATUS_OUTPUT_LIMIT: usize = 32 * 1024 * 1024;
 
 pub struct CapturedOutput {
     pub status: ExitStatus,
@@ -65,10 +69,28 @@ fn terminate(child: &mut Child) -> Result<(), ProbeError> {
 }
 
 pub fn run(
+    command: Command,
+    cancelled: &AtomicBool,
+    close_stdin_after: Duration,
+    timeout: Duration,
+    progress: impl Fn(usize),
+) -> Result<CapturedOutput, ProbeError> {
+    run_with_limit(
+        command,
+        cancelled,
+        close_stdin_after,
+        timeout,
+        DEFAULT_OUTPUT_LIMIT,
+        progress,
+    )
+}
+
+pub fn run_with_limit(
     mut command: Command,
     cancelled: &AtomicBool,
     close_stdin_after: Duration,
     timeout: Duration,
+    output_limit: usize,
     progress: impl Fn(usize),
 ) -> Result<CapturedOutput, ProbeError> {
     #[cfg(unix)]
@@ -121,7 +143,7 @@ pub fn run(
                     progress(bytes.len());
                 }
                 let destination = if is_stderr { &mut stderr } else { &mut stdout };
-                let remaining = OUTPUT_LIMIT.saturating_sub(destination.len());
+                let remaining = output_limit.saturating_sub(destination.len());
                 truncated |= bytes.len() > remaining;
                 destination.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
             }
