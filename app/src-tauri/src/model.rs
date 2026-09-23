@@ -185,8 +185,7 @@ impl PathTable {
         id
     }
 
-    // Used by M2 write operations to recover the exact Git path for a FileId.
-    #[allow(dead_code)]
+    // Resolved by write operations to recover the exact Git path for a FileId.
     pub fn resolve(&self, id: FileId) -> Option<&RawPath> {
         self.entries.get(&id)
     }

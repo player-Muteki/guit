@@ -19,6 +19,7 @@ type GitProbe = {
   version: string | null;
   executable: string | null;
   supported: boolean;
+  hasRestore: boolean;
   message: string;
 };
 

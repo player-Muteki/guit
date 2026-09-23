@@ -44,11 +44,14 @@ pub(crate) fn redact(message: &str) -> String {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitProbe {
     pub available: bool,
     pub version: Option<String>,
     pub executable: Option<String>,
     pub supported: bool,
+    /// `git restore` arrived in 2.23; unstage and discard depend on it.
+    pub has_restore: bool,
     pub message: String,
 }
 
@@ -76,6 +79,7 @@ fn git_at(executable: &OsStr) -> Result<GitProbe, ProbeError> {
                 version: None,
                 executable: None,
                 supported: false,
+                has_restore: false,
                 message: "Git was not found. Install Git or add it to PATH.".into(),
             });
         }
@@ -93,6 +97,7 @@ fn git_at(executable: &OsStr) -> Result<GitProbe, ProbeError> {
     let supported = status_capability(executable)?;
     Ok(GitProbe {
         available: true,
+        has_restore: version_at_least(&version, (2, 23)),
         version: Some(version),
         executable: Some("git (PATH)".into()),
         supported,
@@ -103,6 +108,23 @@ fn git_at(executable: &OsStr) -> Result<GitProbe, ProbeError> {
                 .into()
         },
     })
+}
+
+/// Capability gate for subcommands added after the porcelain-v2 baseline.
+/// Old Git reports unknown subcommands with exit 1 and new Git uses exit 129
+/// for usage errors, which is too close to tell apart; the advertised version
+/// is the reliable signal. Unparseable versions are treated as unsupported.
+fn version_at_least(version: &str, minimum: (u32, u32)) -> bool {
+    let Some(core) = version
+        .split_whitespace()
+        .find(|token| token.chars().next().is_some_and(|c| c.is_ascii_digit()))
+    else {
+        return false;
+    };
+    let mut parts = core.split('.');
+    let major = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    let minor = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    (major, minor) >= minimum
 }
 
 fn status_capability(executable: &OsStr) -> Result<bool, ProbeError> {
@@ -356,7 +378,19 @@ mod tests {
         let result = git_at(executable.as_os_str()).unwrap();
         assert!(result.available);
         assert!(!result.supported);
+        assert!(!result.has_restore);
         assert!(result.message.contains("Update Git"));
+    }
+
+    #[test]
+    fn restore_capability_tracks_advertised_version() {
+        assert!(version_at_least("git version 2.53.0", (2, 23)));
+        assert!(version_at_least("git version 2.23.0", (2, 23)));
+        assert!(version_at_least("git version 2.47.1.windows.2", (2, 23)));
+        assert!(!version_at_least("git version 2.22.0", (2, 23)));
+        assert!(!version_at_least("git version 1.9.5", (2, 23)));
+        assert!(!version_at_least("git version test-old", (2, 23)));
+        assert!(!version_at_least("", (2, 23)));
     }
 
     #[test]
@@ -395,6 +429,7 @@ mod tests {
         let result = git().unwrap();
         assert!(result.available);
         assert!(result.supported);
+        assert!(result.has_restore);
     }
 
     #[test]

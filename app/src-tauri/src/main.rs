@@ -9,6 +9,7 @@ mod session;
 mod status;
 mod util;
 mod watch;
+mod write;
 
 use probe::{GitProbe, ProbeError, ToolProbe};
 use std::io::Write;
@@ -370,6 +371,26 @@ fn cancel_clone(state: State<'_, clone::CloneState>) {
     state.cancelled.store(true, Ordering::SeqCst);
 }
 
+#[tauri::command]
+async fn stage_files(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    file_ids: Vec<u32>,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        write::execute_stage(&state, &sessions, snapshot_version, file_ids)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+fn cancel_write(state: State<'_, write::WriteState>) {
+    state.cancel();
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -380,6 +401,7 @@ fn main() {
         .manage(session::SessionState::default())
         .manage(watch::WatchState::default())
         .manage(clone::CloneState::default())
+        .manage(write::WriteState::default())
         .invoke_handler(tauri::generate_handler![
             probe_git,
             probe_external_tools,
@@ -395,7 +417,9 @@ fn main() {
             close_repository,
             list_recent_repositories,
             clone_repository,
-            cancel_clone
+            cancel_clone,
+            stage_files,
+            cancel_write
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

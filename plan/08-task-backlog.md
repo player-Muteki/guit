@@ -1,6 +1,6 @@
 # 08 实施任务清单
 
-本清单把 [06-development-roadmap.md](06-development-roadmap.md) 的 M0–M6 拆成可独立评审的任务。方括号用于实施时跟踪；M0、M1 已完成（Linux 证据分别见 [M0-validation.md](M0-validation.md) 与 [M1-validation.md](M1-validation.md)，Windows/macOS 运行时验证为遗留交接门槛），M2 起未开始。每项完成时应附对应代码、自动化测试或平台验证记录，而不是只勾选功能演示。
+本清单把 [06-development-roadmap.md](06-development-roadmap.md) 的 M0–M6 拆成可独立评审的任务。方括号用于实施时跟踪；M0、M1 已完成（Linux 证据分别见 [M0-validation.md](M0-validation.md) 与 [M1-validation.md](M1-validation.md)，Windows/macOS 运行时验证为遗留交接门槛），M2 进行中（M2-01 已完成，Linux 单平台）。每项完成时应附对应代码、自动化测试或平台验证记录，而不是只勾选功能演示。
 
 ## M0 工程与技术探针
 
@@ -32,7 +32,7 @@ M1 已于 2026-09-23 在 Linux 主机完成交付验证，详见 [M1-validation.
 
 ## M2 日常提交闭环
 
-- [ ] **M2-01** 实现同仓库写入队列、操作 ID、防重复提交和写入后强制刷新。
+- [x] **M2-01** 实现同仓库写入队列、操作 ID、防重复提交和写入后强制刷新。证据：`app/src-tauri/src/write.rs` `WriteState`（busy CAS 单槽，第二请求得 `write_queue_busy`；操作 ID 单调递增；`cancelled` 复用 runner 进程组终止）；`session.rs` `resolve_files` 写入前校验快照版本精确匹配（`write_stale_snapshot`）、非裸仓库（`write_bare_repo`）、FileId 属于当前快照（`write_unknown_file_id`，混入非法 ID 整单拒绝）；路径以 Git 原始字节经参数数组传给 `git add --`（Unix `OsString::from_vec` 无损，Windows UTF-8 不可表示则 `write_path_unrepresentable`）；成功/失败/取消/拒绝后必调 `session::refresh` 并在 `OperationResult.snapshot` 返回重读状态。`probe.rs` 增加 `hasRestore` 能力位（版本 ≥2.23，旧 Git 得到结构化拒绝依据而非崩溃）。7 项 write 测试（暂存成功且快照版本递增、旧版本请求未触 Git、混合 ID 拒绝、并发拒绝、中文空格路径字节精确、取消后仍重读、裸仓库拒绝）+ 2 项 probe 测试；全量 68 项 Rust 测试、`tsc && vite build`、`cargo fmt --check` 通过（Linux 单平台；前端按钮在 M2-02 接入）。
 - [ ] **M2-02** 实现按文件暂存与取消暂存；同一文件两侧都有改动时分别正确更新。
 - [ ] **M2-03** 实现批量/全部暂存；路径从当前快照 ID 获取，旧 ID 不可复用。
 - [ ] **M2-04** 实现外部文件打开、工作区 diff、暂存 diff；工具失败和返回后有明确反馈。

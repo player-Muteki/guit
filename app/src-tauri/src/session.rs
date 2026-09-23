@@ -1,4 +1,4 @@
-use crate::model::{BranchView, FileView, PathTable};
+use crate::model::{BranchView, FileId, FileView, PathTable};
 use crate::probe::ProbeError;
 use crate::repo::{self, RepoIdentity};
 use crate::status;
@@ -33,11 +33,9 @@ struct Gate {
 #[derive(Debug)]
 struct ActiveRepo {
     identity: RepoIdentity,
-    /// Resolved by write actions (M2) against this snapshot's IDs.
-    #[allow(dead_code)]
+    /// Resolved by write actions against this snapshot's IDs.
     paths: Arc<PathTable>,
     view: SnapshotView,
-    #[allow(dead_code)]
     version: u64,
 }
 
@@ -56,6 +54,56 @@ impl SessionState {
             .unwrap()
             .as_ref()
             .map(|active| active.view.clone())
+    }
+
+    /// Validates a write request against the live snapshot: the version must
+    /// match exactly, the repository must have a work tree, and every file ID
+    /// must belong to that snapshot. Returns the work-tree root plus the raw
+    /// path bytes in request order — the only way a frontend reference turns
+    /// back into a Git argument.
+    pub(crate) fn resolve_files(
+        &self,
+        expected_version: u64,
+        ids: &[u32],
+    ) -> Result<(PathBuf, Vec<Vec<u8>>), ProbeError> {
+        let current = self.current.lock().unwrap();
+        let active = current
+            .as_ref()
+            .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
+        if active.version != expected_version {
+            return Err(ProbeError::new(
+                "write_stale_snapshot",
+                "The repository changed since this view was rendered; the request was rejected.",
+            ));
+        }
+        let root = active
+            .identity
+            .work_root
+            .as_ref()
+            .ok_or_else(|| {
+                ProbeError::new(
+                    "write_bare_repo",
+                    "A bare repository has no working copy to modify.",
+                )
+            })?
+            .clone();
+        if ids.is_empty() {
+            return Err(ProbeError::new(
+                "write_unknown_file_id",
+                "No files were selected for this operation.",
+            ));
+        }
+        let mut targets = Vec::with_capacity(ids.len());
+        for id in ids {
+            let raw = active.paths.resolve(FileId(*id)).ok_or_else(|| {
+                ProbeError::new(
+                    "write_unknown_file_id",
+                    "The file reference is not part of the current snapshot; refresh and try again.",
+                )
+            })?;
+            targets.push(raw.path.clone());
+        }
+        Ok((root, targets))
     }
 }
 
