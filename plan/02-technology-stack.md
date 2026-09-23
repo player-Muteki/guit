@@ -31,6 +31,10 @@
 - 不依赖 shell 管道或用户 shell 配置来完成 Git 操作；所有参数通过进程 API 传递。
 - Git 进程需要的环境变量由后端集中设置或继承，避免各模块行为不一致。
 
+## 已引入第三方依赖记录
+
+- `notify` = "8"（实测 8.2.0，M1-07 文件系统监听）。用途：以平台原生事件（Linux inotify、macOS FSEvents、Windows ReadDirectoryChangesW）监听工作树与 Git 目录变化，驱动状态刷新。资源影响：纯 Rust、无附加进程、空闲 CPU 接近零；transitive 依赖仅 inotify/kqueue/windows 原生绑定。替代方案：轮询 `git status`（额外 Git 进程开销，违背低资源目标）或独立 watcher 子进程（多进程常驻）。折中保留：监听器创建失败时自动回落到 5 秒轮询（见 `app/src-tauri/src/watch.rs`）。
+
 ## M0 实测基线（Linux，2026-09-23）
 
 完整证据见 [M0-validation.md](M0-validation.md)。锁定并验证的版本：Tauri CLI 2.11.5 / `@tauri-apps/api` 2.11.1 / tauri crate 2.11.6、`tauri-plugin-dialog` 2.x、Rust 1.96.1、Node 22、Git 2.53.0（`status --porcelain=v2 -z --branch` 能力探针通过）、WebKitGTK 2.52.6、GTK 3.24.52。运行时验证得到的技术结论：

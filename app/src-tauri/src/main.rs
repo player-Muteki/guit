@@ -7,6 +7,7 @@ mod runner;
 mod session;
 mod status;
 mod util;
+mod watch;
 
 use probe::{GitProbe, ProbeError, ToolProbe};
 use std::io::Write;
@@ -39,6 +40,7 @@ async fn open_repository(
             }
             Err(error) => eprintln!("guit [{}]: session not saved", error.code),
         }
+        watch::restart(&app);
         Ok(snapshot)
     })
     .await
@@ -52,14 +54,21 @@ async fn restore_repository(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<session::SessionState>();
         if state.current_identity().is_some() {
-            return session::restore(&state);
+            let restored = session::restore(&state)?;
+            if restored.is_some() {
+                watch::restart(&app);
+            }
+            return Ok(restored);
         }
         let directory = app_config_dir(&app)?;
         let Some(path) = session::read_session(&directory)? else {
             return Ok(None);
         };
         match session::open(&state, std::path::Path::new(&path)) {
-            Ok(snapshot) => Ok(Some(snapshot)),
+            Ok(snapshot) => {
+                watch::restart(&app);
+                Ok(Some(snapshot))
+            }
             Err(error)
                 if matches!(
                     error.code,
@@ -67,6 +76,7 @@ async fn restore_repository(
                 ) =>
             {
                 session::clear_session(&directory)?;
+                watch::stop(&app);
                 Ok(None)
             }
             Err(error) => Err(error),
@@ -94,6 +104,9 @@ fn close_repository(
     state: State<'_, session::SessionState>,
 ) -> Result<(), ProbeError> {
     session::close(&state);
+    // Close first: any in-flight watcher refresh then sees no session and the
+    // supervisor exits on its own without emitting a stale snapshot.
+    watch::stop(&app);
     session::clear_session(&app_config_dir(&app)?)
 }
 
@@ -328,6 +341,7 @@ fn main() {
             running: Arc::new(AtomicBool::new(false)),
         })
         .manage(session::SessionState::default())
+        .manage(watch::WatchState::default())
         .invoke_handler(tauri::generate_handler![
             probe_git,
             probe_external_tools,

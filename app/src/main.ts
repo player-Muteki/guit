@@ -139,6 +139,37 @@ const refreshRepoButton = document.querySelector<HTMLButtonElement>("#refresh-re
 const closeRepoButton = document.querySelector<HTMLButtonElement>("#close-repo")!;
 let sessionActive = false;
 let currentSnapshot: SnapshotView | null = null;
+let watchMode = "none";
+let refreshingSession = false;
+
+// Backend snapshots carry a monotonic version; an older one must never
+// replace a newer rendered snapshot (file IDs are per-snapshot).
+function applySnapshot(snapshot: SnapshotView | null): void {
+  if (snapshot && currentSnapshot && snapshot.version <= currentSnapshot.version) {
+    return;
+  }
+  currentSnapshot = snapshot;
+  renderSnapshot(snapshot);
+}
+
+async function refreshSession(silent: boolean): Promise<void> {
+  if (!sessionActive || refreshingSession) return;
+  refreshingSession = true;
+  try {
+    applySnapshot(await invoke<SnapshotView | null>("refresh_repository"));
+  } catch (error) {
+    if (!silent) showError(error);
+  } finally {
+    refreshingSession = false;
+    refreshRepoButton.disabled = !sessionActive;
+  }
+}
+
+void listen<SnapshotView>("repo-refreshed", ({ payload }) => applySnapshot(payload));
+void listen<{ mode: string }>("watch-status", ({ payload }) => {
+  watchMode = payload.mode;
+  renderSnapshot(currentSnapshot);
+});
 
 function describeBranch(branch: BranchView | null): string {
   if (!branch) return "bare repository — status unavailable";
@@ -173,6 +204,7 @@ function renderSnapshot(snapshot: SnapshotView | null): void {
   addLine("Branch: ", describeBranch(snapshot.branch));
   addLine("Path: ", snapshot.repo.root ?? snapshot.repo.gitDir);
   if (snapshot.repo.linkedWorktree) addLine("", "Linked worktree");
+  if (watchMode !== "none") addLine("Monitor: ", watchMode === "poll" ? "polling" : "filesystem events");
   renderFileGroups(snapshot.files);
 }
 
@@ -270,20 +302,7 @@ openRepoButton.addEventListener("click", async () => {
 
 refreshRepoButton.addEventListener("click", async () => {
   refreshRepoButton.disabled = true;
-  try {
-    const snapshot = await invoke<SnapshotView | null>("refresh_repository");
-    // Drop stale results: an older snapshot version must never replace a
-    // newer rendered one, and file IDs are per-snapshot.
-    if (snapshot && currentSnapshot && snapshot.version <= currentSnapshot.version) {
-      return;
-    }
-    currentSnapshot = snapshot;
-    renderSnapshot(snapshot);
-  } catch (error) {
-    showError(error);
-  } finally {
-    refreshRepoButton.disabled = !sessionActive;
-  }
+  await refreshSession(false);
 });
 
 closeRepoButton.addEventListener("click", async () => {
@@ -486,6 +505,9 @@ void (async () => {
       scheduleWindowSave();
     });
     await currentWindow.onMoved(scheduleWindowSave);
+    await currentWindow.onFocusChanged(({ payload }) => {
+      if (payload) void refreshSession(true);
+    });
     await currentWindow.onCloseRequested(async (event) => {
       event.preventDefault();
       window.clearTimeout(saveTimer);
