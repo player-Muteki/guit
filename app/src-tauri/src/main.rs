@@ -5,6 +5,7 @@ mod extools;
 mod history;
 mod model;
 mod probe;
+mod refs;
 mod repo;
 mod runner;
 mod session;
@@ -610,6 +611,26 @@ async fn open_commit_diff(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn list_refs(app: tauri::AppHandle) -> Result<refs::RefListing, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        let identity = sessions
+            .current_identity()
+            .ok_or_else(|| ProbeError::new("refs_no_session", "No repository is open."))?;
+        let directory = if identity.is_bare {
+            identity.git_dir.as_path()
+        } else {
+            identity
+                .work_dir()
+                .map_err(|_| ProbeError::new("repo_worktree_missing", "The work tree is gone."))?
+        };
+        refs::list(directory)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -650,7 +671,8 @@ fn main() {
             cancel_exttool,
             history_page,
             commit_files,
-            open_commit_diff
+            open_commit_diff,
+            list_refs
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

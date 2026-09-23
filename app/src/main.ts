@@ -151,6 +151,13 @@ app.innerHTML = `
     </div>
   </section>
   <section class="card">
+    <h1>References</h1>
+    <div id="ref-list" class="refs" role="list" aria-label="Branches and tags">
+      <div class="file-row placeholder">Open a repository to list its branches and tags.</div>
+    </div>
+    <p id="ref-status" role="status"></p>
+  </section>
+  <section class="card">
     <h1>History</h1>
     <div id="history-list" class="history" role="list" aria-label="Commit history">
       <div class="file-row placeholder">Open a repository to browse its history.</div>
@@ -292,6 +299,7 @@ function describeBranch(branch: BranchView | null): string {
 function renderSnapshot(snapshot: SnapshotView | null): void {
   sessionActive = snapshot !== null;
   syncHistoryWithSnapshot();
+  syncRefsWithSnapshot();
   closeRepoButton.disabled = !sessionActive;
   refreshRepoButton.disabled = !sessionActive;
   syncCommitControls();
@@ -1022,6 +1030,145 @@ copyOidButton.addEventListener("click", () => {
     },
   );
 });
+
+// --- References (M3-03): read-only branch and tag listing -----------------
+// Names come from the backend's fixed-field for-each-ref protocol. Refs
+// whose raw bytes do not round-trip through the display form are listed
+// but flagged non-addressable, so no write action can ever target a
+// look-alike ref name.
+
+type BranchRef = {
+  name: string;
+  oid: string;
+  head: boolean;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
+  upstreamGone: boolean;
+  addressable: boolean;
+};
+
+type RemoteRef = { name: string; oid: string; symref: string | null };
+
+type TagRef = {
+  name: string;
+  oid: string;
+  targetOid: string | null;
+  annotated: boolean;
+  addressable: boolean;
+};
+
+type RefListing = { branches: BranchRef[]; remotes: RemoteRef[]; tags: TagRef[] };
+
+const refList = document.querySelector<HTMLElement>("#ref-list")!;
+const refStatus = document.querySelector<HTMLElement>("#ref-status")!;
+
+let refsRequestSeq = 0;
+let refsSnapshotVersion = -1;
+
+function refPlaceholderRow(message: string): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "file-row placeholder";
+  row.textContent = message;
+  return row;
+}
+
+function refPlaceholder(message: string): void {
+  refsSnapshotVersion = -1;
+  refStatus.textContent = "";
+  refList.replaceChildren(refPlaceholderRow(message));
+}
+
+// Driven from renderSnapshot: every newly accepted snapshot version
+// re-reads refs once (writes, watcher and focus refreshes all flow through
+// there); a re-render of the same version never touches Git.
+function syncRefsWithSnapshot(): void {
+  if (!currentSnapshot) {
+    if (refsSnapshotVersion !== -1) {
+      refPlaceholder("Open a repository to list its branches and tags.");
+    }
+    return;
+  }
+  if (currentSnapshot.version === refsSnapshotVersion) return;
+  refsSnapshotVersion = currentSnapshot.version;
+  void loadRefs();
+}
+
+async function loadRefs(): Promise<void> {
+  const seq = ++refsRequestSeq;
+  refStatus.textContent = "Loading references…";
+  try {
+    const listing = await invoke<RefListing>("list_refs");
+    if (seq !== refsRequestSeq) return; // a newer request took over
+    renderRefs(listing);
+    refStatus.textContent = `${listing.branches.length} branch(es), `
+      + `${listing.remotes.length} remote ref(s), ${listing.tags.length} tag(s).`;
+  } catch (error) {
+    if (seq !== refsRequestSeq) return;
+    showError(error);
+    refStatus.textContent = "The ref listing could not be loaded.";
+  }
+}
+
+function renderRefs(listing: RefListing): void {
+  const rows: HTMLElement[] = [];
+  const heading = (text: string) => {
+    const el = document.createElement("div");
+    el.className = "ref-heading";
+    el.textContent = text;
+    return el;
+  };
+  const row = (marker: string, name: string, meta: string, addressable: boolean) => {
+    const el = document.createElement("div");
+    el.className = "file-row ref-row";
+    el.setAttribute("role", "listitem");
+    const badge = document.createElement("span");
+    badge.className = "file-status";
+    badge.textContent = marker;
+    const label = document.createElement("span");
+    label.className = "ref-name";
+    label.textContent = name;
+    el.append(badge, label);
+    if (!addressable) {
+      label.classList.add("inert-ref");
+      label.title = "This ref name is not byte-round-trippable; shown read-only.";
+    }
+    if (meta) {
+      const metaEl = document.createElement("span");
+      metaEl.className = "ref-meta";
+      metaEl.textContent = meta;
+      el.append(metaEl);
+    }
+    return el;
+  };
+  rows.push(heading(`Branches (${listing.branches.length})`));
+  for (const branch of listing.branches) {
+    const parts: string[] = [];
+    if (branch.upstream) parts.push(`→ ${branch.upstream}`);
+    if (branch.upstreamGone) parts.push("upstream gone");
+    if (branch.ahead !== null) parts.push(`↑${branch.ahead}`);
+    if (branch.behind !== null) parts.push(`↓${branch.behind}`);
+    rows.push(row(branch.head ? "*" : "", branch.name, parts.join("  "), branch.addressable));
+  }
+  rows.push(heading(`Remote branches (${listing.remotes.length})`));
+  for (const remote of listing.remotes) {
+    const meta = remote.symref ? `symref → ${remote.symref}` : remote.oid.slice(0, 8);
+    rows.push(row("", remote.name, meta, true));
+  }
+  rows.push(heading(`Tags (${listing.tags.length})`));
+  for (const tag of listing.tags) {
+    const target = tag.targetOid ?? tag.oid;
+    rows.push(
+      row(
+        tag.annotated ? "T" : "",
+        tag.name,
+        `${tag.annotated ? "annotated" : "lightweight"} → ${target.slice(0, 8)}`,
+        tag.addressable,
+      ),
+    );
+  }
+  refList.replaceChildren(...rows);
+}
 
 function toggleGroup(group: FileGroupKey): void {
   if (collapsedGroups.has(group)) collapsedGroups.delete(group);
