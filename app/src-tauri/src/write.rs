@@ -1,10 +1,29 @@
 use crate::probe::{redact, ProbeError};
-use crate::{repo, runner, session};
+use crate::status::StatusEntry;
+use crate::{repo, runner, session, status};
 use serde::Serialize;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
+
+/// What a stored confirmation permits. Clean arrives with M2-06 and shares
+/// the same one-time ticket machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewKind {
+    Discard,
+    #[allow(dead_code)]
+    Clean,
+}
+
+#[derive(Debug)]
+struct Preview {
+    work_root: PathBuf,
+    kind: PreviewKind,
+    paths: Vec<Vec<u8>>,
+}
 
 /// Serializes every Git write in the repository (plan/03: 同仓库写入严格串行).
 /// One operation holds the slot at a time; a second submitter is refused with
@@ -15,6 +34,7 @@ pub struct WriteState {
     busy: AtomicBool,
     cancelled: AtomicBool,
     op_counter: AtomicU64,
+    previews: Mutex<HashMap<String, Preview>>,
 }
 
 impl WriteState {
@@ -35,7 +55,52 @@ impl WriteState {
     pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
+
+    fn stage_preview(&self, ticket: Preview) -> String {
+        let nonce = new_nonce();
+        self.previews.lock().unwrap().insert(nonce.clone(), ticket);
+        nonce
+    }
+
+    /// Confirmation nonces are single-use: the take removes them even when
+    /// the follow-up check then refuses, forcing a fresh preview.
+    fn take_preview(&self, nonce: &str, kind: PreviewKind) -> Option<Preview> {
+        let removed = self.previews.lock().unwrap().remove(nonce);
+        match removed {
+            Some(ticket) if ticket.kind == kind => Some(ticket),
+            Some(_) => None,
+            None => None,
+        }
+    }
+
+    pub(crate) fn clear_previews(&self) {
+        self.previews.lock().unwrap().clear();
+    }
 }
+
+/// Unguessable one-time token. `RandomState` draws fresh SipHash keys from
+/// system entropy per instance, so two finishes are 128 bits of unpredictable
+/// data — enough to bind a confirm click to the preview that produced it
+/// without pulling in a cryptography dependency.
+fn new_nonce() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let first = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    let second = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    let time = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since| since.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let counter = WRITE_COUNTER
+        .get_or_init(|| AtomicU64::new(0))
+        .fetch_add(1, Ordering::SeqCst);
+    format!("{first:016x}{:016x}", second ^ time ^ counter)
+}
+
+static WRITE_COUNTER: OnceLock<AtomicU64> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,16 +108,18 @@ pub enum OperationKind {
     Stage,
     Unstage,
     Commit,
+    Discard,
 }
 
 impl OperationKind {
     /// Git argument prefix plus the past-tense verb for the result message.
-    /// Commit runs through its own runner and never uses this plan.
+    /// Commit and discard run through their own runners, never this plan.
     fn plan(self) -> (&'static [&'static str], &'static str) {
         match self {
             OperationKind::Stage => (&["add"], "Staged"),
             OperationKind::Unstage => (&["restore", "--staged"], "Unstaged"),
             OperationKind::Commit => (&[], "Committed"),
+            OperationKind::Discard => (&["restore", "--worktree"], "Discarded"),
         }
     }
 
@@ -282,6 +349,201 @@ pub(crate) fn run_commit(
         details,
         snapshot,
     })
+}
+
+/// What a discard confirmation covers: display names only (the frontend
+/// never learns real paths), plus the fresh snapshot the preview re-read.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewResult {
+    pub nonce: String,
+    pub candidates: Vec<String>,
+    pub dropped: Vec<String>,
+    pub snapshot: session::SnapshotView,
+}
+
+/// Recompute what a discard would touch, from a fresh Git read — never from
+/// the client's list — and store it under a single-use nonce.
+pub(crate) fn preview_discard(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    file_ids: &[u32],
+) -> Result<PreviewResult, ProbeError> {
+    let (work_root, requested) = sessions.resolve_files(snapshot_version, file_ids)?;
+    let snapshot = session::refresh(sessions)?
+        .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
+    let entries = status_index(sessions)?;
+    let mut candidates = Vec::new();
+    let mut dropped = Vec::new();
+    for raw in requested {
+        match entries.get(&raw) {
+            Some(StatusEntry::Untracked { .. }) => {
+                return Err(ProbeError::new(
+                    "discard_untracked",
+                    "Untracked files are removed by clean, not discarded; the request was refused.",
+                ));
+            }
+            Some(StatusEntry::Unmerged { .. }) => {
+                return Err(ProbeError::new(
+                    "discard_conflict",
+                    "Conflicted files must be resolved through a merge tool; discard refuses them.",
+                ));
+            }
+            Some(entry) if worktree_dirty(entry) => candidates.push(raw),
+            Some(_) | None => dropped.push(crate::model::display_name(&raw)),
+        }
+    }
+    if candidates.is_empty() {
+        return Err(ProbeError::new(
+            "discard_nothing",
+            "None of the selected files have work-tree changes to discard.",
+        ));
+    }
+    let nonce = state.stage_preview(Preview {
+        work_root,
+        kind: PreviewKind::Discard,
+        paths: candidates.clone(),
+    });
+    Ok(PreviewResult {
+        nonce,
+        candidates: candidates
+            .iter()
+            .map(|raw| crate::model::display_name(raw))
+            .collect(),
+        dropped,
+        snapshot,
+    })
+}
+
+pub(crate) fn discard_files(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    nonce: String,
+) -> Result<OperationResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_discard(state, sessions, &nonce);
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+/// Assumes the queue slot is held; tests call this directly. The nonce is
+/// consumed either way; a candidate-set mismatch refuses the write and tells
+/// the UI to preview again (plan/04: 候选集变化即拒绝重确认).
+pub(crate) fn run_discard(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    nonce: &str,
+) -> Result<OperationResult, ProbeError> {
+    let mut outcome = Outcome::Success;
+    let mut exit_code = None;
+    let message;
+    let mut details = None;
+    let Some(preview) = state.take_preview(nonce, PreviewKind::Discard) else {
+        let snapshot = session::refresh(sessions)?;
+        return Ok(OperationResult {
+            operation_id: 0,
+            kind: OperationKind::Discard,
+            outcome: Outcome::Rejected,
+            exit_code: None,
+            message: "That confirmation has expired; preview the discard again.".into(),
+            details: None,
+            snapshot,
+        });
+    };
+    let same_repo = sessions
+        .current_identity()
+        .is_some_and(|identity| identity.work_root.as_deref() == Some(preview.work_root.as_path()));
+    if !same_repo {
+        outcome = Outcome::Rejected;
+        message = "The repository session changed after the preview; nothing was discarded.".into();
+    } else if !restore_supported(&preview.work_root) {
+        outcome = Outcome::Rejected;
+        message = "This Git is too old for discarding; guit needs git restore (2.23+).".into();
+    } else {
+        match status_index(sessions) {
+            Err(error) => return Err(error),
+            Ok(entries) => {
+                let unchanged = preview
+                    .paths
+                    .iter()
+                    .all(|raw| entries.get(raw).is_some_and(worktree_dirty));
+                if !unchanged {
+                    outcome = Outcome::Rejected;
+                    message =
+                        "Files changed after the preview; nothing was discarded. Confirm again."
+                            .into();
+                } else if state.cancelled.load(Ordering::SeqCst) {
+                    outcome = Outcome::Cancelled;
+                    message = "Cancelled before Git ran.".into();
+                } else {
+                    match run_git_paths(
+                        &preview.work_root,
+                        &["restore", "--worktree"],
+                        &preview.paths,
+                        &state.cancelled,
+                    ) {
+                        Ok(output) => {
+                            exit_code = output.status.code();
+                            if output.status.success() && !output.truncated {
+                                message = format!(
+                                    "Discarded work-tree changes in {} file(s).",
+                                    preview.paths.len()
+                                );
+                            } else {
+                                outcome = Outcome::Failed;
+                                message = "restore reported a failure.".into();
+                                details = Some(first_stderr_line(&output.stderr));
+                            }
+                        }
+                        Err(error) if error.code == "process_cancelled" => {
+                            outcome = Outcome::Cancelled;
+                            message = "Cancelled while the Git process was running.".into();
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
+    }
+    let snapshot = session::refresh(sessions)?;
+    Ok(OperationResult {
+        operation_id: 0,
+        kind: OperationKind::Discard,
+        outcome,
+        exit_code,
+        message,
+        details,
+        snapshot,
+    })
+}
+
+/// Fresh porcelain-v2 read keyed by raw path bytes, used to recompute
+/// destructive candidates independently of any client state.
+fn status_index(
+    sessions: &session::SessionState,
+) -> Result<BTreeMap<Vec<u8>, StatusEntry>, ProbeError> {
+    let identity = sessions
+        .current_identity()
+        .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
+    let raw = repo::status_output(&identity, true)?;
+    let parsed = status::parse(&raw)?;
+    Ok(parsed
+        .entries
+        .into_iter()
+        .map(|entry| (entry.raw_path().clone(), entry))
+        .collect())
+}
+
+fn worktree_dirty(entry: &StatusEntry) -> bool {
+    match entry {
+        StatusEntry::Tracked(entry) => entry.worktree_status != '.',
+        StatusEntry::Rename(entry) => entry.tracked.worktree_status != '.',
+        StatusEntry::Unmerged(_) | StatusEntry::Untracked { .. } => false,
+    }
 }
 
 /// Cheap pre-flight for restore-based operations: `git --version` parsed with
@@ -961,6 +1223,172 @@ mod tests {
             std::fs::read_to_string(root.join("新 文件.txt")).unwrap(),
             "new\n",
             "unstage must never delete content"
+        );
+    }
+
+    /// Repository with one base commit containing `files` at their committed
+    /// content, so discard tests start from tracked-clean state.
+    fn repo_with_base(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let repository = init_repo();
+        let root = repository.path().to_path_buf();
+        for (name, content) in files {
+            std::fs::write(root.join(name), content).unwrap();
+            repo::git_with(&root, COMMIT_ID, &["add", "--", name]);
+        }
+        repo::git_with(&root, COMMIT_ID, &["commit", "-q", "-m", "base"]);
+        repository
+    }
+
+    fn file_state(view: &session::SnapshotView, display: &str) -> (String, String) {
+        view.files
+            .iter()
+            .find(|file| file.display == display)
+            .map(|file| (file.index_status.clone(), file.worktree_status.clone()))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn discard_round_trip_restores_only_the_worktree_side() {
+        let repository = repo_with_base(&[("a.txt", "one\n")]);
+        let root = repository.path();
+        // Staged change followed by a further work-tree edit: discard must
+        // revert the work tree to the INDEX version, keeping the staged entry.
+        std::fs::write(root.join("a.txt"), "staged\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+        std::fs::write(root.join("a.txt"), "unstaged\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let preview =
+            preview_discard(&writes, &sessions, view.version, &[file_id(&view, "a.txt")]).unwrap();
+        assert_eq!(preview.candidates, vec!["a.txt".to_string()]);
+        assert!(preview.dropped.is_empty());
+
+        let result = discard_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(
+            (result.outcome, result.kind, result.exit_code),
+            (Outcome::Success, OperationKind::Discard, Some(0))
+        );
+        assert_eq!(result.operation_id, 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "staged\n",
+            "restore --worktree reverts to the index, not HEAD"
+        );
+        let snapshot = result.snapshot.expect("state re-read after discard");
+        assert_eq!(file_state(&snapshot, "a.txt"), ("M".into(), ".".into()));
+    }
+
+    #[test]
+    fn discard_refuses_when_a_candidate_changed_after_the_preview() {
+        let repository = repo_with_base(&[("a.txt", "one\n"), ("b.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("a.txt"), "a dirty\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b dirty\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let ids = vec![file_id(&view, "a.txt"), file_id(&view, "b.txt")];
+        let preview = preview_discard(&writes, &sessions, view.version, &ids).unwrap();
+        assert_eq!(preview.candidates.len(), 2);
+
+        // Outside influence cleans one candidate before the confirm click.
+        repo::git_with(root, &[], &["restore", "--worktree", "--", "a.txt"]);
+        let result = discard_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected);
+        assert!(result.message.contains("changed after the preview"));
+        assert_eq!(result.exit_code, None, "Git never ran for the batch");
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.txt")).unwrap(),
+            "b dirty\n",
+            "a refused confirmation must not discard anything"
+        );
+        let snapshot = result.snapshot.expect("re-read");
+        assert_eq!(file_state(&snapshot, "b.txt"), (".".into(), "M".into()));
+    }
+
+    #[test]
+    fn discard_nonce_is_consumed_by_the_first_confirmation() {
+        let repository = repo_with_base(&[("a.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("a.txt"), "a dirty\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let preview =
+            preview_discard(&writes, &sessions, view.version, &[file_id(&view, "a.txt")]).unwrap();
+
+        let first = discard_files(&writes, &sessions, preview.nonce.clone()).unwrap();
+        assert_eq!(first.outcome, Outcome::Success);
+        let snapshot = first.snapshot.expect("re-read");
+        assert_eq!(
+            file_state(&snapshot, "a.txt"),
+            (String::new(), String::new())
+        );
+
+        // Replaying the same nonce cannot re-run the discard.
+        let replay = discard_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(replay.outcome, Outcome::Rejected);
+        assert!(replay.message.contains("expired"));
+        std::fs::write(root.join("a.txt"), "a dirty again\n").unwrap();
+        let after_replay = session::refresh(&sessions).unwrap().expect("session");
+        assert_eq!(file_state(&after_replay, "a.txt"), (".".into(), "M".into()));
+    }
+
+    #[test]
+    fn discard_preview_refuses_untracked_files_before_touching_anything() {
+        let repository = repo_with_base(&[("a.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("a.txt"), "a dirty\n").unwrap();
+        std::fs::write(root.join("u.txt"), "untracked\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let ids = vec![file_id(&view, "a.txt"), file_id(&view, "u.txt")];
+        let error = preview_discard(&writes, &sessions, view.version, &ids).unwrap_err();
+        assert_eq!(error.code, "discard_untracked");
+        // The refusal happens before staging a ticket or running Git.
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "a dirty\n"
+        );
+        assert!(writes.take_preview("any", PreviewKind::Discard).is_none());
+    }
+
+    #[test]
+    fn staged_only_changes_are_dropped_from_the_discard_candidate_set() {
+        let repository = repo_with_base(&[("a.txt", "one\n"), ("b.txt", "one\n")]);
+        let root = repository.path();
+        // a.txt: staged only (clean work tree); b.txt: work-tree dirty.
+        std::fs::write(root.join("a.txt"), "staged\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+        std::fs::write(root.join("b.txt"), "b dirty\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let ids = vec![file_id(&view, "a.txt"), file_id(&view, "b.txt")];
+        let preview = preview_discard(&writes, &sessions, view.version, &ids).unwrap();
+        assert_eq!(preview.candidates, vec!["b.txt".to_string()]);
+        assert_eq!(preview.dropped, vec!["a.txt".to_string()]);
+
+        let result = discard_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success);
+        let snapshot = result.snapshot.expect("re-read");
+        // Only b.txt was restored; a.txt keeps its staged index entry.
+        assert_eq!(file_state(&snapshot, "a.txt"), ("M".into(), ".".into()));
+        assert_eq!(
+            file_state(&snapshot, "b.txt"),
+            (String::new(), String::new())
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "staged\n",
+            "discard never touches the index side"
         );
     }
 }

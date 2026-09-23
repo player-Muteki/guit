@@ -107,6 +107,9 @@ fn close_repository(
     state: State<'_, session::SessionState>,
 ) -> Result<(), ProbeError> {
     session::close(&state);
+    // Pending discard/clean tickets belong to the closed snapshot; drop them
+    // so a reopen cannot reuse a nonce that referred to the previous session.
+    app.state::<write::WriteState>().clear_previews();
     // Close first: any in-flight watcher refresh then sees no session and the
     // supervisor exits on its own without emitting a stale snapshot.
     watch::stop(&app);
@@ -433,6 +436,35 @@ fn cancel_write(state: State<'_, write::WriteState>) {
 }
 
 #[tauri::command]
+async fn preview_discard(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    file_ids: Vec<u32>,
+) -> Result<write::PreviewResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        write::preview_discard(&state, &sessions, snapshot_version, &file_ids)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn discard_files(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        write::discard_files(&state, &sessions, nonce)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
 async fn open_external_tool(
     app: tauri::AppHandle,
     snapshot_version: u64,
@@ -485,6 +517,8 @@ fn main() {
             unstage_files,
             commit_changes,
             cancel_write,
+            preview_discard,
+            discard_files,
             open_external_tool,
             cancel_exttool
         ])

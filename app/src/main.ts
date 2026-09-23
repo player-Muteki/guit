@@ -75,12 +75,19 @@ type CloneResult = {
 
 type OperationResult = {
   operationId: number;
-  kind: "stage" | "unstage" | "commit";
+  kind: "stage" | "unstage" | "commit" | "discard";
   outcome: "success" | "failed" | "cancelled" | "rejected";
   exitCode: number | null;
   message: string;
   details: string | null;
   snapshot: SnapshotView | null;
+};
+
+type PreviewResult = {
+  nonce: string;
+  candidates: string[];
+  dropped: string[];
+  snapshot: SnapshotView;
 };
 
 type ToolPurpose = "openFile" | "diffWorktree" | "diffStaged";
@@ -123,6 +130,15 @@ app.innerHTML = `
       <div id="file-virtual" class="virtual"><div id="file-rows" class="virtual-rows"></div></div>
     </div>
     <p id="write-status" role="status"></p>
+    <div id="discard-preview" class="preview" role="alertdialog" aria-label="Confirm discard" hidden>
+      <p class="preview-warning">Discarding reverts these files to the index or HEAD. The uncommitted work-tree changes cannot be recovered.</p>
+      <ul id="discard-candidates" class="preview-list"></ul>
+      <p id="discard-dropped" class="preview-note" hidden></p>
+      <div class="actions">
+        <button id="discard-confirm" class="danger">Discard</button>
+        <button id="discard-keep">Keep changes</button>
+      </div>
+    </div>
     <div class="actions"><button id="tool-cancel" disabled>Stop external tool</button></div>
     <h2>Commit</h2>
     <div class="commit-box">
@@ -192,6 +208,11 @@ const commitAmend = document.querySelector<HTMLInputElement>("#commit-amend")!;
 const commitButton = document.querySelector<HTMLButtonElement>("#commit-button")!;
 const commitCancelButton = document.querySelector<HTMLButtonElement>("#commit-cancel")!;
 const toolCancelButton = document.querySelector<HTMLButtonElement>("#tool-cancel")!;
+const discardPanel = document.querySelector<HTMLElement>("#discard-preview")!;
+const discardCandidates = document.querySelector<HTMLElement>("#discard-candidates")!;
+const discardDropped = document.querySelector<HTMLElement>("#discard-dropped")!;
+const discardConfirmButton = document.querySelector<HTMLButtonElement>("#discard-confirm")!;
+const discardKeepButton = document.querySelector<HTMLButtonElement>("#discard-keep")!;
 
 const ROW_HEIGHT = 30;
 const OVERSCAN = 6;
@@ -213,6 +234,9 @@ function applySnapshot(snapshot: SnapshotView | null): void {
   }
   currentSnapshot = snapshot;
   renderSnapshot(snapshot);
+  // An open discard panel is bound to the snapshot that produced it; a
+  // newer snapshot invalidates its file IDs, so recompute the preview.
+  if (snapshot) void renewDiscardPreview();
 }
 
 async function refreshSession(silent: boolean): Promise<void> {
@@ -254,6 +278,7 @@ function renderSnapshot(snapshot: SnapshotView | null): void {
   if (!snapshot) {
     commitMessage.value = "";
     commitAmend.checked = false;
+    closeDiscardPreview();
     recentList.replaceChildren();
     renderRecentPlaceholder("None yet.");
     renderFilesPlaceholder("Open a repository to list its working copy status.");
@@ -386,6 +411,22 @@ function createRow(row: ListRow, index: number): HTMLElement {
       });
       element.append(button);
     }
+    if (row.group === "worktree") {
+      const discardAll = document.createElement("button");
+      discardAll.className = "row-action batch danger";
+      discardAll.textContent = "Discard all";
+      discardAll.disabled = writeRunning || pendingDiscard !== null;
+      discardAll.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const ids = currentFiles
+          .filter((file) => file.group === "worktree" && discardEligible(file))
+          .map((file) => file.id);
+        if (ids.length > 0) {
+          void requestDiscard(ids);
+        }
+      });
+      element.append(discardAll);
+    }
     return element;
   }
   const selected = index === selectedRow;
@@ -411,6 +452,18 @@ function createRow(row: ListRow, index: number): HTMLElement {
     button.addEventListener("click", () =>
       void runWrite(action === "stage" ? "stage_files" : "unstage_files", [file.id]),
     );
+    element.append(button);
+  }
+  if (discardEligible(file)) {
+    const button = document.createElement("button");
+    button.className = "row-action danger";
+    button.textContent = "Discard";
+    button.setAttribute("aria-label", `Discard ${file.display}`);
+    button.disabled = writeRunning || pendingDiscard !== null;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void requestDiscard([file.id]);
+    });
     element.append(button);
   }
   const toolActions: Array<{ label: string; purpose: ToolPurpose }> = [
@@ -482,6 +535,8 @@ function syncCommitControls(): void {
   commitButton.disabled = locked;
   commitCancelButton.disabled = !writeRunning;
   toolCancelButton.disabled = !toolRunning;
+  discardConfirmButton.disabled = writeRunning || pendingDiscard === null;
+  discardKeepButton.disabled = writeRunning;
 }
 
 // A difftool call stays pending until the user closes the diff window, so
@@ -561,6 +616,129 @@ commitMessage.addEventListener("keydown", (event) => {
   }
 });
 
+// --- discard: preview → recheck → confirm (plan/04 破坏性动作协议) ---
+
+let pendingDiscard: { names: string[]; dropped: string[]; nonce: string } | null = null;
+let discardRenewing = false;
+
+function discardEligible(file: FileView): boolean {
+  // Untracked files go through clean (M2-06); conflicts through mergetool
+  // (M4); only work-tree-side changes can be discarded.
+  return file.unstaged && !file.conflict && !file.untracked;
+}
+
+function renderDiscardPanel(): void {
+  if (!pendingDiscard) {
+    discardPanel.hidden = true;
+    return;
+  }
+  discardPanel.hidden = false;
+  discardCandidates.replaceChildren(
+    ...pendingDiscard.names.map((name) => {
+      const item = document.createElement("li");
+      item.textContent = name;
+      return item;
+    }),
+  );
+  discardDropped.hidden = pendingDiscard.dropped.length === 0;
+  discardDropped.textContent = `Skipped (no work-tree changes): ${pendingDiscard.dropped.join(", ")}`;
+  syncCommitControls();
+}
+
+async function requestDiscard(fileIds: number[]): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingDiscard) return;
+  writeStatus.textContent = "Checking what a discard would revert…";
+  try {
+    const preview = await invoke<PreviewResult>("preview_discard", {
+      snapshotVersion: currentSnapshot.version,
+      fileIds,
+    });
+    // Apply the backend's re-read first (it published a newer version);
+    // with no pending discard the renew hook stays quiet.
+    applySnapshot(preview.snapshot);
+    pendingDiscard = { names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
+    renderDiscardPanel();
+    discardConfirmButton.focus();
+  } catch (error) {
+    showError(error);
+    writeStatus.textContent = "The discard was refused before anything changed.";
+  }
+}
+
+// The backend consumes the nonce and re-verifies the candidate set itself;
+// this only recomputes file IDs against the newest snapshot, because IDs are
+// per-snapshot. A candidate that vanished or multiplied forces a fresh
+// preview instead of guessing which file the old ID pointed at.
+async function renewDiscardPreview(): Promise<void> {
+  if (!pendingDiscard || discardRenewing || !currentSnapshot) return;
+  const ids: number[] = [];
+  for (const name of pendingDiscard.names) {
+    const matches = currentFiles.filter((file) => file.display === name && discardEligible(file));
+    if (matches.length !== 1) {
+      closeDiscardPreview("The changed files moved after the preview; ask for the discard again.");
+      return;
+    }
+    ids.push(matches[0].id);
+  }
+  discardRenewing = true;
+  try {
+    const preview = await invoke<PreviewResult>("preview_discard", {
+      snapshotVersion: currentSnapshot.version,
+      fileIds: ids,
+    });
+    pendingDiscard = { names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
+    // The preview re-read Git and published a newer version; adopting it
+    // would re-enter this function, which the flag above keeps suppressed.
+    applySnapshot(preview.snapshot);
+    renderDiscardPanel();
+    writeStatus.textContent = "The status changed; the discard preview was recomputed.";
+  } catch (error) {
+    closeDiscardPreview();
+    showError(error);
+    writeStatus.textContent = "The discard preview is no longer valid.";
+  } finally {
+    discardRenewing = false;
+  }
+}
+
+function closeDiscardPreview(message?: string): void {
+  pendingDiscard = null;
+  renderDiscardPanel();
+  if (message) writeStatus.textContent = message;
+}
+
+async function confirmDiscard(): Promise<void> {
+  if (!pendingDiscard || writeRunning) return;
+  const nonce = pendingDiscard.nonce;
+  writeRunning = true;
+  syncCommitControls();
+  renderFileRows();
+  writeStatus.textContent = "Discarding work-tree changes…";
+  try {
+    const result = await invoke<OperationResult>("discard_files", { nonce });
+    // Consume the panel before applying the snapshot so the version guard
+    // does not schedule a renew for a discard that already ran.
+    pendingDiscard = null;
+    renderDiscardPanel();
+    applySnapshot(result.snapshot);
+    writeStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+  } catch (error) {
+    showError(error);
+    writeStatus.textContent = "The discard did not run.";
+  } finally {
+    writeRunning = false;
+    syncCommitControls();
+    renderFileRows();
+  }
+}
+
+discardConfirmButton.addEventListener("click", () => void confirmDiscard());
+discardKeepButton.addEventListener("click", () =>
+  closeDiscardPreview("Discard cancelled; nothing was reverted."),
+);
+
 function toggleGroup(group: FileGroupKey): void {
   if (collapsedGroups.has(group)) collapsedGroups.delete(group);
   else collapsedGroups.add(group);
@@ -622,6 +800,9 @@ fileScroll.addEventListener("keydown", (event) => {
 
 async function openRepository(path: string): Promise<void> {
   openRepoButton.disabled = true;
+  // A pending discard ticket belongs to the closing session; the backend
+  // would refuse it anyway, so drop the panel up front.
+  closeDiscardPreview();
   try {
     const snapshot = await invoke<SnapshotView>("open_repository", { path });
     currentSnapshot = snapshot;
