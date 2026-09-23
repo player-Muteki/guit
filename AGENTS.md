@@ -28,4 +28,4 @@ These instructions apply to the repository root and all subdirectories. Before s
 - Run the most relevant unit or temporary-repository integration tests first, followed by any necessary cross-platform checks. Use `plan/07-quality-release.md` and the relevant milestone exit criteria for acceptance.
 - For platform-sensitive behavior such as paths, conflicts, authentication, cancellation, and external tools, record the test environment and identify platforms that remain unverified. Do not describe single-platform results as validated on all three platforms.
 - Use isolated Git configuration and temporary repositories for tests; do not change the user's global Git configuration for convenience.
-- Do not create commits, reset the repository, or clean up user files unless the user explicitly requests it.
+- Do not reset the repository or clean up user files unless the user explicitly requests it. Standing instruction (2026-09-23): after completing each subtask of a milestone (a checked item in `plan/08-task-backlog.md`), create one commit for that subtask; other commits still require an explicit user request.
