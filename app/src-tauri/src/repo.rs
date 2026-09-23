@@ -11,6 +11,8 @@ pub struct RepoIdentity {
     pub candidate: PathBuf,
     pub work_root: Option<PathBuf>,
     pub git_dir: PathBuf,
+    /// Read by the filesystem watcher (M1-07) and write paths later.
+    #[allow(dead_code)]
     pub common_dir: PathBuf,
     pub is_bare: bool,
     pub linked_worktree: bool,
@@ -186,10 +188,36 @@ pub fn status_output(identity: &RepoIdentity, untracked: bool) -> Result<Vec<u8>
     Ok(output.stdout)
 }
 
+/// Runs an isolated Git command for tests and asserts success. Global `-c`
+/// overrides must go through `pre`: they precede the subcommand.
+#[cfg(test)]
+pub(crate) fn git_with(dir: &Path, pre: &[&str], args: &[&str]) {
+    let status = Command::new("git")
+        .arg("-c")
+        .arg("core.autocrlf=false")
+        .args(pre)
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/nonexistent-guit-test-config")
+        .env("GIT_AUTHOR_NAME", "guit test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "guit test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("git");
+    assert!(status.success(), "git {pre:?} {args:?} failed");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Stdio;
 
     fn git_raw(dir: &Path, args: &[&str]) {
         git_with(dir, &[], args)
@@ -206,30 +234,6 @@ mod tests {
             ],
             &["init", "--quiet"],
         );
-    }
-
-    fn git_with(dir: &Path, pre: &[&str], args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-c")
-            .arg("core.autocrlf=false")
-            .args(pre)
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/nonexistent-guit-test-config")
-            .env("GIT_AUTHOR_NAME", "guit test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-            .env("GIT_COMMITTER_NAME", "guit test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("git");
-        assert!(status.success(), "git {pre:?} {args:?} failed");
     }
 
     fn init_bare(dir: &Path) {

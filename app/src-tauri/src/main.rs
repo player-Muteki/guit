@@ -4,6 +4,7 @@ mod model;
 mod probe;
 mod repo;
 mod runner;
+mod session;
 mod status;
 mod util;
 
@@ -16,6 +17,77 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 struct ProbeState {
     cancelled: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
+}
+
+#[tauri::command]
+async fn open_repository(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<session::SnapshotView, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<session::SessionState>();
+        let snapshot = session::open(&state, std::path::Path::new(&path))?;
+        // Recent/session bookkeeping must not undo a successful open.
+        match app_config_dir(&app) {
+            Ok(directory) => {
+                if let Err(error) = session::record_recent(&directory, &path) {
+                    eprintln!("guit [{}]: recent list not updated", error.code);
+                }
+                if let Err(error) = session::record_session(&directory, &path) {
+                    eprintln!("guit [{}]: session not saved", error.code);
+                }
+            }
+            Err(error) => eprintln!("guit [{}]: session not saved", error.code),
+        }
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn restore_repository(
+    app: tauri::AppHandle,
+) -> Result<Option<session::SnapshotView>, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<session::SessionState>();
+        if state.current_identity().is_some() {
+            return session::restore(&state);
+        }
+        let directory = app_config_dir(&app)?;
+        let Some(path) = session::read_session(&directory)? else {
+            return Ok(None);
+        };
+        match session::open(&state, std::path::Path::new(&path)) {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(error)
+                if matches!(
+                    error.code,
+                    "repo_path_missing" | "not_a_repository" | "repo_worktree_missing"
+                ) =>
+            {
+                session::clear_session(&directory)?;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+fn close_repository(
+    app: tauri::AppHandle,
+    state: State<'_, session::SessionState>,
+) -> Result<(), ProbeError> {
+    session::close(&state);
+    session::clear_session(&app_config_dir(&app)?)
+}
+
+#[tauri::command]
+fn list_recent_repositories(app: tauri::AppHandle) -> Result<Vec<String>, ProbeError> {
+    session::read_recent(&app_config_dir(&app)?)
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -40,11 +112,14 @@ fn settings_version() -> u32 {
     1
 }
 
-fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, ProbeError> {
+fn app_config_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, ProbeError> {
     app.path()
         .app_config_dir()
-        .map(|path| path.join("window.json"))
         .map_err(|error| ProbeError::new("settings_path_failed", error.to_string()))
+}
+
+fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, ProbeError> {
+    Ok(app_config_dir(app)?.join("window.json"))
 }
 
 #[tauri::command]
@@ -240,6 +315,7 @@ fn main() {
             cancelled: Arc::new(AtomicBool::new(false)),
             running: Arc::new(AtomicBool::new(false)),
         })
+        .manage(session::SessionState::default())
         .invoke_handler(tauri::generate_handler![
             probe_git,
             probe_external_tools,
@@ -248,7 +324,11 @@ fn main() {
             cancel_process_probe,
             save_window_settings,
             load_window_settings,
-            restore_window_settings
+            restore_window_settings,
+            open_repository,
+            restore_repository,
+            close_repository,
+            list_recent_repositories
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

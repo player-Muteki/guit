@@ -14,4 +14,13 @@ button { padding: .5rem .85rem; color: inherit; background: #304d77; border: 1px
 button:disabled { opacity: .45; cursor: default; }
 button:focus-visible, input:focus-visible { outline: 2px solid #8cc7ff; outline-offset: 2px; }
 #error { margin: 1rem; padding: .8rem; border: 1px solid #a65858; border-radius: .35rem; color: #ffd4d4; }
+.session { color: #aeb9ca; margin: 0 0 .75rem; overflow-wrap: anywhere; }
+.session > div { margin: .15rem 0; }
+ul.recent, ul.files { margin: 0; padding: 0; list-style: none; }
+ul.recent { display: flex; flex-direction: column; gap: .3rem; margin-bottom: 1rem; }
+button.recent-entry { padding: .35rem .6rem; background: transparent; border-color: #343c49; text-align: left; overflow-wrap: anywhere; }
+ul.files { display: flex; flex-direction: column; gap: .15rem; }
+ul.files li { display: flex; gap: .5rem; align-items: baseline; overflow-wrap: anywhere; }
+ul.files .group-heading { color: #aeb9ca; font-weight: 600; margin-top: .5rem; }
+.file-status { font-family: monospace; color: #8cc7ff; min-width: 2.5ch; }
 @media (max-width: 480px) { header { display: block; } header span { display: block; margin-top: .3rem; } dl { grid-template-columns: 1fr; gap: .25rem; } dd { margin-bottom: .75rem; } }

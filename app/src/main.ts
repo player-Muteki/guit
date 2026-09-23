@@ -31,14 +31,63 @@ type WindowSettings = {
   maximized: boolean;
 };
 
+type RepoView = {
+  openPath: string;
+  root: string | null;
+  gitDir: string;
+  bare: boolean;
+  linkedWorktree: boolean;
+};
+
+type BranchView = {
+  name: string | null;
+  headState: "branch" | "detached" | "unborn";
+  oid: string | null;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
+};
+
+type FileView = {
+  id: number;
+  display: string;
+  renameFrom: string | null;
+  group: "conflict" | "staged" | "worktree" | "untracked";
+  indexStatus: string;
+  worktreeStatus: string;
+  staged: boolean;
+  unstaged: boolean;
+  conflict: boolean;
+  untracked: boolean;
+  submodule: boolean;
+};
+
+type SnapshotView = {
+  repo: RepoView;
+  branch: BranchView | null;
+  files: FileView[];
+};
+
 const app = document.querySelector<HTMLElement>("#app");
 if (!app) throw new Error("Application root is missing");
 
 app.innerHTML = `
-  <header><strong>guit</strong><span>Git desktop client · M0 platform probe</span></header>
+  <header><strong>guit</strong><span>Git desktop client · read-only workbench</span></header>
+  <section class="card">
+    <h1>Repository</h1>
+    <div id="repo-summary" class="session">No repository open. Choose a folder that is inside a Git working copy.</div>
+    <div class="actions">
+      <button id="open-repo">Open repository…</button>
+      <button id="close-repo" disabled>Close session</button>
+    </div>
+    <h2>Recent</h2>
+    <ul id="recent-list" class="recent"><li>None yet.</li></ul>
+    <h2>Changes</h2>
+    <ul id="file-list" class="files"><li>Open a repository to list its working copy status.</li></ul>
+  </section>
   <section class="card">
     <h1>Environment check</h1>
-    <p>This first milestone checks the desktop shell and installed Git. Repository operations arrive in M1.</p>
+    <p>M0 probes kept for regression checking; repository work happens in the card above.</p>
     <dl>
       <dt>Git</dt><dd id="git-result">Checking…</dd>
       <dt>External tools</dt><dd id="tools-result">Checking…</dd>
@@ -79,6 +128,152 @@ let saveQueue = Promise.resolve();
 let previousSize: LogicalSize | undefined;
 let previouslyMaximized = false;
 let lastNormalBounds: Pick<WindowSettings, "width" | "height" | "frameWidth" | "frameHeight" | "x" | "y"> | undefined;
+
+const repoSummary = document.querySelector<HTMLElement>("#repo-summary")!;
+const recentList = document.querySelector<HTMLElement>("#recent-list")!;
+const fileList = document.querySelector<HTMLElement>("#file-list")!;
+const openRepoButton = document.querySelector<HTMLButtonElement>("#open-repo")!;
+const closeRepoButton = document.querySelector<HTMLButtonElement>("#close-repo")!;
+let sessionActive = false;
+let currentSnapshot: SnapshotView | null = null;
+
+function describeBranch(branch: BranchView | null): string {
+  if (!branch) return "bare repository — status unavailable";
+  if (branch.headState === "detached") {
+    return `detached HEAD at ${branch.oid?.slice(0, 8) ?? "unknown"}`;
+  }
+  const name = branch.name ?? "unknown";
+  if (branch.headState === "unborn") return `${name} (no commits yet)`;
+  if (!branch.upstream) return name;
+  return `${name} · ${branch.upstream} ↑${branch.ahead} ↓${branch.behind}`;
+}
+
+function renderSnapshot(snapshot: SnapshotView | null): void {
+  sessionActive = snapshot !== null;
+  closeRepoButton.disabled = !sessionActive;
+  repoSummary.textContent = "";
+  if (!snapshot) {
+    recentList.replaceChildren();
+    renderRecentPlaceholder("None yet.");
+    fileList.replaceChildren();
+    renderFilesPlaceholder();
+    return;
+  }
+  const addLine = (label: string, value: string) => {
+    const line = document.createElement("div");
+    const strong = document.createElement("strong");
+    strong.textContent = label;
+    line.append(strong, document.createTextNode(value));
+    repoSummary.append(line);
+  };
+  addLine("Branch: ", describeBranch(snapshot.branch));
+  addLine("Path: ", snapshot.repo.root ?? snapshot.repo.gitDir);
+  if (snapshot.repo.linkedWorktree) addLine("", "Linked worktree");
+  renderFileGroups(snapshot.files);
+}
+
+function renderRecentPlaceholder(message: string): void {
+  const item = document.createElement("li");
+  item.textContent = message;
+  recentList.replaceChildren(item);
+}
+
+function renderFilesPlaceholder(): void {
+  const item = document.createElement("li");
+  item.textContent = "Open a repository to list its working copy status.";
+  fileList.replaceChildren(item);
+}
+
+function renderRecent(paths: string[]): void {
+  if (paths.length === 0) {
+    renderRecentPlaceholder("None yet.");
+    return;
+  }
+  const items = paths.map((path) => {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.className = "recent-entry";
+    button.textContent = path;
+    button.addEventListener("click", () => void openRepository(path));
+    item.append(button);
+    return item;
+  });
+  recentList.replaceChildren(...items);
+}
+
+function renderFileGroups(files: FileView[]): void {
+  if (files.length === 0) {
+    const item = document.createElement("li");
+    item.textContent = "Working copy is clean.";
+    fileList.replaceChildren(item);
+    return;
+  }
+  const groups: Array<{ key: FileView["group"]; label: string }> = [
+    { key: "conflict", label: "Conflicts" },
+    { key: "staged", label: "Staged changes" },
+    { key: "worktree", label: "Changes" },
+    { key: "untracked", label: "Untracked files" },
+  ];
+  const items: HTMLElement[] = [];
+  for (const group of groups) {
+    const members = files.filter((file) => file.group === group.key);
+    if (members.length === 0) continue;
+    const heading = document.createElement("li");
+    heading.className = "group-heading";
+    heading.textContent = `${group.label} (${members.length})`;
+    items.push(heading);
+    for (const file of members) {
+      const item = document.createElement("li");
+      item.dataset.fileId = String(file.id);
+      const status = document.createElement("span");
+      status.className = "file-status";
+      status.textContent = `${file.indexStatus}${file.worktreeStatus}`;
+      const name = document.createElement("span");
+      name.textContent = file.renameFrom
+        ? `${file.renameFrom} → ${file.display}`
+        : file.display;
+      item.append(status, name);
+      items.push(item);
+    }
+  }
+  fileList.replaceChildren(...items);
+}
+
+async function openRepository(path: string): Promise<void> {
+  openRepoButton.disabled = true;
+  try {
+    const snapshot = await invoke<SnapshotView>("open_repository", { path });
+    currentSnapshot = snapshot;
+    renderSnapshot(snapshot);
+    renderRecent(await invoke<string[]>("list_recent_repositories"));
+  } catch (error) {
+    showError(error);
+    // The backend keeps the previous session untouched; redraw it unchanged.
+    renderSnapshot(currentSnapshot);
+  } finally {
+    openRepoButton.disabled = false;
+  }
+}
+
+openRepoButton.addEventListener("click", async () => {
+  try {
+    const selected = await open({ directory: true, multiple: false });
+    if (typeof selected === "string") await openRepository(selected);
+  } catch (error) {
+    showError(error);
+  }
+});
+
+closeRepoButton.addEventListener("click", async () => {
+  try {
+    await invoke("close_repository");
+    currentSnapshot = null;
+    renderSnapshot(null);
+  } catch (error) {
+    showError(error);
+  }
+});
+
 
 function saveWindowSettings(): Promise<void> {
   saveQueue = saveQueue.then(persistWindowSettings);
@@ -246,6 +441,14 @@ transferProbe.addEventListener("click", async () => {
 });
 
 void (async () => {
+  try {
+    const restored = await invoke<SnapshotView | null>("restore_repository");
+    currentSnapshot = restored;
+    renderSnapshot(restored);
+    renderRecent(await invoke<string[]>("list_recent_repositories"));
+  } catch (error) {
+    showError(error);
+  }
   try {
     const settings = await invoke<WindowSettings | null>("restore_window_settings");
     onTop.checked = settings?.alwaysOnTop ?? false;
