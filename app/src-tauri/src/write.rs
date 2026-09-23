@@ -9,12 +9,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-/// What a stored confirmation permits. Clean arrives with M2-06 and shares
-/// the same one-time ticket machinery.
+/// What a stored confirmation permits. Discard reverts tracked work-tree
+/// edits; Clean removes untracked items. Both share the one-time ticket flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewKind {
     Discard,
-    #[allow(dead_code)]
     Clean,
 }
 
@@ -109,17 +108,19 @@ pub enum OperationKind {
     Unstage,
     Commit,
     Discard,
+    Clean,
 }
 
 impl OperationKind {
     /// Git argument prefix plus the past-tense verb for the result message.
-    /// Commit and discard run through their own runners, never this plan.
+    /// Commit, discard and clean run through their own runners, never this plan.
     fn plan(self) -> (&'static [&'static str], &'static str) {
         match self {
             OperationKind::Stage => (&["add"], "Staged"),
             OperationKind::Unstage => (&["restore", "--staged"], "Unstaged"),
             OperationKind::Commit => (&[], "Committed"),
             OperationKind::Discard => (&["restore", "--worktree"], "Discarded"),
+            OperationKind::Clean => (&[], "Cleaned"),
         }
     }
 
@@ -544,6 +545,184 @@ fn worktree_dirty(entry: &StatusEntry) -> bool {
         StatusEntry::Rename(entry) => entry.tracked.worktree_status != '.',
         StatusEntry::Unmerged(_) | StatusEntry::Untracked { .. } => false,
     }
+}
+
+/// `git clean` rejects `-z`, so candidates come from `git clean -nd` lines,
+/// which read "Would remove <path>" under `LC_ALL=C` (a directory entry ends
+/// in `/`, reported as the directory itself). A line that does not parse is
+/// an error, never a silently skipped item — a broken listing must not read
+/// as "nothing to clean" (AGENTS: 绝不把解析失败呈现为干净仓库).
+fn clean_candidates(work_root: &Path) -> Result<Vec<(Vec<u8>, bool)>, ProbeError> {
+    let mut command = repo::user_git_command(work_root);
+    command.args(["clean", "-nd"]);
+    let output = runner::run_with_limit(
+        command,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+        Duration::from_secs(60),
+        runner::DEFAULT_OUTPUT_LIMIT,
+        |_, _| {},
+    )?;
+    if !output.status.success() || output.truncated {
+        return Err(ProbeError::new(
+            "clean_preview_failed",
+            "git clean could not list the untracked files.",
+        ));
+    }
+    let mut candidates = Vec::new();
+    for line in output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let Some(rest) = line.strip_prefix(b"Would remove ".as_slice()) else {
+            return Err(ProbeError::new(
+                "clean_preview_failed",
+                "The untracked-file listing used an unknown format; nothing was cleaned.",
+            ));
+        };
+        let directory = rest.strip_suffix(b"/".as_slice()).unwrap_or(rest);
+        candidates.push((directory.to_vec(), directory.len() != rest.len()));
+    }
+    Ok(candidates)
+}
+
+/// Clean's preview: the full untracked set as reported by a fresh
+/// `git clean -nd` (ignored files excluded), stored under a one-time nonce.
+pub(crate) fn preview_clean(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+) -> Result<PreviewResult, ProbeError> {
+    let (work_root, _) = sessions.commit_context(snapshot_version)?;
+    let found = clean_candidates(&work_root)?;
+    if found.is_empty() {
+        return Err(ProbeError::new(
+            "clean_nothing",
+            "There are no untracked files to remove.",
+        ));
+    }
+    let snapshot = session::refresh(sessions)?
+        .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
+    let mut paths = Vec::with_capacity(found.len());
+    let mut candidates = Vec::with_capacity(found.len());
+    for (raw, directory) in found {
+        let mut name = crate::model::display_name(&raw);
+        if directory {
+            name.push('/');
+        }
+        candidates.push(name);
+        paths.push(raw);
+    }
+    let nonce = state.stage_preview(Preview {
+        work_root,
+        kind: PreviewKind::Clean,
+        paths,
+    });
+    Ok(PreviewResult {
+        nonce,
+        candidates,
+        dropped: Vec::new(),
+        snapshot,
+    })
+}
+
+pub(crate) fn clean_files(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    nonce: String,
+) -> Result<OperationResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_clean(state, sessions, &nonce);
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+/// Assumes the queue slot is held; tests call this directly. The stored
+/// candidate set and a fresh `git clean -nd` must contain exactly the same
+/// paths before Git runs; a match then deletes by explicit pathspec so the
+/// execution can never touch anything the user did not confirm (plan/04).
+pub(crate) fn run_clean(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    nonce: &str,
+) -> Result<OperationResult, ProbeError> {
+    let mut outcome = Outcome::Success;
+    let mut exit_code = None;
+    let message;
+    let mut details = None;
+    let Some(preview) = state.take_preview(nonce, PreviewKind::Clean) else {
+        let snapshot = session::refresh(sessions)?;
+        return Ok(OperationResult {
+            operation_id: 0,
+            kind: OperationKind::Clean,
+            outcome: Outcome::Rejected,
+            exit_code: None,
+            message: "That confirmation has expired; preview the clean again.".into(),
+            details: None,
+            snapshot,
+        });
+    };
+    let same_repo = sessions
+        .current_identity()
+        .is_some_and(|identity| identity.work_root.as_deref() == Some(preview.work_root.as_path()));
+    if !same_repo {
+        outcome = Outcome::Rejected;
+        message = "The repository session changed after the preview; nothing was removed.".into();
+    } else if state.cancelled.load(Ordering::SeqCst) {
+        outcome = Outcome::Cancelled;
+        message = "Cancelled before Git ran.".into();
+    } else {
+        let mut fresh = match clean_candidates(&preview.work_root) {
+            Ok(found) => found.into_iter().map(|(raw, _)| raw).collect::<Vec<_>>(),
+            Err(error) => return Err(error),
+        };
+        let mut expected = preview.paths.clone();
+        fresh.sort();
+        expected.sort();
+        if fresh != expected {
+            outcome = Outcome::Rejected;
+            message =
+                "Untracked files changed after the preview; nothing was removed. Confirm again."
+                    .into();
+        } else {
+            match run_git_paths(
+                &preview.work_root,
+                &["clean", "-fd"],
+                &preview.paths,
+                &state.cancelled,
+            ) {
+                Ok(output) => {
+                    exit_code = output.status.code();
+                    if output.status.success() && !output.truncated {
+                        message = format!("Removed {} untracked item(s).", preview.paths.len());
+                    } else {
+                        outcome = Outcome::Failed;
+                        message = "git clean reported a failure.".into();
+                        details = Some(first_stderr_line(&output.stderr));
+                    }
+                }
+                Err(error) if error.code == "process_cancelled" => {
+                    outcome = Outcome::Cancelled;
+                    message = "Cancelled while the Git process was running.".into();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    let snapshot = session::refresh(sessions)?;
+    Ok(OperationResult {
+        operation_id: 0,
+        kind: OperationKind::Clean,
+        outcome,
+        exit_code,
+        message,
+        details,
+        snapshot,
+    })
 }
 
 /// Cheap pre-flight for restore-based operations: `git --version` parsed with
@@ -1390,5 +1569,127 @@ mod tests {
             "staged\n",
             "discard never touches the index side"
         );
+    }
+
+    #[test]
+    fn clean_preview_lists_files_and_directories_and_removes_exactly_those() {
+        let repository = repo_with_base(&[("base.txt", "one\n"), (".gitignore", "i.txt\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("u1.txt"), "untracked\n").unwrap();
+        std::fs::create_dir(root.join("nested")).unwrap();
+        std::fs::write(root.join("nested/u2.txt"), "deep\n").unwrap();
+        std::fs::write(root.join("i.txt"), "ignored\n").unwrap();
+        std::fs::write(root.join("base.txt"), "dirty tracked\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let preview = preview_clean(&writes, &sessions, view.version).unwrap();
+        assert!(
+            preview.candidates.contains(&"u1.txt".to_string()),
+            "{:?}",
+            preview.candidates
+        );
+        assert!(
+            preview.candidates.contains(&"nested/".to_string()),
+            "directories are reported as the directory itself"
+        );
+        assert!(
+            !preview
+                .candidates
+                .iter()
+                .any(|name| name == "i.txt" || name == "base.txt" || name == ".gitignore"),
+            "ignored and tracked files must never be clean candidates: {:?}",
+            preview.candidates
+        );
+
+        let result = clean_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(
+            (result.outcome, result.kind, result.exit_code),
+            (Outcome::Success, OperationKind::Clean, Some(0))
+        );
+        assert!(!root.join("u1.txt").exists());
+        assert!(!root.join("nested").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("i.txt")).unwrap(),
+            "ignored\n",
+            "clean without -x never removes ignored files"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("base.txt")).unwrap(),
+            "dirty tracked\n",
+            "clean never touches tracked files"
+        );
+        let snapshot = result.snapshot.expect("state re-read after clean");
+        assert_eq!(
+            file_state(&snapshot, "u1.txt"),
+            (String::new(), String::new())
+        );
+        assert_eq!(file_state(&snapshot, "base.txt"), (".".into(), "M".into()));
+    }
+
+    #[test]
+    fn clean_refuses_when_untracked_files_grow_after_the_preview() {
+        let repository = repo_with_base(&[("base.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("u1.txt"), "untracked\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let preview = preview_clean(&writes, &sessions, view.version).unwrap();
+
+        // A new untracked file appears between preview and confirmation.
+        std::fs::write(root.join("u2.txt"), "arrived later\n").unwrap();
+        let result = clean_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected);
+        assert!(result.message.contains("changed after the preview"));
+        assert_eq!(result.exit_code, None, "git clean never ran");
+        assert_eq!(
+            std::fs::read_to_string(root.join("u1.txt")).unwrap(),
+            "untracked\n",
+            "a refused clean deletes nothing"
+        );
+        assert!(root.join("u2.txt").exists());
+    }
+
+    #[test]
+    fn clean_nonce_is_consumed_by_the_first_confirmation() {
+        let repository = repo_with_base(&[("base.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("u1.txt"), "untracked\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let preview = preview_clean(&writes, &sessions, view.version).unwrap();
+        let first = clean_files(&writes, &sessions, preview.nonce.clone()).unwrap();
+        assert_eq!(first.outcome, Outcome::Success);
+
+        let replay = clean_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(replay.outcome, Outcome::Rejected);
+        assert!(replay.message.contains("expired"));
+    }
+
+    #[test]
+    fn clean_preview_gates_on_snapshot_version_and_non_empty_candidates() {
+        let repository = repo_with_base(&[("base.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("u1.txt"), "untracked\n").unwrap();
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+
+        // A superseded snapshot cannot even start a preview.
+        session::refresh(&sessions).unwrap().expect("fresh version");
+        let error = preview_clean(&writes, &sessions, view.version).unwrap_err();
+        assert_eq!(error.code, "write_stale_snapshot");
+
+        // A repository without untracked files reports nothing to clean
+        // instead of staging an empty confirmation.
+        let live = session::refresh(&sessions).unwrap().expect("session");
+        std::fs::remove_file(root.join("u1.txt")).unwrap();
+        let error = preview_clean(&writes, &sessions, live.version).unwrap_err();
+        assert_eq!(error.code, "clean_nothing");
     }
 }

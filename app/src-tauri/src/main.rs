@@ -465,6 +465,34 @@ async fn discard_files(
 }
 
 #[tauri::command]
+async fn preview_clean(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+) -> Result<write::PreviewResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        write::preview_clean(&state, &sessions, snapshot_version)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn clean_files(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        write::clean_files(&state, &sessions, nonce)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
 async fn open_external_tool(
     app: tauri::AppHandle,
     snapshot_version: u64,
@@ -519,6 +547,8 @@ fn main() {
             cancel_write,
             preview_discard,
             discard_files,
+            preview_clean,
+            clean_files,
             open_external_tool,
             cancel_exttool
         ])

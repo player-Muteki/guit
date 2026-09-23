@@ -33,7 +33,7 @@ button.recent-entry { padding: .35rem .6rem; background: transparent; border-col
 .file-row:hover .row-action, .file-row:focus-within .row-action, .file-row.selected .row-action { opacity: 1; }
 .group-heading .row-action { margin-left: auto; opacity: 1; }
 .group-heading .row-action + .row-action { margin-left: 0; }
-.row-action.danger, #discard-confirm { background: #6d2f33; border-color: #a65858; }
+.row-action.danger, #preview-confirm { background: #6d2f33; border-color: #a65858; }
 .preview { margin: .5rem 0 0; padding: .6rem .75rem; border: 1px solid #a65858; border-radius: .5rem; background: #241a1e; }
 .preview-warning { color: #ffd4d4; font-size: .85rem; margin: 0 0 .4rem; }
 .preview-list { margin: 0 0 .4rem; padding-left: 1.2rem; list-style: disc; color: #dce3ef; font-size: .85rem; overflow-wrap: anywhere; }
