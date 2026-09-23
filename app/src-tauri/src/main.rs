@@ -77,6 +77,18 @@ async fn restore_repository(
 }
 
 #[tauri::command]
+async fn refresh_repository(
+    app: tauri::AppHandle,
+) -> Result<Option<session::SnapshotView>, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<session::SessionState>();
+        session::refresh(&state)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
 fn close_repository(
     app: tauri::AppHandle,
     state: State<'_, session::SessionState>,
@@ -327,6 +339,7 @@ fn main() {
             restore_window_settings,
             open_repository,
             restore_repository,
+            refresh_repository,
             close_repository,
             list_recent_repositories
         ])

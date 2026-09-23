@@ -80,7 +80,7 @@ pub enum FileGroup {
     Untracked,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileView {
     pub id: FileId,

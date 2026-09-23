@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 pub const RECENT_LIMIT: usize = 10;
 const RECENT_SCHEMA_VERSION: u32 = 1;
@@ -14,13 +16,29 @@ const RECENT_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Default)]
 pub struct SessionState {
     current: Mutex<Option<ActiveRepo>>,
+    next_version: AtomicU64,
+    /// Serializes status refreshes: one leader captures, later callers
+    /// coalesce into the leader's rerun flag instead of racing Git.
+    gate: Mutex<Gate>,
+    gate_cv: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct Gate {
+    leader: bool,
+    rerun: bool,
+    epoch: u64,
 }
 
 #[derive(Debug)]
 struct ActiveRepo {
     identity: RepoIdentity,
+    /// Resolved by write actions (M2) against this snapshot's IDs.
     #[allow(dead_code)]
-    paths: PathTable,
+    paths: Arc<PathTable>,
+    view: SnapshotView,
+    #[allow(dead_code)]
+    version: u64,
 }
 
 impl SessionState {
@@ -30,6 +48,14 @@ impl SessionState {
             .unwrap()
             .as_ref()
             .map(|active| active.identity.clone())
+    }
+
+    fn snapshot(&self) -> Option<SnapshotView> {
+        self.current
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|active| active.view.clone())
     }
 }
 
@@ -55,13 +81,69 @@ impl RepoView {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotView {
+    /// Monotonic per application run; file IDs are only valid for the
+    /// snapshot version that produced them.
+    pub version: u64,
     pub repo: RepoView,
     /// Null for bare repositories, where Git refuses to report a status.
     pub branch: Option<BranchView>,
     pub files: Vec<FileView>,
+}
+
+struct Capture {
+    paths: PathTable,
+    view: SnapshotView,
+}
+
+fn capture(identity: &RepoIdentity) -> Result<Capture, ProbeError> {
+    let (paths, branch, files) = if identity.is_bare {
+        // Git refuses `status` in bare repositories; report no snapshot.
+        (PathTable::default(), None, Vec::new())
+    } else {
+        let raw = repo::status_output(identity, true)?;
+        let parsed = status::parse(&raw)?;
+        let (paths, files) = PathTable::from_status(&parsed);
+        (paths, Some(BranchView::from_parsed(&parsed)), files)
+    };
+    let view = SnapshotView {
+        version: 0,
+        repo: RepoView::from_identity(identity),
+        branch,
+        files,
+    };
+    Ok(Capture { paths, view })
+}
+
+/// Store a fresh capture as the session's current snapshot. With `guard` the
+/// publish is rejected when the session no longer holds `identity`, so a slow
+/// capture can never overwrite a newer open/close.
+fn publish(
+    state: &SessionState,
+    identity: &RepoIdentity,
+    snapshot: Capture,
+    guard: bool,
+) -> Option<SnapshotView> {
+    let mut current = state.current.lock().unwrap();
+    if guard
+        && !current
+            .as_ref()
+            .is_some_and(|active| &active.identity == identity)
+    {
+        return None;
+    }
+    let version = state.next_version.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut view = snapshot.view;
+    view.version = version;
+    *current = Some(ActiveRepo {
+        identity: identity.clone(),
+        paths: Arc::new(snapshot.paths),
+        view: view.clone(),
+        version,
+    });
+    Some(view)
 }
 
 /// Detect the repository, read one status snapshot and only then replace the
@@ -69,61 +151,89 @@ pub struct SnapshotView {
 pub fn open(state: &SessionState, path: &Path) -> Result<SnapshotView, ProbeError> {
     let identity = repo::detect(path)?;
     let snapshot = capture(&identity)?;
-    *state.current.lock().unwrap() = Some(snapshot.active);
-    Ok(snapshot.view)
-}
-
-struct Capture {
-    active: ActiveRepo,
-    view: SnapshotView,
-}
-
-fn capture(identity: &RepoIdentity) -> Result<Capture, ProbeError> {
-    if identity.is_bare {
-        return Ok(Capture {
-            active: ActiveRepo {
-                identity: identity.clone(),
-                paths: PathTable::default(),
-            },
-            view: SnapshotView {
-                repo: RepoView::from_identity(identity),
-                branch: None,
-                files: Vec::new(),
-            },
-        });
-    }
-    let raw = repo::status_output(identity, true)?;
-    let parsed = status::parse(&raw)?;
-    let (paths, files) = PathTable::from_status(&parsed);
-    let view = SnapshotView {
-        repo: RepoView::from_identity(identity),
-        branch: Some(BranchView::from_parsed(&parsed)),
-        files,
-    };
-    Ok(Capture {
-        active: ActiveRepo {
-            identity: identity.clone(),
-            paths,
-        },
-        view,
-    })
+    Ok(publish(state, &identity, snapshot, false).expect("forced publish"))
 }
 
 pub fn close(state: &SessionState) {
     *state.current.lock().unwrap() = None;
+    let mut gate = state.gate.lock().unwrap();
+    gate.epoch += 1;
+    state.gate_cv.notify_all();
+}
+
+pub fn refresh(state: &SessionState) -> Result<Option<SnapshotView>, ProbeError> {
+    refresh_with(state, &capture)
+}
+
+/// Refresh with request coalescing: while one capture runs, new requests set
+/// the rerun flag and wait for a published result instead of starting a
+/// second Git run. Results captured after the session changed are discarded.
+fn refresh_with<F: Fn(&RepoIdentity) -> Result<Capture, ProbeError>>(
+    state: &SessionState,
+    cap: &F,
+) -> Result<Option<SnapshotView>, ProbeError> {
+    let Some(identity) = state.current_identity() else {
+        return Ok(None);
+    };
+    let mut gate = state.gate.lock().unwrap();
+    if gate.leader {
+        gate.rerun = true;
+        let entry = gate.epoch;
+        while gate.epoch == entry {
+            let (next, wait) = state
+                .gate_cv
+                .wait_timeout(gate, Duration::from_secs(15))
+                .unwrap();
+            gate = next;
+            if wait.timed_out() {
+                break;
+            }
+        }
+        drop(gate);
+        return Ok(state.snapshot());
+    }
+    gate.leader = true;
+    drop(gate);
+    let finish = |state: &SessionState| {
+        let mut gate = state.gate.lock().unwrap();
+        gate.leader = false;
+        gate.epoch += 1;
+        state.gate_cv.notify_all();
+    };
+    loop {
+        let published = match cap(&identity) {
+            Ok(snapshot) => publish(state, &identity, snapshot, true),
+            Err(error) => {
+                finish(state);
+                return Err(error);
+            }
+        };
+        let Some(view) = published else {
+            // The session moved on while this capture ran: drop the stale result.
+            finish(state);
+            return Ok(state.snapshot());
+        };
+        let mut gate = state.gate.lock().unwrap();
+        gate.epoch += 1;
+        state.gate_cv.notify_all();
+        if !gate.rerun {
+            gate.leader = false;
+            drop(gate);
+            return Ok(Some(view));
+        }
+        gate.rerun = false;
+        drop(gate);
+    }
 }
 
 /// Reopen the stored session after an application start. A repository that
 /// disappeared since last run clears the session instead of failing startup.
 pub fn restore(state: &SessionState) -> Result<Option<SnapshotView>, ProbeError> {
-    let Some(identity) = state.current_identity() else {
+    if state.current_identity().is_none() {
         return Ok(None);
-    };
-    match capture(&identity) {
-        Ok(snapshot) => {
-            *state.current.lock().unwrap() = Some(snapshot.active);
-            Ok(Some(snapshot.view))
-        }
+    }
+    match refresh_with(state, &capture) {
+        Ok(result) => Ok(result),
         Err(error) => {
             close(state);
             if matches!(
@@ -399,6 +509,153 @@ mod tests {
         assert!(snapshot.repo.root.is_none());
         assert!(snapshot.branch.is_none());
         assert!(snapshot.files.is_empty());
+    }
+
+    #[test]
+    fn refresh_publishes_increasing_versions() {
+        let fixture = fixture();
+        let state = SessionState::default();
+        let first = open(&state, &fixture.repo).unwrap();
+        fs::write(fixture.repo.join("new-file.txt"), "x\n").unwrap();
+        let second = refresh(&state).unwrap().expect("session open");
+        let third = refresh(&state).unwrap().expect("session open");
+        assert!(second.version > first.version);
+        assert!(third.version > second.version);
+        assert!(second.files.iter().any(|f| f.display == "new-file.txt"));
+        assert_eq!(third.files, second.files);
+    }
+
+    #[test]
+    fn concurrent_refreshes_coalesce_into_one_extra_capture() {
+        let fixture = fixture();
+        let state = std::sync::Arc::new(SessionState::default());
+        open(&state, &fixture.repo).unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let slow_state = state.clone();
+        let slow_calls = calls.clone();
+        let leader_started = started_tx.clone();
+        let leader_release = release.clone();
+        let leader = std::thread::spawn(move || {
+            let result = refresh_with(&slow_state, &|identity| {
+                if slow_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    leader_started.send(()).unwrap();
+                    leader_release.wait();
+                }
+                capture(identity)
+            });
+            result.map(|view| view.map(|view| view.version))
+        });
+        started_rx.recv().unwrap();
+        let follower_state = state.clone();
+        let follower_calls = calls.clone();
+        let follower = std::thread::spawn(move || {
+            let result = refresh_with(&follower_state, &|identity| {
+                follower_calls.fetch_add(1, Ordering::SeqCst);
+                capture(identity)
+            });
+            result.map(|view| view.map(|view| view.version))
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        release.wait();
+        let leader_version = leader.join().unwrap().unwrap();
+        let follower_version = follower.join().unwrap().unwrap();
+        // Leader re-ran once because the follower flagged a rerun; the
+        // follower itself never started a Git capture.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(leader_version.is_some() && follower_version.is_some());
+        assert!(refresh(&state).unwrap().is_some());
+    }
+
+    #[test]
+    fn stale_capture_cannot_overwrite_a_newer_open() {
+        let fixture = fixture();
+        let other = fixture.root.path().join("other");
+        fs::create_dir(&other).unwrap();
+        repo::git_with(&other, &[], &["init", "--quiet", "--initial-branch=other"]);
+        let state = std::sync::Arc::new(SessionState::default());
+        open(&state, &fixture.repo).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let slow_state = state.clone();
+        let leader_started = started_tx.clone();
+        let leader_release = release.clone();
+        let leader = std::thread::spawn(move || {
+            refresh_with(&slow_state, &|identity| {
+                leader_started.send(()).unwrap();
+                leader_release.wait();
+                capture(identity)
+            })
+            .map(|view| view.map(|view| view.repo.open_path))
+        });
+        started_rx.recv().unwrap();
+        let reopened = open(&state, &other).unwrap();
+        release.wait();
+        let discarded = leader.join().unwrap().unwrap();
+        // The slow capture of the first repo must not resurrect it.
+        assert_eq!(discarded.as_deref(), Some(reopened.repo.open_path.as_str()));
+        assert!(state
+            .current_identity()
+            .unwrap()
+            .candidate
+            .ends_with("other"));
+    }
+
+    #[test]
+    fn close_during_refresh_never_resurrects_a_session() {
+        let fixture = fixture();
+        let state = std::sync::Arc::new(SessionState::default());
+        open(&state, &fixture.repo).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let slow_state = state.clone();
+        let leader_started = started_tx.clone();
+        let leader_release = release.clone();
+        let leader = std::thread::spawn(move || {
+            refresh_with(&slow_state, &|identity| {
+                leader_started.send(()).unwrap();
+                leader_release.wait();
+                capture(identity)
+            })
+        });
+        started_rx.recv().unwrap();
+        close(&state);
+        release.wait();
+        assert!(leader.join().unwrap().unwrap().is_none());
+        assert!(state.current_identity().is_none());
+    }
+
+    #[test]
+    fn capture_error_after_open_keeps_the_previous_snapshot() {
+        let fixture = fixture();
+        let state = std::sync::Arc::new(SessionState::default());
+        let good = open(&state, &fixture.repo).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let slow_state = state.clone();
+        let leader_started = started_tx.clone();
+        let leader_release = release.clone();
+        let leader = std::thread::spawn(move || {
+            refresh_with(&slow_state, &|identity| {
+                leader_started.send(()).unwrap();
+                leader_release.wait();
+                capture(identity)?;
+                Err(ProbeError::new("injected_capture_failure", "boom"))
+            })
+        });
+        started_rx.recv().unwrap();
+        let follower_state = state.clone();
+        let follower = std::thread::spawn(move || {
+            refresh_with(&follower_state, &capture).map(|view| view.map(|view| view.version))
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        release.wait();
+        let error = leader.join().unwrap().unwrap_err();
+        assert_eq!(error.code, "injected_capture_failure");
+        // The follower coalesced onto the leader's run; an errored leader
+        // still wakes it with the untouched previous snapshot.
+        assert_eq!(follower.join().unwrap().unwrap(), Some(good.version));
     }
 
     #[test]

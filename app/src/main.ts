@@ -63,6 +63,7 @@ type FileView = {
 };
 
 type SnapshotView = {
+  version: number;
   repo: RepoView;
   branch: BranchView | null;
   files: FileView[];
@@ -78,6 +79,7 @@ app.innerHTML = `
     <div id="repo-summary" class="session">No repository open. Choose a folder that is inside a Git working copy.</div>
     <div class="actions">
       <button id="open-repo">Open repository…</button>
+      <button id="refresh-repo" disabled>Refresh status</button>
       <button id="close-repo" disabled>Close session</button>
     </div>
     <h2>Recent</h2>
@@ -133,6 +135,7 @@ const repoSummary = document.querySelector<HTMLElement>("#repo-summary")!;
 const recentList = document.querySelector<HTMLElement>("#recent-list")!;
 const fileList = document.querySelector<HTMLElement>("#file-list")!;
 const openRepoButton = document.querySelector<HTMLButtonElement>("#open-repo")!;
+const refreshRepoButton = document.querySelector<HTMLButtonElement>("#refresh-repo")!;
 const closeRepoButton = document.querySelector<HTMLButtonElement>("#close-repo")!;
 let sessionActive = false;
 let currentSnapshot: SnapshotView | null = null;
@@ -151,6 +154,7 @@ function describeBranch(branch: BranchView | null): string {
 function renderSnapshot(snapshot: SnapshotView | null): void {
   sessionActive = snapshot !== null;
   closeRepoButton.disabled = !sessionActive;
+  refreshRepoButton.disabled = !sessionActive;
   repoSummary.textContent = "";
   if (!snapshot) {
     recentList.replaceChildren();
@@ -261,6 +265,24 @@ openRepoButton.addEventListener("click", async () => {
     if (typeof selected === "string") await openRepository(selected);
   } catch (error) {
     showError(error);
+  }
+});
+
+refreshRepoButton.addEventListener("click", async () => {
+  refreshRepoButton.disabled = true;
+  try {
+    const snapshot = await invoke<SnapshotView | null>("refresh_repository");
+    // Drop stale results: an older snapshot version must never replace a
+    // newer rendered one, and file IDs are per-snapshot.
+    if (snapshot && currentSnapshot && snapshot.version <= currentSnapshot.version) {
+      return;
+    }
+    currentSnapshot = snapshot;
+    renderSnapshot(snapshot);
+  } catch (error) {
+    showError(error);
+  } finally {
+    refreshRepoButton.disabled = !sessionActive;
   }
 });
 

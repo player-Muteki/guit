@@ -6,7 +6,7 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoIdentity {
     pub candidate: PathBuf,
     pub work_root: Option<PathBuf>,
