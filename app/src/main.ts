@@ -73,11 +73,21 @@ type CloneResult = {
   residue: string | null;
 };
 
+type OperationResult = {
+  operationId: number;
+  kind: "stage" | "unstage";
+  outcome: "success" | "failed" | "cancelled" | "rejected";
+  exitCode: number | null;
+  message: string;
+  details: string | null;
+  snapshot: SnapshotView | null;
+};
+
 const app = document.querySelector<HTMLElement>("#app");
 if (!app) throw new Error("Application root is missing");
 
 app.innerHTML = `
-  <header><strong>guit</strong><span>Git desktop client · read-only workbench</span></header>
+  <header><strong>guit</strong><span>Git desktop client · commit workbench</span></header>
   <section class="card">
     <h1>Repository</h1>
     <div id="repo-summary" class="session">No repository open. Choose a folder that is inside a Git working copy.</div>
@@ -100,6 +110,7 @@ app.innerHTML = `
     <div id="file-list" class="files" role="list" aria-label="Changed files" tabindex="0">
       <div id="file-virtual" class="virtual"><div id="file-rows" class="virtual-rows"></div></div>
     </div>
+    <p id="write-status" role="status"></p>
   </section>
   <section class="card">
     <h1>Environment check</h1>
@@ -153,6 +164,7 @@ const fileRows = document.querySelector<HTMLElement>("#file-rows")!;
 const openRepoButton = document.querySelector<HTMLButtonElement>("#open-repo")!;
 const refreshRepoButton = document.querySelector<HTMLButtonElement>("#refresh-repo")!;
 const closeRepoButton = document.querySelector<HTMLButtonElement>("#close-repo")!;
+const writeStatus = document.querySelector<HTMLElement>("#write-status")!;
 
 const ROW_HEIGHT = 30;
 const OVERSCAN = 6;
@@ -336,9 +348,59 @@ function createRow(row: ListRow, index: number): HTMLElement {
   status.className = "file-status";
   status.textContent = `${file.indexStatus}${file.worktreeStatus}`;
   const label = document.createElement("span");
+  label.className = "file-name";
   label.textContent = name;
   element.append(status, label);
+  const action = fileRowAction(file);
+  if (action) {
+    const button = document.createElement("button");
+    button.className = "row-action";
+    button.textContent = action === "stage" ? "Stage" : "Unstage";
+    button.setAttribute("aria-label", `${button.textContent} ${file.display}`);
+    button.disabled = writeRunning;
+    button.addEventListener("click", () =>
+      void runWrite(action === "stage" ? "stage_files" : "unstage_files", file.id),
+    );
+    element.append(button);
+  }
   return element;
+}
+
+// Conflicts resolve through mergetool (M4), not staging; every other group
+// has exactly one sensible per-file write in M2's first loop.
+function fileRowAction(file: FileView): "stage" | "unstage" | null {
+  if (file.group === "conflict") return null;
+  return file.group === "staged" ? "unstage" : "stage";
+}
+
+let writeRunning = false;
+
+// The backend re-reads Git after every write and returns the fresh snapshot;
+// it flows through the same version guard as watcher refreshes.
+async function runWrite(
+  command: "stage_files" | "unstage_files",
+  fileId: number,
+): Promise<void> {
+  if (!currentSnapshot || writeRunning) return;
+  writeRunning = true;
+  writeStatus.textContent = command === "stage_files" ? "Staging…" : "Unstaging…";
+  renderFileRows();
+  try {
+    const result = await invoke<OperationResult>(command, {
+      snapshotVersion: currentSnapshot.version,
+      fileIds: [fileId],
+    });
+    applySnapshot(result.snapshot);
+    writeStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+  } catch (error) {
+    showError(error);
+    writeStatus.textContent = "The write did not run.";
+  } finally {
+    writeRunning = false;
+    renderFileRows();
+  }
 }
 
 function toggleGroup(group: FileGroupKey): void {
@@ -364,6 +426,8 @@ window.addEventListener("resize", () => {
 // (headings skipped), Home/End jump, Enter toggles the selected file's group.
 fileScroll.addEventListener("keydown", (event) => {
   if (listRows.length === 0) return;
+  // A focused row button handles its own keys (Enter/Space activate it).
+  if ((event.target as HTMLElement).closest(".row-action")) return;
   const viewport = fileScroll.clientHeight || 320;
   const edge = (delta: number) => nextSelectableRow(listRows, delta > 0 ? -1 : listRows.length, delta);
   let target = -2;

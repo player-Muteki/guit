@@ -33,7 +33,7 @@ M1 已于 2026-09-23 在 Linux 主机完成交付验证，详见 [M1-validation.
 ## M2 日常提交闭环
 
 - [x] **M2-01** 实现同仓库写入队列、操作 ID、防重复提交和写入后强制刷新。证据：`app/src-tauri/src/write.rs` `WriteState`（busy CAS 单槽，第二请求得 `write_queue_busy`；操作 ID 单调递增；`cancelled` 复用 runner 进程组终止）；`session.rs` `resolve_files` 写入前校验快照版本精确匹配（`write_stale_snapshot`）、非裸仓库（`write_bare_repo`）、FileId 属于当前快照（`write_unknown_file_id`，混入非法 ID 整单拒绝）；路径以 Git 原始字节经参数数组传给 `git add --`（Unix `OsString::from_vec` 无损，Windows UTF-8 不可表示则 `write_path_unrepresentable`）；成功/失败/取消/拒绝后必调 `session::refresh` 并在 `OperationResult.snapshot` 返回重读状态。`probe.rs` 增加 `hasRestore` 能力位（版本 ≥2.23，旧 Git 得到结构化拒绝依据而非崩溃）。7 项 write 测试（暂存成功且快照版本递增、旧版本请求未触 Git、混合 ID 拒绝、并发拒绝、中文空格路径字节精确、取消后仍重读、裸仓库拒绝）+ 2 项 probe 测试；全量 68 项 Rust 测试、`tsc && vite build`、`cargo fmt --check` 通过（Linux 单平台；前端按钮在 M2-02 接入）。
-- [ ] **M2-02** 实现按文件暂存与取消暂存；同一文件两侧都有改动时分别正确更新。
+- [x] **M2-02** 实现按文件暂存与取消暂存；同一文件两侧都有改动时分别正确更新。证据：`write.rs` 泛化为 `execute/run_write(kind)`（Stage=`git add --`，Unstage=`git restore --staged --`），Unstage 前置 `git --version` ≥2.23 能力检查（旧 Git 得结构化拒绝而非失败退出码）；`main.rs` 新增 `unstage_files` 命令。测试 `unstage_reverts_only_the_index_side_of_a_both_sides_file`：同一文件 index M/worktree M 双改，unstage 后仅 (.,M) 工作区侧保留，再 stage 变 (M,.)；`unstage_of_a_newly_added_file_returns_it_to_untracked`：新增文件取消暂存回未跟踪且文件内容不动。前端 `main.ts` 文件行内 Stage/Unstage 按钮（冲突组无按钮、Staged 组 Unstage、其余 Stage；hover/focus-within/选中可见、键盘可 Tab，Enter 不再误触发行组折叠），写请求期间全部禁用并经 `OperationResult.snapshot` 版本守卫渲染，`#write-status` 显示结果与脱敏 details。70 项 Rust 测试、9 项 node 测试、`tsc && vite build`、`cargo fmt --check` 通过（Linux 单平台；行按钮点击的 AT-SPI 运行时验证归 M2-08）。
 - [ ] **M2-03** 实现批量/全部暂存；路径从当前快照 ID 获取，旧 ID 不可复用。
 - [ ] **M2-04** 实现外部文件打开、工作区 diff、暂存 diff；工具失败和返回后有明确反馈。
 - [ ] **M2-05** 实现丢弃工作区改动的影响预览、状态复查和确认。

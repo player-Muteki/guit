@@ -114,7 +114,7 @@ fn git_at(executable: &OsStr) -> Result<GitProbe, ProbeError> {
 /// Old Git reports unknown subcommands with exit 1 and new Git uses exit 129
 /// for usage errors, which is too close to tell apart; the advertised version
 /// is the reliable signal. Unparseable versions are treated as unsupported.
-fn version_at_least(version: &str, minimum: (u32, u32)) -> bool {
+pub(crate) fn version_at_least(version: &str, minimum: (u32, u32)) -> bool {
     let Some(core) = version
         .split_whitespace()
         .find(|token| token.chars().next().is_some_and(|c| c.is_ascii_digit()))

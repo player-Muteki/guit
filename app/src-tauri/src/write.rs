@@ -41,6 +41,22 @@ impl WriteState {
 #[serde(rename_all = "lowercase")]
 pub enum OperationKind {
     Stage,
+    Unstage,
+}
+
+impl OperationKind {
+    /// Git argument prefix plus the past-tense verb for the result message.
+    fn plan(self) -> (&'static [&'static str], &'static str) {
+        match self {
+            OperationKind::Stage => (&["add"], "Staged"),
+            OperationKind::Unstage => (&["restore", "--staged"], "Unstaged"),
+        }
+    }
+
+    /// `git restore` only exists from 2.23; staging works on any supported Git.
+    fn needs_restore(self) -> bool {
+        matches!(self, OperationKind::Unstage)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -69,14 +85,15 @@ pub struct OperationResult {
     pub snapshot: Option<session::SnapshotView>,
 }
 
-pub(crate) fn execute_stage(
+pub(crate) fn execute(
     state: &WriteState,
     sessions: &session::SessionState,
     snapshot_version: u64,
     file_ids: Vec<u32>,
+    kind: OperationKind,
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_stage(state, sessions, snapshot_version, file_ids);
+    let result = run_write(state, sessions, snapshot_version, file_ids, kind);
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -84,14 +101,16 @@ pub(crate) fn execute_stage(
     })
 }
 
-/// Runs `git add` for the resolved files. Assumes the queue slot is held;
-/// tests call this directly to pre-arm cancellation deterministically.
-pub(crate) fn run_stage(
+/// Runs one path-scoped write for the resolved files. Assumes the queue slot
+/// is held; tests call this directly to pre-arm cancellation deterministically.
+pub(crate) fn run_write(
     state: &WriteState,
     sessions: &session::SessionState,
     snapshot_version: u64,
     file_ids: Vec<u32>,
+    kind: OperationKind,
 ) -> Result<OperationResult, ProbeError> {
+    let (git_prefix, verb) = kind.plan();
     let mut outcome = Outcome::Success;
     let mut exit_code = None;
     let message;
@@ -102,18 +121,22 @@ pub(crate) fn run_stage(
             message = error.message;
         }
         Ok((work_root, targets)) => {
-            if state.cancelled.load(Ordering::SeqCst) {
+            if kind.needs_restore() && !restore_supported(&work_root) {
+                outcome = Outcome::Rejected;
+                message =
+                    "This Git is too old for unstaging; guit needs git restore (2.23+).".into();
+            } else if state.cancelled.load(Ordering::SeqCst) {
                 outcome = Outcome::Cancelled;
                 message = "Cancelled before Git ran.".into();
             } else {
-                match run_git_paths(&work_root, "add", &targets, &state.cancelled) {
+                match run_git_paths(&work_root, git_prefix, &targets, &state.cancelled) {
                     Ok(output) => {
                         exit_code = output.status.code();
                         if output.status.success() && !output.truncated {
-                            message = format!("Staged {} file(s).", targets.len());
+                            message = format!("{} {} file(s).", verb, targets.len());
                         } else {
                             outcome = Outcome::Failed;
-                            message = "git add reported a failure.".into();
+                            message = format!("{} reported a failure.", git_prefix[0]);
                             details = Some(first_stderr_line(&output.stderr));
                         }
                     }
@@ -132,7 +155,7 @@ pub(crate) fn run_stage(
     Ok(OperationResult {
         // Assigned by the queue wrapper so every entry point reports it.
         operation_id: 0,
-        kind: OperationKind::Stage,
+        kind,
         outcome,
         exit_code,
         message,
@@ -141,16 +164,36 @@ pub(crate) fn run_stage(
     })
 }
 
-/// `git <subcommand> -- <paths…>` with argument arrays only — paths arrive as
-/// the exact bytes Git reported, so no shell or display-name round trip.
+/// Cheap pre-flight for restore-based operations: `git --version` parsed with
+/// the same gate the environment probe reports as `hasRestore`.
+fn restore_supported(work_root: &Path) -> bool {
+    let mut command = repo::user_git_command(work_root);
+    command.arg("--version");
+    match runner::run(
+        command,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+        Duration::from_secs(10),
+        |_, _| {},
+    ) {
+        Ok(output) if output.status.success() => {
+            crate::probe::version_at_least(&String::from_utf8_lossy(&output.stdout), (2, 23))
+        }
+        _ => false,
+    }
+}
+
+/// `git <args…> -- <paths…>` with argument arrays only — paths arrive as the
+/// exact bytes Git reported, so no shell or display-name round trip.
 fn run_git_paths(
     work_root: &Path,
-    subcommand: &str,
+    git_prefix: &[&str],
     targets: &[Vec<u8>],
     cancelled: &AtomicBool,
 ) -> Result<runner::CapturedOutput, ProbeError> {
     let mut command = repo::user_git_command(work_root);
-    command.arg(subcommand).arg("--");
+    command.args(git_prefix);
+    command.arg("--");
     command.args(
         targets
             .iter()
@@ -227,6 +270,24 @@ mod tests {
             .iter()
             .find(|file| file.display == display)
             .map(|file| file.index_status.as_str())
+    }
+
+    fn execute_stage(
+        state: &WriteState,
+        sessions: &session::SessionState,
+        version: u64,
+        ids: Vec<u32>,
+    ) -> Result<OperationResult, ProbeError> {
+        execute(state, sessions, version, ids, OperationKind::Stage)
+    }
+
+    fn run_stage(
+        state: &WriteState,
+        sessions: &session::SessionState,
+        version: u64,
+        ids: Vec<u32>,
+    ) -> Result<OperationResult, ProbeError> {
+        run_write(state, sessions, version, ids, OperationKind::Stage)
     }
 
     #[test]
@@ -377,5 +438,124 @@ mod tests {
         let result = execute_stage(&writes, &sessions, view.version, vec![0]).unwrap();
         assert_eq!(result.outcome, Outcome::Rejected);
         assert!(result.message.contains("bare"));
+    }
+
+    const COMMIT_ID: &[&str] = &[
+        "-c",
+        "user.name=guit test",
+        "-c",
+        "user.email=test@example.invalid",
+    ];
+
+    #[test]
+    fn unstage_reverts_only_the_index_side_of_a_both_sides_file() {
+        let repository = init_repo();
+        let root = repository.path();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+        repo::git_with(root, COMMIT_ID, &["commit", "-q", "-m", "base"]);
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+        std::fs::write(root.join("a.txt"), "three\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let file = view
+            .files
+            .iter()
+            .find(|file| file.display == "a.txt")
+            .unwrap();
+        assert!(file.staged && file.unstaged);
+        let writes = WriteState::default();
+
+        let result = execute(
+            &writes,
+            &sessions,
+            view.version,
+            vec![file.id.0],
+            OperationKind::Unstage,
+        )
+        .unwrap();
+        assert_eq!(
+            (result.outcome, result.exit_code, result.kind),
+            (Outcome::Success, Some(0), OperationKind::Unstage)
+        );
+        assert!(result.message.starts_with("Unstaged"));
+        let snapshot = result.snapshot.expect("re-read");
+        let file = snapshot
+            .files
+            .iter()
+            .find(|file| file.display == "a.txt")
+            .expect("still changed");
+        assert_eq!(
+            (file.index_status.as_str(), file.worktree_status.as_str()),
+            (".", "M")
+        );
+        assert!(!file.staged && file.unstaged);
+
+        // Re-staging the same (new) file ID moves the work-tree side in.
+        let again = execute(
+            &writes,
+            &sessions,
+            snapshot.version,
+            vec![file.id.0],
+            OperationKind::Stage,
+        )
+        .unwrap();
+        assert_eq!(again.outcome, Outcome::Success);
+        let final_snapshot = again.snapshot.expect("re-read");
+        let file = final_snapshot
+            .files
+            .iter()
+            .find(|file| file.display == "a.txt")
+            .expect("still staged");
+        assert_eq!(
+            (file.index_status.as_str(), file.worktree_status.as_str()),
+            ("M", ".")
+        );
+    }
+
+    #[test]
+    fn unstage_of_a_newly_added_file_returns_it_to_untracked() {
+        let repository = init_repo();
+        let root = repository.path();
+        std::fs::write(root.join("base.txt"), "one\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "base.txt"]);
+        repo::git_with(root, COMMIT_ID, &["commit", "-q", "-m", "base"]);
+        std::fs::write(root.join("新 文件.txt"), "new\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "新 文件.txt"]);
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let file = view
+            .files
+            .iter()
+            .find(|file| file.display == "新 文件.txt")
+            .expect("staged new file");
+        assert!(file.staged);
+        let writes = WriteState::default();
+
+        let result = execute(
+            &writes,
+            &sessions,
+            view.version,
+            vec![file.id.0],
+            OperationKind::Unstage,
+        )
+        .unwrap();
+        assert_eq!(result.outcome, Outcome::Success);
+        let snapshot = result.snapshot.expect("re-read");
+        let file = snapshot
+            .files
+            .iter()
+            .find(|file| file.display == "新 文件.txt")
+            .expect("still listed");
+        assert!(file.untracked);
+        assert_eq!(file.index_status, "?");
+        assert_eq!(
+            std::fs::read_to_string(root.join("新 文件.txt")).unwrap(),
+            "new\n",
+            "unstage must never delete content"
+        );
     }
 }

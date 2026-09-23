@@ -377,10 +377,34 @@ async fn stage_files(
     snapshot_version: u64,
     file_ids: Vec<u32>,
 ) -> Result<write::OperationResult, ProbeError> {
+    run_write_command(app, snapshot_version, file_ids, write::OperationKind::Stage).await
+}
+
+#[tauri::command]
+async fn unstage_files(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    file_ids: Vec<u32>,
+) -> Result<write::OperationResult, ProbeError> {
+    run_write_command(
+        app,
+        snapshot_version,
+        file_ids,
+        write::OperationKind::Unstage,
+    )
+    .await
+}
+
+async fn run_write_command(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    file_ids: Vec<u32>,
+    kind: write::OperationKind,
+) -> Result<write::OperationResult, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<write::WriteState>();
         let sessions = app.state::<session::SessionState>();
-        write::execute_stage(&state, &sessions, snapshot_version, file_ids)
+        write::execute(&state, &sessions, snapshot_version, file_ids, kind)
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -419,6 +443,7 @@ fn main() {
             clone_repository,
             cancel_clone,
             stage_files,
+            unstage_files,
             cancel_write
         ])
         .run(tauri::generate_context!())
