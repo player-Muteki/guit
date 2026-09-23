@@ -336,6 +336,26 @@ function createRow(row: ListRow, index: number): HTMLElement {
     element.className = "file-row group-heading";
     element.textContent = `${row.collapsed ? "▸" : "▾"} ${row.label} (${row.count})`;
     element.addEventListener("click", () => toggleGroup(row.group));
+    const batchAction: "stage" | "unstage" | null =
+      row.group === "conflict" ? null : row.group === "staged" ? "unstage" : "stage";
+    if (batchAction) {
+      const button = document.createElement("button");
+      button.className = "row-action batch";
+      button.textContent = batchAction === "stage" ? "Stage all" : "Unstage all";
+      button.disabled = writeRunning;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        // IDs come from the live snapshot; the backend rejects the whole
+        // batch if any one of them has gone stale.
+        const ids = currentFiles
+          .filter((file) => file.group === row.group)
+          .map((file) => file.id);
+        if (ids.length > 0) {
+          void runWrite(batchAction === "stage" ? "stage_files" : "unstage_files", ids);
+        }
+      });
+      element.append(button);
+    }
     return element;
   }
   const selected = index === selectedRow;
@@ -359,7 +379,7 @@ function createRow(row: ListRow, index: number): HTMLElement {
     button.setAttribute("aria-label", `${button.textContent} ${file.display}`);
     button.disabled = writeRunning;
     button.addEventListener("click", () =>
-      void runWrite(action === "stage" ? "stage_files" : "unstage_files", file.id),
+      void runWrite(action === "stage" ? "stage_files" : "unstage_files", [file.id]),
     );
     element.append(button);
   }
@@ -379,16 +399,16 @@ let writeRunning = false;
 // it flows through the same version guard as watcher refreshes.
 async function runWrite(
   command: "stage_files" | "unstage_files",
-  fileId: number,
+  fileIds: number[],
 ): Promise<void> {
   if (!currentSnapshot || writeRunning) return;
   writeRunning = true;
-  writeStatus.textContent = command === "stage_files" ? "Staging…" : "Unstaging…";
+  writeStatus.textContent = `${command === "stage_files" ? "Staging" : "Unstaging"} ${fileIds.length} file(s)…`;
   renderFileRows();
   try {
     const result = await invoke<OperationResult>(command, {
       snapshotVersion: currentSnapshot.version,
-      fileIds: [fileId],
+      fileIds,
     });
     applySnapshot(result.snapshot);
     writeStatus.textContent = result.details

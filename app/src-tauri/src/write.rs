@@ -366,6 +366,34 @@ mod tests {
     }
 
     #[test]
+    fn batch_call_stages_all_ids_and_an_old_snapshot_batch_is_dead() {
+        let repository = init_repo();
+        let root = repository.path();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        std::fs::write(root.join("b.txt"), "two\n").unwrap();
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let ids: Vec<u32> = view.files.iter().map(|file| file.id.0).collect();
+        assert_eq!(ids.len(), 2);
+        let writes = WriteState::default();
+
+        let result = execute_stage(&writes, &sessions, view.version, ids.clone()).unwrap();
+        assert_eq!(result.outcome, Outcome::Success);
+        let snapshot = result.snapshot.expect("re-read");
+        assert_eq!(is_staged(&snapshot, "a.txt"), Some("A"));
+        assert_eq!(is_staged(&snapshot, "b.txt"), Some("A"));
+
+        // File IDs restart from zero per snapshot, so a superseded batch
+        // would numerically "fit" the new table — the version gate is what
+        // makes old ID sets unusable, and nothing runs when it trips.
+        let result = execute_stage(&writes, &sessions, view.version, ids).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected);
+        let snapshot = result.snapshot.expect("re-read");
+        assert_eq!(is_staged(&snapshot, "a.txt"), Some("A"));
+        assert_eq!(is_staged(&snapshot, "b.txt"), Some("A"));
+    }
+
+    #[test]
     fn queue_refuses_a_second_concurrent_write() {
         let writes = WriteState::default();
         let first = writes.begin().unwrap();
