@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clone;
+mod extools;
 mod model;
 mod probe;
 mod repo;
@@ -431,6 +432,27 @@ fn cancel_write(state: State<'_, write::WriteState>) {
     state.cancel();
 }
 
+#[tauri::command]
+async fn open_external_tool(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    file_id: u32,
+    purpose: extools::ToolPurpose,
+) -> Result<extools::ToolResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<extools::ToolState>();
+        let sessions = app.state::<session::SessionState>();
+        extools::execute(&state, &sessions, snapshot_version, file_id, purpose)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+fn cancel_exttool(state: State<'_, extools::ToolState>) {
+    state.cancel();
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -442,6 +464,7 @@ fn main() {
         .manage(watch::WatchState::default())
         .manage(clone::CloneState::default())
         .manage(write::WriteState::default())
+        .manage(extools::ToolState::default())
         .invoke_handler(tauri::generate_handler![
             probe_git,
             probe_external_tools,
@@ -461,7 +484,9 @@ fn main() {
             stage_files,
             unstage_files,
             commit_changes,
-            cancel_write
+            cancel_write,
+            open_external_tool,
+            cancel_exttool
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

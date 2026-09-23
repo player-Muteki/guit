@@ -349,7 +349,7 @@ pub(crate) fn raw_to_os(raw: &[u8]) -> Result<OsString, ProbeError> {
     }
 }
 
-fn first_stderr_line(stderr: &[u8]) -> String {
+pub(crate) fn first_stderr_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     let line = text.lines().next().unwrap_or("").trim();
     let mut bounded = String::new();

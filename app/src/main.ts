@@ -83,6 +83,18 @@ type OperationResult = {
   snapshot: SnapshotView | null;
 };
 
+type ToolPurpose = "openFile" | "diffWorktree" | "diffStaged";
+
+type ToolResult = {
+  operationId: number;
+  purpose: ToolPurpose;
+  outcome: "success" | "failed" | "cancelled" | "rejected";
+  exitCode: number | null;
+  message: string;
+  details: string | null;
+  snapshot: SnapshotView | null;
+};
+
 const app = document.querySelector<HTMLElement>("#app");
 if (!app) throw new Error("Application root is missing");
 
@@ -111,6 +123,7 @@ app.innerHTML = `
       <div id="file-virtual" class="virtual"><div id="file-rows" class="virtual-rows"></div></div>
     </div>
     <p id="write-status" role="status"></p>
+    <div class="actions"><button id="tool-cancel" disabled>Stop external tool</button></div>
     <h2>Commit</h2>
     <div class="commit-box">
       <textarea id="commit-message" rows="3" placeholder="Commit message — Ctrl+Enter commits" aria-label="Commit message" disabled></textarea>
@@ -178,6 +191,7 @@ const commitMessage = document.querySelector<HTMLTextAreaElement>("#commit-messa
 const commitAmend = document.querySelector<HTMLInputElement>("#commit-amend")!;
 const commitButton = document.querySelector<HTMLButtonElement>("#commit-button")!;
 const commitCancelButton = document.querySelector<HTMLButtonElement>("#commit-cancel")!;
+const toolCancelButton = document.querySelector<HTMLButtonElement>("#tool-cancel")!;
 
 const ROW_HEIGHT = 30;
 const OVERSCAN = 6;
@@ -399,6 +413,25 @@ function createRow(row: ListRow, index: number): HTMLElement {
     );
     element.append(button);
   }
+  const toolActions: Array<{ label: string; purpose: ToolPurpose }> = [
+    { label: "Open", purpose: "openFile" },
+  ];
+  // Untracked files have no HEAD-side counterpart, so difftool skips them;
+  // the staged side only exists once the file is in the index.
+  if (!file.untracked) toolActions.push({ label: "Diff", purpose: "diffWorktree" });
+  if (file.staged) toolActions.push({ label: "Diff staged", purpose: "diffStaged" });
+  for (const tool of toolActions) {
+    const button = document.createElement("button");
+    button.className = "row-action tool";
+    button.textContent = tool.label;
+    button.setAttribute("aria-label", `${tool.label} ${file.display}`);
+    button.disabled = toolRunning;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void runTool(tool.purpose, file.id);
+    });
+    element.append(button);
+  }
   return element;
 }
 
@@ -410,6 +443,7 @@ function fileRowAction(file: FileView): "stage" | "unstage" | null {
 }
 
 let writeRunning = false;
+let toolRunning = false;
 
 // The backend re-reads Git after every write and returns the fresh snapshot;
 // it flows through the same version guard as watcher refreshes.
@@ -447,7 +481,42 @@ function syncCommitControls(): void {
   commitAmend.disabled = locked;
   commitButton.disabled = locked;
   commitCancelButton.disabled = !writeRunning;
+  toolCancelButton.disabled = !toolRunning;
 }
+
+// A difftool call stays pending until the user closes the diff window, so
+// the lane has its own busy flag; staging and committing remain available
+// while a tool runs because the backend keeps them in separate slots.
+async function runTool(purpose: ToolPurpose, fileId: number): Promise<void> {
+  if (!currentSnapshot || toolRunning) return;
+  toolRunning = true;
+  syncCommitControls();
+  renderFileRows();
+  writeStatus.textContent =
+    purpose === "openFile"
+      ? "Opening file…"
+      : "Waiting for the diff tool to close…";
+  try {
+    const result = await invoke<ToolResult>("open_external_tool", {
+      snapshotVersion: currentSnapshot.version,
+      fileId,
+      purpose,
+    });
+    applySnapshot(result.snapshot);
+    writeStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+  } catch (error) {
+    showError(error);
+    writeStatus.textContent = "The external tool did not run.";
+  } finally {
+    toolRunning = false;
+    syncCommitControls();
+    renderFileRows();
+  }
+}
+
+toolCancelButton.addEventListener("click", () => void invoke("cancel_exttool"));
 
 // On failure, cancellation or rejection the textarea keeps its content: the
 // user's message is input they own, and guit never swallows it.

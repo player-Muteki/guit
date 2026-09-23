@@ -28,10 +28,10 @@ button.recent-entry { padding: .35rem .6rem; background: transparent; border-col
 .files .virtual { position: relative; }
 .files .virtual-rows { position: absolute; top: 0; left: 0; right: 0; }
 .file-row { height: 30px; display: flex; gap: .5rem; align-items: center; white-space: nowrap; overflow: hidden; }
-.file-row > .file-name { overflow: hidden; text-overflow: ellipsis; }
-.row-action { margin-left: auto; flex: 0 0 auto; font-size: .72rem; padding: .1rem .5rem; opacity: 0; }
+.file-row > .file-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.row-action { flex: 0 0 auto; font-size: .72rem; padding: .1rem .5rem; opacity: 0; }
 .file-row:hover .row-action, .file-row:focus-within .row-action, .file-row.selected .row-action { opacity: 1; }
-.group-heading .row-action { opacity: 1; }
+.group-heading .row-action { margin-left: auto; opacity: 1; }
 #write-status { color: #aeb9ca; margin: .5rem 0 0; overflow-wrap: anywhere; min-height: 1.2em; }
 .file-row.placeholder { height: auto; white-space: normal; overflow-wrap: anywhere; }
 .file-row.group-heading { color: #aeb9ca; font-weight: 600; cursor: pointer; user-select: none; }
