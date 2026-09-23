@@ -64,6 +64,14 @@ type SnapshotView = {
   files: FileView[];
 };
 
+type CloneResult = {
+  target: string;
+  success: boolean;
+  cancelled: boolean;
+  message: string;
+  residue: string | null;
+};
+
 const app = document.querySelector<HTMLElement>("#app");
 if (!app) throw new Error("Application root is missing");
 
@@ -79,6 +87,14 @@ app.innerHTML = `
     </div>
     <h2>Recent</h2>
     <ul id="recent-list" class="recent"><li>None yet.</li></ul>
+    <h2>Clone</h2>
+    <div class="actions">
+      <input id="clone-source" type="text" placeholder="Repository URL or local path" aria-label="Repository to clone" />
+      <button id="clone-pick-dir">Into folder…</button>
+      <button id="clone-start" disabled>Clone</button>
+      <button id="clone-cancel" disabled>Cancel</button>
+    </div>
+    <p id="clone-status" role="status">Choose a destination folder to clone a repository.</p>
     <h2>Changes</h2>
     <div id="file-list" class="files" role="list" aria-label="Changed files" tabindex="0">
       <div id="file-virtual" class="virtual"><div id="file-rows" class="virtual-rows"></div></div>
@@ -465,6 +481,84 @@ closeRepoButton.addEventListener("click", async () => {
     renderSnapshot(null);
   } catch (error) {
     showError(error);
+  }
+});
+
+const cloneSource = document.querySelector<HTMLInputElement>("#clone-source")!;
+const clonePickDir = document.querySelector<HTMLButtonElement>("#clone-pick-dir")!;
+const cloneStart = document.querySelector<HTMLButtonElement>("#clone-start")!;
+const cloneCancel = document.querySelector<HTMLButtonElement>("#clone-cancel")!;
+const cloneStatus = document.querySelector<HTMLElement>("#clone-status")!;
+let cloneParent: string | undefined;
+
+clonePickDir.addEventListener("click", async () => {
+  try {
+    const selected = await open({ directory: true, multiple: false });
+    if (typeof selected === "string") {
+      cloneParent = selected;
+      cloneStart.disabled = cloneSource.value.trim() === "";
+      cloneStatus.textContent = `Destination: ${selected}`;
+    }
+  } catch (error) {
+    showError(error);
+  }
+});
+
+cloneSource.addEventListener("input", () => {
+  cloneStart.disabled =
+    cloneParent === undefined || cloneSource.value.trim() === "";
+});
+
+cloneCancel.addEventListener("click", async () => {
+  try {
+    await invoke("cancel_clone");
+    cloneStatus.textContent = "Cancellation requested; stopping Git…";
+  } catch (error) {
+    showError(error);
+  }
+});
+
+cloneStart.addEventListener("click", async () => {
+  if (cloneParent === undefined) return;
+  const source = cloneSource.value.trim();
+  cloneStart.disabled = true;
+  clonePickDir.disabled = true;
+  cloneSource.disabled = true;
+  cloneCancel.disabled = false;
+  cloneStatus.textContent = "Cloning…";
+  let unlisten: (() => void) | undefined;
+  try {
+    unlisten = await listen<string>("clone-progress", ({ payload }) => {
+      cloneStatus.textContent = payload;
+    });
+    const result = await invoke<CloneResult>("clone_repository", {
+      source,
+      parent: cloneParent,
+    });
+    if (result.success) {
+      cloneStatus.textContent = `${result.message} Opening ${result.target}…`;
+      await openRepository(result.target);
+    } else {
+      cloneStatus.textContent = result.message;
+      if (result.residue) {
+        // guit never deletes anything: the user decides what to do with it.
+        showError(
+          result.cancelled
+            ? `The cancelled clone left a partial folder at ${result.residue}. guit will not remove it automatically.`
+            : `The failed clone left a folder at ${result.residue}. guit will not remove it automatically.`,
+        );
+      }
+    }
+    cloneSource.value = "";
+  } catch (error) {
+    showError(error);
+    cloneStatus.textContent = "Clone failed.";
+  } finally {
+    unlisten?.();
+    clonePickDir.disabled = false;
+    cloneSource.disabled = false;
+    cloneCancel.disabled = true;
+    cloneStart.disabled = cloneSource.value.trim() === "";
   }
 });
 

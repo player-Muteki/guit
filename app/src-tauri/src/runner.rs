@@ -73,7 +73,7 @@ pub fn run(
     cancelled: &AtomicBool,
     close_stdin_after: Duration,
     timeout: Duration,
-    progress: impl Fn(usize),
+    progress: impl FnMut(bool, &[u8]),
 ) -> Result<CapturedOutput, ProbeError> {
     run_with_limit(
         command,
@@ -91,7 +91,7 @@ pub fn run_with_limit(
     close_stdin_after: Duration,
     timeout: Duration,
     output_limit: usize,
-    progress: impl Fn(usize),
+    mut progress: impl FnMut(bool, &[u8]),
 ) -> Result<CapturedOutput, ProbeError> {
     #[cfg(unix)]
     {
@@ -139,9 +139,7 @@ pub fn run_with_limit(
         }
         match receiver.recv_timeout(Duration::from_millis(20)) {
             Ok(Chunk::Data(is_stderr, bytes)) => {
-                if is_stderr {
-                    progress(bytes.len());
-                }
+                progress(is_stderr, &bytes);
                 let destination = if is_stderr { &mut stderr } else { &mut stdout };
                 let remaining = output_limit.saturating_sub(destination.len());
                 truncated |= bytes.len() > remaining;

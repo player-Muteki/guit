@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod clone;
 mod model;
 mod probe;
 mod repo;
@@ -333,6 +334,37 @@ fn cancel_process_probe(state: State<'_, ProbeState>) {
     state.cancelled.store(true, Ordering::SeqCst);
 }
 
+#[tauri::command]
+async fn clone_repository(
+    app: tauri::AppHandle,
+    source: String,
+    parent: String,
+) -> Result<clone::CloneResult, ProbeError> {
+    {
+        let state = app.state::<clone::CloneState>();
+        state
+            .running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| ProbeError::new("clone_busy", "A clone is already running."))?;
+        state.cancelled.store(false, Ordering::SeqCst);
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<clone::CloneState>();
+        let outcome = clone::clone_repository(&state, &source, std::path::Path::new(&parent), &mut |line| {
+            let _ = app.emit("clone-progress", line);
+        });
+        state.running.store(false, Ordering::SeqCst);
+        outcome
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+fn cancel_clone(state: State<'_, clone::CloneState>) {
+    state.cancelled.store(true, Ordering::SeqCst);
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -342,6 +374,7 @@ fn main() {
         })
         .manage(session::SessionState::default())
         .manage(watch::WatchState::default())
+        .manage(clone::CloneState::default())
         .invoke_handler(tauri::generate_handler![
             probe_git,
             probe_external_tools,
@@ -355,7 +388,9 @@ fn main() {
             restore_repository,
             refresh_repository,
             close_repository,
-            list_recent_repositories
+            list_recent_repositories,
+            clone_repository,
+            cancel_clone
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

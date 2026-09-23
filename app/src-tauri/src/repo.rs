@@ -40,7 +40,7 @@ fn rev_parse_line(path: &Path, flag: &str) -> Result<Option<String>, ProbeError>
         &AtomicBool::new(false),
         Duration::ZERO,
         Duration::from_secs(10),
-        |_| {},
+        |_, _| {},
     )?;
     if output.truncated {
         return Err(ProbeError::new(
@@ -171,7 +171,7 @@ pub fn status_output(identity: &RepoIdentity, untracked: bool) -> Result<Vec<u8>
         Duration::ZERO,
         Duration::from_secs(30),
         runner::STATUS_OUTPUT_LIMIT,
-        |_| {},
+        |_, _| {},
     )?;
     if !output.status.success() {
         return Err(ProbeError::new(

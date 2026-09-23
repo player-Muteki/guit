@@ -19,7 +19,7 @@ impl ProbeError {
     }
 }
 
-fn redact(message: &str) -> String {
+pub(crate) fn redact(message: &str) -> String {
     message
         .split_inclusive(char::is_whitespace)
         .map(|word| {
@@ -141,13 +141,13 @@ fn isolated_git(executable: &OsStr, path: &Path) -> Command {
     command
 }
 
-pub fn transfer(progress: impl Fn(usize)) -> Result<String, ProbeError> {
+pub fn transfer(mut progress: impl FnMut(usize)) -> Result<String, ProbeError> {
     let directory = tempfile::Builder::new()
         .prefix("guit-transfer-")
         .tempdir()
         .map_err(|error| ProbeError::new("temp_dir_failed", error.to_string()))?;
     let cancelled = AtomicBool::new(false);
-    let execute = |args: &[&str]| -> Result<crate::runner::CapturedOutput, ProbeError> {
+    let mut execute = |args: &[&str]| -> Result<crate::runner::CapturedOutput, ProbeError> {
         let mut command = isolated_git(OsStr::new("git"), directory.path());
         command.args(args);
         let output = crate::runner::run(
@@ -155,7 +155,11 @@ pub fn transfer(progress: impl Fn(usize)) -> Result<String, ProbeError> {
             &cancelled,
             Duration::ZERO,
             Duration::from_secs(10),
-            &progress,
+            |is_stderr: bool, bytes| {
+                if is_stderr {
+                    progress(bytes.len());
+                }
+            },
         )?;
         if !output.status.success() || output.truncated {
             return Err(ProbeError::new(
@@ -248,7 +252,7 @@ fn process_with_deadlines(
         .args(["hash-object", "--stdin"])
         .current_dir(std::env::temp_dir());
     let output =
-        match crate::runner::run(command, cancelled, completion_after, timeout_after, |_| {}) {
+        match crate::runner::run(command, cancelled, completion_after, timeout_after, |_, _| {}) {
             Err(error) if error.code == "process_cancelled" => {
                 return Ok("Git process cancelled and reaped.".into())
             }
@@ -292,7 +296,7 @@ mod tests {
             &AtomicBool::new(false),
             Duration::ZERO,
             Duration::from_secs(5),
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(result.status.code(), Some(1));
@@ -330,7 +334,7 @@ mod tests {
             &AtomicBool::new(false),
             Duration::ZERO,
             Duration::from_millis(100),
-            |_| {},
+            |_, _| {},
         );
         assert!(matches!(result, Err(error) if error.code == "probe_timeout"));
         assert!(started.elapsed() < Duration::from_secs(2));
