@@ -15,6 +15,7 @@
 | [07-quality-release.md](07-quality-release.md) | 测试矩阵、性能测量和三平台发布 | 质量门槛与发布步骤 |
 | [08-task-backlog.md](08-task-backlog.md) | 按阶段编号的实施任务、依赖与证据 | 可直接跟踪的开发待办 |
 | [M0-validation.md](M0-validation.md) | M0 本机环境、已执行检查与平台缺口 | 真实验证记录 |
+| [M1-validation.md](M1-validation.md) | M1 本机环境、自动化测试与 AT-SPI 运行时验证、键盘注入限制 | 真实验证记录 |
 | [M0-platform-setup.md](M0-platform-setup.md) | 三平台环境准备与运行验收步骤 | 可复现的 M0 检查表 |
 
 ## 全局原则

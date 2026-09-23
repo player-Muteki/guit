@@ -1,7 +1,7 @@
 use crate::probe::{redact, ProbeError};
 use crate::repo::{self, user_git_command};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// One clone may run at a time; cancellation is requested through the same
@@ -54,7 +54,8 @@ fn residue_of(target: &Path) -> Option<String> {
     if !target.exists() {
         return None;
     }
-    let occupied = target.is_dir()
+    let occupied = target
+        .is_dir()
         .then(|| {
             std::fs::read_dir(target)
                 .map(|mut entries| entries.next().is_some())
@@ -132,7 +133,10 @@ pub fn clone_repository(
                     Err(error) => (
                         false,
                         false,
-                        format!("Git reported success but no repository was detected: {}", error.message),
+                        format!(
+                            "Git reported success but no repository was detected: {}",
+                            error.message
+                        ),
                     ),
                 }
             } else {
@@ -157,11 +161,7 @@ pub fn clone_repository(
         success,
         cancelled,
         message,
-        residue: if success {
-            None
-        } else {
-            residue_of(&target)
-        },
+        residue: if success { None } else { residue_of(&target) },
     })
 }
 
@@ -187,6 +187,7 @@ fn last_error_line(stderr: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::repo::git_with;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn suggested_names_cover_common_source_shapes() {
@@ -230,7 +231,10 @@ mod tests {
         assert!(!result.cancelled);
         assert!(result.residue.is_none());
         assert!(parent.path().join("source").join(".git").exists());
-        assert!(!lines.is_empty(), "clone --progress produced no stderr lines");
+        assert!(
+            !lines.is_empty(),
+            "clone --progress produced no stderr lines"
+        );
     }
 
     #[test]
@@ -240,13 +244,8 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let state = CloneState::default();
         state.cancelled.store(true, Ordering::SeqCst);
-        let result = clone_repository(
-            &state,
-            source.to_str().unwrap(),
-            parent.path(),
-            &mut |_| {},
-        )
-        .unwrap();
+        let result =
+            clone_repository(&state, source.to_str().unwrap(), parent.path(), &mut |_| {}).unwrap();
         assert!(!result.success);
         assert!(result.cancelled);
         assert_eq!(result.residue, residue_of(Path::new(&result.target)));

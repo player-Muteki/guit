@@ -251,13 +251,18 @@ fn process_with_deadlines(
     command
         .args(["hash-object", "--stdin"])
         .current_dir(std::env::temp_dir());
-    let output =
-        match crate::runner::run(command, cancelled, completion_after, timeout_after, |_, _| {}) {
-            Err(error) if error.code == "process_cancelled" => {
-                return Ok("Git process cancelled and reaped.".into())
-            }
-            result => result?,
-        };
+    let output = match crate::runner::run(
+        command,
+        cancelled,
+        completion_after,
+        timeout_after,
+        |_, _| {},
+    ) {
+        Err(error) if error.code == "process_cancelled" => {
+            return Ok("Git process cancelled and reaped.".into())
+        }
+        result => result?,
+    };
     if !output.status.success() || output.truncated {
         return Err(ProbeError::new(
             "probe_exit_failed",

@@ -350,9 +350,14 @@ async fn clone_repository(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<clone::CloneState>();
-        let outcome = clone::clone_repository(&state, &source, std::path::Path::new(&parent), &mut |line| {
-            let _ = app.emit("clone-progress", line);
-        });
+        let outcome = clone::clone_repository(
+            &state,
+            &source,
+            std::path::Path::new(&parent),
+            &mut |line| {
+                let _ = app.emit("clone-progress", line);
+            },
+        );
         state.running.store(false, Ordering::SeqCst);
         outcome
     })

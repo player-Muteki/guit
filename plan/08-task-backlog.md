@@ -1,6 +1,6 @@
 # 08 实施任务清单
 
-本清单把 [06-development-roadmap.md](06-development-roadmap.md) 的 M0–M6 拆成可独立评审的任务。方括号用于实施时跟踪；M0 已完成（Linux 证据见 [M0-validation.md](M0-validation.md)，Windows/macOS 运行时验证为遗留交接门槛），M1 起未开始。每项完成时应附对应代码、自动化测试或平台验证记录，而不是只勾选功能演示。
+本清单把 [06-development-roadmap.md](06-development-roadmap.md) 的 M0–M6 拆成可独立评审的任务。方括号用于实施时跟踪；M0、M1 已完成（Linux 证据分别见 [M0-validation.md](M0-validation.md) 与 [M1-validation.md](M1-validation.md)，Windows/macOS 运行时验证为遗留交接门槛），M2 起未开始。每项完成时应附对应代码、自动化测试或平台验证记录，而不是只勾选功能演示。
 
 ## M0 工程与技术探针
 
@@ -16,6 +16,8 @@ M0 已于 2026-09-23 在 Linux 主机完成并记录证据，详见 [M0-validati
 - [x] **M0-08** 设计临时仓库测试夹具、隔离 Git 配置和 CI 最小门槛。证据：`tests/helpers/git.mjs` 剥离 GIT_* 并设置 NOSYSTEM/GLOBAL/TERMINAL_PROMPT；`node --test` 夹具通过；`.github/workflows/m0.yml` 三平台 lint/test/build 门槛。
 
 ## M1 只读仓库工作台
+
+M1 已于 2026-09-23 在 Linux 主机完成交付验证，详见 [M1-validation.md](M1-validation.md)：60 项 Rust 测试、9 项 node 测试、`tsc && vite build`、`cargo fmt --check` 与 `tauri build --bundles deb,rpm` 全部通过；发布版二进制经 AT-SPI 运行时验证会话恢复、监听自动刷新、分组列表、克隆卡片门控与进度事件。键盘快捷键与克隆完整点击流因 Wayland 合成输入限制仅由单元/集成测试覆盖，列为交接门槛。
 
 - [x] **M1-01** 用 Git 命令探测工作树根、Git 目录、裸仓库与 worktree；测试 `.git` 为文件的情况。证据：`app/src-tauri/src/repo.rs`（`rev-parse` 逐项探测 + `util::same_path` 规范化比较），7 个临时仓库测试覆盖普通/嵌套目录/裸仓库/`.git` 文件链接 worktree/非仓库/缺失路径/状态输出采集。
 - [x] **M1-02** 实现文件选择、打开仓库、最近仓库和会话关闭；无效路径不残留半成品会话。证据：`app/src-tauri/src/session.rs` 打开流程先探测并采集快照、全部成功后才替换会话（失败测试证明旧会话保持不变；裸仓库跳过 Git 拒绝的 status）；`recent.json`/`session.json` 原子写入，最近列表去重置顶限量 10，重启自动恢复、仓库消失则清除；前端 `main.ts` 新增仓库卡片（文件夹选择器、最近列表、分组文件清单、关闭按钮）。Rust 43 项测试、tsc/vite 构建、3 项夹具测试通过（Linux 单平台）。

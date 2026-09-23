@@ -158,9 +158,7 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
     let mode = match &watcher {
         Ok(_) => Mode::Watch,
         Err(error) => {
-            eprintln!(
-                "guit [watch]: filesystem events unavailable ({error}); polling instead"
-            );
+            eprintln!("guit [watch]: filesystem events unavailable ({error}); polling instead");
             Mode::Poll
         }
     };
@@ -335,7 +333,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let targets = watch_targets(&identity_for(directory.path()));
         assert_eq!(targets, vec![directory.path().canonicalize().unwrap()]);
-        let missing = watch_targets(&identity_for(Path::new("/nonexistent/guit-test")) );
+        let missing = watch_targets(&identity_for(Path::new("/nonexistent/guit-test")));
         assert!(missing.is_empty());
     }
 
@@ -343,11 +341,7 @@ mod tests {
     fn watcher_delivers_real_filesystem_events() {
         let directory = tempfile::tempdir().unwrap();
         let (tx, rx) = mpsc::channel();
-        let watcher = start_watcher(
-            &[directory.path().to_path_buf()],
-            tx.clone(),
-        )
-        .unwrap();
+        let watcher = start_watcher(&[directory.path().to_path_buf()], tx.clone()).unwrap();
         std::fs::write(directory.path().join("tracked.txt"), b"x").unwrap();
         assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok());
         drop(watcher);
