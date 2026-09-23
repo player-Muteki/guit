@@ -1,6 +1,6 @@
 # 08 实施任务清单
 
-本清单把 [06-development-roadmap.md](06-development-roadmap.md) 的 M0–M6 拆成可独立评审的任务。方括号用于实施时跟踪；M0、M1 已完成（Linux 证据分别见 [M0-validation.md](M0-validation.md) 与 [M1-validation.md](M1-validation.md)，Windows/macOS 运行时验证为遗留交接门槛），M2 进行中（M2-01 已完成，Linux 单平台）。每项完成时应附对应代码、自动化测试或平台验证记录，而不是只勾选功能演示。
+本清单把 [06-development-roadmap.md](06-development-roadmap.md) 的 M0–M6 拆成可独立评审的任务。方括号用于实施时跟踪；M0、M1 已完成（Linux 证据分别见 [M0-validation.md](M0-validation.md) 与 [M1-validation.md](M1-validation.md)，Windows/macOS 运行时验证为遗留交接门槛），M2 进行中（M2-01、M2-02、M2-03、M2-07 已完成，Linux 单平台）。每项完成时应附对应代码、自动化测试或平台验证记录，而不是只勾选功能演示。
 
 ## M0 工程与技术探针
 
@@ -38,7 +38,7 @@ M1 已于 2026-09-23 在 Linux 主机完成交付验证，详见 [M1-validation.
 - [ ] **M2-04** 实现外部文件打开、工作区 diff、暂存 diff；工具失败和返回后有明确反馈。
 - [ ] **M2-05** 实现丢弃工作区改动的影响预览、状态复查和确认。
 - [ ] **M2-06** 实现 `clean` 预览与执行目标一致性检查；候选集合变化时重新确认。
-- [ ] **M2-07** 实现多行提交消息、临时文件权限/清理、提交与 amend；钩子失败保留输入。
+- [x] **M2-07** 实现多行提交消息、临时文件权限/清理、提交与 amend；钩子失败保留输入。证据：`write.rs` `execute_commit/run_commit`——空消息（trim 后）在执行前拒绝；消息只经 `tempfile::NamedTempFile`（0600，写入后 `sync_all`，Git 退出即删除）以 `git commit -F <path>` 传给 Git，amend 追加 `--amend`，超时 600s；结果消息全为静态字符串，用户输入不插入 message/details，`ProbeError` 的 eprintln 路径只收到 IO 错误文本（测试 `hook_rejection_fails_without_leaking_the_message` 断言序列化 `OperationResult` 不含消息原文）；不注入 `--no-verify`、不改签名配置（`user_git_command` 完整沿用用户 hooks/gpg，测试仅以仓库级 config 覆盖以保隔离）。无头仓库允许初次提交、amend 得结构化拒绝（`unborn_head_allows_initial_commit_but_not_amend`）；钩子拒绝与签名失败均为 Failed 且重读快照显示暂存内容保留（供用户修正后重试）；取消在 Git 启动前命中即 Cancelled 且仍重读（`cancelled_commit_never_reaches_git_and_still_refreshes`）。`session.rs` 新增 `commit_context`（会话/版本/裸仓库闸门 + unborn 判定）。前端提交卡片：多行 textarea + amend 复选框 + Commit/Cancel（Ctrl/Cmd+Enter 提交；成功清空输入，失败/取消/拒绝保留；`writeRunning` 与无会话时禁用，取消按钮仅在写入运行中可用）。7 项 commit 测试、78 项 Rust 测试、9 项 node fixture 测试、`tsc && vite build`、`cargo fmt` 通过（Linux 单平台；提交卡片的 AT-SPI 运行时验证归 M2-08）。
 - [ ] **M2-08** 建立提交、丢弃、取消、钩子拒绝、签名失败的临时仓库测试。
 
 ## M3 历史、分支和标签

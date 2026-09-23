@@ -42,14 +42,17 @@ impl WriteState {
 pub enum OperationKind {
     Stage,
     Unstage,
+    Commit,
 }
 
 impl OperationKind {
     /// Git argument prefix plus the past-tense verb for the result message.
+    /// Commit runs through its own runner and never uses this plan.
     fn plan(self) -> (&'static [&'static str], &'static str) {
         match self {
             OperationKind::Stage => (&["add"], "Staged"),
             OperationKind::Unstage => (&["restore", "--staged"], "Unstaged"),
+            OperationKind::Commit => (&[], "Committed"),
         }
     }
 
@@ -159,6 +162,123 @@ pub(crate) fn run_write(
         outcome,
         exit_code,
         message,
+        details,
+        snapshot,
+    })
+}
+
+/// Commit the staged index. The message travels to Git only through a
+/// private 0600 temp file (`-F`), removed as soon as Git exits; it never
+/// appears in the result, in `details`, or in any log line this module
+/// writes. Hooks and signing configuration belong to the user and run
+/// untouched — no `--no-verify`, no forced GPG flags.
+pub(crate) fn execute_commit(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    message: String,
+    amend: bool,
+) -> Result<OperationResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_commit(state, sessions, snapshot_version, &message, amend);
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+pub(crate) fn run_commit(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    message: &str,
+    amend: bool,
+) -> Result<OperationResult, ProbeError> {
+    let mut outcome = Outcome::Success;
+    let mut exit_code = None;
+    let result_message;
+    let mut details = None;
+    if message.trim().is_empty() {
+        outcome = Outcome::Rejected;
+        result_message = "Commit message is empty.".into();
+    } else {
+        match sessions.commit_context(snapshot_version) {
+            Err(error) => {
+                outcome = Outcome::Rejected;
+                result_message = error.message;
+            }
+            Ok((work_root, unborn)) => {
+                if amend && unborn {
+                    outcome = Outcome::Rejected;
+                    result_message = "This branch has no commit to amend yet.".into();
+                } else if state.cancelled.load(Ordering::SeqCst) {
+                    outcome = Outcome::Cancelled;
+                    result_message = "Cancelled before Git ran.".into();
+                } else {
+                    let message_file = tempfile::NamedTempFile::new().map_err(|error| {
+                        ProbeError::new("commit_temp_failed", error.to_string())
+                    })?;
+                    let mut written = message_file.reopen().map_err(|error| {
+                        ProbeError::new("commit_temp_failed", error.to_string())
+                    })?;
+                    use std::io::Write;
+                    written.write_all(message.as_bytes()).map_err(|error| {
+                        ProbeError::new("commit_temp_failed", error.to_string())
+                    })?;
+                    written
+                        .write_all(b"\n")
+                        .and_then(|_| written.sync_all())
+                        .map_err(|error| {
+                            ProbeError::new("commit_temp_failed", error.to_string())
+                        })?;
+                    drop(written);
+                    let mut command = repo::user_git_command(&work_root);
+                    command.args(["commit", "-F"]);
+                    command.arg(message_file.path());
+                    if amend {
+                        command.arg("--amend");
+                    }
+                    match runner::run_with_limit(
+                        command,
+                        &state.cancelled,
+                        Duration::ZERO,
+                        Duration::from_secs(600),
+                        runner::DEFAULT_OUTPUT_LIMIT,
+                        |_, _| {},
+                    ) {
+                        Ok(output) => {
+                            exit_code = output.status.code();
+                            if output.status.success() {
+                                result_message = if amend {
+                                    "Amended the last commit.".into()
+                                } else {
+                                    "Commit completed.".into()
+                                };
+                            } else {
+                                outcome = Outcome::Failed;
+                                result_message = "git commit reported a failure.".into();
+                                details = Some(first_stderr_line(&output.stderr));
+                            }
+                        }
+                        Err(error) if error.code == "process_cancelled" => {
+                            outcome = Outcome::Cancelled;
+                            result_message = "Cancelled while the Git process was running.".into();
+                        }
+                        Err(error) => return Err(error),
+                    }
+                    // message_file drops here, after Git has read it.
+                }
+            }
+        }
+    }
+    let snapshot = session::refresh(sessions)?;
+    Ok(OperationResult {
+        operation_id: 0,
+        kind: OperationKind::Commit,
+        outcome,
+        exit_code,
+        message: result_message,
         details,
         snapshot,
     })
@@ -474,6 +594,263 @@ mod tests {
         "-c",
         "user.email=test@example.invalid",
     ];
+
+    /// The write path uses the user's Git and their repository configuration,
+    /// so tests pin identity and shadow a global `core.hooksPath` repo-locally.
+    fn configure_commit_repo(root: &Path) {
+        repo::git_with(root, &[], &["config", "user.name", "guit test"]);
+        repo::git_with(root, &[], &["config", "user.email", "test@example.invalid"]);
+        repo::git_with(root, &[], &["config", "core.hooksPath", ".git/hooks"]);
+    }
+
+    fn git_stdout(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/nonexistent-guit-test-config")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("LC_ALL", "C")
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn commit_count(root: &Path) -> usize {
+        git_stdout(root, &["rev-list", "--count", "HEAD"])
+            .parse()
+            .expect("numeric count")
+    }
+
+    fn head_subject(root: &Path) -> String {
+        git_stdout(root, &["log", "-1", "--format=%s"])
+    }
+
+    #[test]
+    fn commit_success_creates_head_and_clears_the_staged_file() {
+        let repository = init_repo();
+        let root = repository.path();
+        configure_commit_repo(root);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        execute_stage(
+            &writes,
+            &sessions,
+            view.version,
+            vec![file_id(&view, "a.txt")],
+        )
+        .unwrap();
+        let staged = session::refresh(&sessions).unwrap().expect("snapshot");
+
+        let result = execute_commit(
+            &writes,
+            &sessions,
+            staged.version,
+            "feature: one\n\nbody text".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (result.outcome, result.exit_code, result.kind),
+            (Outcome::Success, Some(0), OperationKind::Commit)
+        );
+        assert_eq!(result.message, "Commit completed.");
+        assert_eq!(commit_count(root), 1);
+        assert_eq!(head_subject(root), "feature: one");
+        let snapshot = result.snapshot.expect("re-read");
+        assert!(snapshot.files.is_empty(), "commit leaves no changes");
+    }
+
+    #[test]
+    fn empty_message_is_rejected_without_running_git() {
+        let repository = init_repo();
+        let root = repository.path();
+        configure_commit_repo(root);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+
+        let result =
+            execute_commit(&writes, &sessions, view.version, "  \n".into(), false).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected);
+        assert_eq!(result.exit_code, None);
+        assert!(result.message.contains("empty"));
+        // Rejection happened before Git ran: HEAD is still unborn and the
+        // staged file waits for a real message.
+        let snapshot = result.snapshot.expect("re-read");
+        assert_eq!(is_staged(&snapshot, "a.txt"), Some("A"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_rejection_fails_without_leaking_the_message() {
+        use std::os::unix::fs::PermissionsExt;
+        let repository = init_repo();
+        let root = repository.path();
+        configure_commit_repo(root);
+        std::fs::write(root.join("base.txt"), "one\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "base.txt"]);
+        repo::git_with(root, COMMIT_ID, &["commit", "-q", "-m", "base"]);
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+        let hook = root.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, b"#!/bin/sh\necho 'hook declined' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let result = execute_commit(
+            &writes,
+            &sessions,
+            view.version,
+            "hook-secret-勿泄密".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.outcome, Outcome::Failed);
+        assert_eq!(result.exit_code, Some(1));
+        assert_eq!(commit_count(root), 1, "the hook must keep its veto");
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(
+            !serialized.contains("hook-secret"),
+            "the message must never reach the result: {serialized}"
+        );
+        // The staged index survives so the user can fix and retry.
+        let snapshot = result.snapshot.expect("re-read");
+        assert_eq!(is_staged(&snapshot, "a.txt"), Some("A"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signing_failure_is_reported_not_bypassed() {
+        use std::os::unix::fs::PermissionsExt;
+        let repository = init_repo();
+        let root = repository.path();
+        configure_commit_repo(root);
+        let gpg = root.join("failing-gpg");
+        std::fs::write(&gpg, b"#!/bin/sh\nexit 2\n").unwrap();
+        std::fs::set_permissions(&gpg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        repo::git_with(root, &[], &["config", "commit.gpgsign", "true"]);
+        repo::git_with(
+            root,
+            &[],
+            &["config", "user.signingkey", "guit-nonexistent"],
+        );
+        repo::git_with(
+            root,
+            &[],
+            &["config", "gpg.program", &gpg.to_string_lossy()],
+        );
+        const UNSIGNED_COMMIT: &[&str] = &[
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=guit test",
+            "-c",
+            "user.email=test@example.invalid",
+        ];
+        std::fs::write(root.join("base.txt"), "one\n").unwrap();
+        repo::git_with(root, UNSIGNED_COMMIT, &["add", "--", "base.txt"]);
+        repo::git_with(root, UNSIGNED_COMMIT, &["commit", "-q", "-m", "base"]);
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let result =
+            execute_commit(&writes, &sessions, view.version, "signed".into(), false).unwrap();
+        assert_eq!(result.outcome, Outcome::Failed);
+        assert!(result.details.is_some(), "Git's reason must be preserved");
+        assert_eq!(commit_count(root), 1, "no unsigned commit was smuggled in");
+        let snapshot = result.snapshot.expect("re-read");
+        assert_eq!(is_staged(&snapshot, "a.txt"), Some("A"));
+    }
+
+    #[test]
+    fn amend_replaces_the_head_subject() {
+        let repository = init_repo();
+        let root = repository.path();
+        configure_commit_repo(root);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+        repo::git_with(root, COMMIT_ID, &["commit", "-q", "-m", "first subject"]);
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let result = execute_commit(
+            &writes,
+            &sessions,
+            view.version,
+            "rewritten subject".into(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.message, "Amended the last commit.");
+        assert_eq!(commit_count(root), 1, "amend replaces, never adds");
+        assert_eq!(head_subject(root), "rewritten subject");
+    }
+
+    #[test]
+    fn cancelled_commit_never_reaches_git_and_still_refreshes() {
+        let repository = init_repo();
+        let root = repository.path();
+        configure_commit_repo(root);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        writes.begin().unwrap();
+        writes.cancel();
+
+        let result =
+            run_commit(&writes, &sessions, view.version, "cancelled intent", false).unwrap();
+        writes.finish();
+        assert_eq!(result.outcome, Outcome::Cancelled);
+        assert_eq!(result.exit_code, None);
+        // Nothing reached Git: the repository is still unborn.
+        let snapshot = result.snapshot.expect("state re-read after cancel");
+        assert_eq!(is_staged(&snapshot, "a.txt"), Some("A"));
+    }
+
+    #[test]
+    fn unborn_head_allows_initial_commit_but_not_amend() {
+        let repository = init_repo();
+        let root = repository.path();
+        configure_commit_repo(root);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+
+        let rejected =
+            execute_commit(&writes, &sessions, view.version, "oops".into(), true).unwrap();
+        assert_eq!(rejected.outcome, Outcome::Rejected);
+        assert!(rejected.message.contains("amend"));
+        assert_eq!(rejected.exit_code, None);
+
+        let fresh = rejected.snapshot.expect("re-read");
+        let initial = execute_commit(
+            &writes,
+            &sessions,
+            fresh.version,
+            "initial commit".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(initial.outcome, Outcome::Success);
+        assert_eq!(commit_count(root), 1);
+    }
 
     #[test]
     fn unstage_reverts_only_the_index_side_of_a_both_sides_file() {

@@ -56,6 +56,43 @@ impl SessionState {
             .map(|active| active.view.clone())
     }
 
+    /// Guards for commit-style writes that carry no file IDs: the session
+    /// must be live, at the expected version, and have a work tree.
+    /// Returns the work-tree root and whether HEAD is still unborn
+    /// (amending an unborn branch is refused with a clear message).
+    pub(crate) fn commit_context(
+        &self,
+        expected_version: u64,
+    ) -> Result<(PathBuf, bool), ProbeError> {
+        let current = self.current.lock().unwrap();
+        let active = current
+            .as_ref()
+            .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
+        if active.version != expected_version {
+            return Err(ProbeError::new(
+                "write_stale_snapshot",
+                "The repository changed since this view was rendered; the request was rejected.",
+            ));
+        }
+        let root = active
+            .identity
+            .work_root
+            .as_ref()
+            .ok_or_else(|| {
+                ProbeError::new(
+                    "write_bare_repo",
+                    "A bare repository has no working copy to modify.",
+                )
+            })?
+            .clone();
+        let unborn = active
+            .view
+            .branch
+            .as_ref()
+            .is_some_and(|branch| branch.head_state == crate::model::HeadState::Unborn);
+        Ok((root, unborn))
+    }
+
     /// Validates a write request against the live snapshot: the version must
     /// match exactly, the repository must have a work tree, and every file ID
     /// must belong to that snapshot. Returns the work-tree root plus the raw

@@ -395,6 +395,22 @@ async fn unstage_files(
     .await
 }
 
+#[tauri::command]
+async fn commit_changes(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    message: String,
+    amend: bool,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        write::execute_commit(&state, &sessions, snapshot_version, message, amend)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 async fn run_write_command(
     app: tauri::AppHandle,
     snapshot_version: u64,
@@ -444,6 +460,7 @@ fn main() {
             cancel_clone,
             stage_files,
             unstage_files,
+            commit_changes,
             cancel_write
         ])
         .run(tauri::generate_context!())

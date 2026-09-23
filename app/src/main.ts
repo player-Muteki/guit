@@ -75,7 +75,7 @@ type CloneResult = {
 
 type OperationResult = {
   operationId: number;
-  kind: "stage" | "unstage";
+  kind: "stage" | "unstage" | "commit";
   outcome: "success" | "failed" | "cancelled" | "rejected";
   exitCode: number | null;
   message: string;
@@ -111,6 +111,15 @@ app.innerHTML = `
       <div id="file-virtual" class="virtual"><div id="file-rows" class="virtual-rows"></div></div>
     </div>
     <p id="write-status" role="status"></p>
+    <h2>Commit</h2>
+    <div class="commit-box">
+      <textarea id="commit-message" rows="3" placeholder="Commit message — Ctrl+Enter commits" aria-label="Commit message" disabled></textarea>
+      <div class="actions">
+        <label><input id="commit-amend" type="checkbox" disabled /> Amend last commit</label>
+        <button id="commit-button" disabled>Commit</button>
+        <button id="commit-cancel" disabled>Cancel</button>
+      </div>
+    </div>
   </section>
   <section class="card">
     <h1>Environment check</h1>
@@ -165,6 +174,10 @@ const openRepoButton = document.querySelector<HTMLButtonElement>("#open-repo")!;
 const refreshRepoButton = document.querySelector<HTMLButtonElement>("#refresh-repo")!;
 const closeRepoButton = document.querySelector<HTMLButtonElement>("#close-repo")!;
 const writeStatus = document.querySelector<HTMLElement>("#write-status")!;
+const commitMessage = document.querySelector<HTMLTextAreaElement>("#commit-message")!;
+const commitAmend = document.querySelector<HTMLInputElement>("#commit-amend")!;
+const commitButton = document.querySelector<HTMLButtonElement>("#commit-button")!;
+const commitCancelButton = document.querySelector<HTMLButtonElement>("#commit-cancel")!;
 
 const ROW_HEIGHT = 30;
 const OVERSCAN = 6;
@@ -222,8 +235,11 @@ function renderSnapshot(snapshot: SnapshotView | null): void {
   sessionActive = snapshot !== null;
   closeRepoButton.disabled = !sessionActive;
   refreshRepoButton.disabled = !sessionActive;
+  syncCommitControls();
   repoSummary.textContent = "";
   if (!snapshot) {
+    commitMessage.value = "";
+    commitAmend.checked = false;
     recentList.replaceChildren();
     renderRecentPlaceholder("None yet.");
     renderFilesPlaceholder("Open a repository to list its working copy status.");
@@ -403,6 +419,7 @@ async function runWrite(
 ): Promise<void> {
   if (!currentSnapshot || writeRunning) return;
   writeRunning = true;
+  syncCommitControls();
   writeStatus.textContent = `${command === "stage_files" ? "Staging" : "Unstaging"} ${fileIds.length} file(s)…`;
   renderFileRows();
   try {
@@ -419,9 +436,61 @@ async function runWrite(
     writeStatus.textContent = "The write did not run.";
   } finally {
     writeRunning = false;
+    syncCommitControls();
     renderFileRows();
   }
 }
+
+function syncCommitControls(): void {
+  const locked = !sessionActive || writeRunning;
+  commitMessage.disabled = locked;
+  commitAmend.disabled = locked;
+  commitButton.disabled = locked;
+  commitCancelButton.disabled = !writeRunning;
+}
+
+// On failure, cancellation or rejection the textarea keeps its content: the
+// user's message is input they own, and guit never swallows it.
+async function commitNow(): Promise<void> {
+  if (!currentSnapshot || writeRunning) return;
+  const message = commitMessage.value;
+  const amend = commitAmend.checked;
+  writeRunning = true;
+  syncCommitControls();
+  renderFileRows();
+  writeStatus.textContent = amend ? "Amending the last commit…" : "Committing…";
+  try {
+    const result = await invoke<OperationResult>("commit_changes", {
+      snapshotVersion: currentSnapshot.version,
+      message,
+      amend,
+    });
+    applySnapshot(result.snapshot);
+    writeStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+    if (result.outcome === "success") {
+      commitMessage.value = "";
+      commitAmend.checked = false;
+    }
+  } catch (error) {
+    showError(error);
+    writeStatus.textContent = "The commit did not run.";
+  } finally {
+    writeRunning = false;
+    syncCommitControls();
+    renderFileRows();
+  }
+}
+
+commitButton.addEventListener("click", () => void commitNow());
+commitCancelButton.addEventListener("click", () => void invoke("cancel_write"));
+commitMessage.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    void commitNow();
+  }
+});
 
 function toggleGroup(group: FileGroupKey): void {
   if (collapsedGroups.has(group)) collapsedGroups.delete(group);
