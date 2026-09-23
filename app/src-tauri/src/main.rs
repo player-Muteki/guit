@@ -559,6 +559,57 @@ async fn history_page(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn commit_files(
+    app: tauri::AppHandle,
+    oid: String,
+) -> Result<Vec<history::CommitFileView>, ProbeError> {
+    if !history::valid_oid(&oid) {
+        return Err(ProbeError::new(
+            "history_target_invalid",
+            "Files can only be listed for a full commit id from the current view.",
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        let identity = sessions
+            .current_identity()
+            .ok_or_else(|| ProbeError::new("history_no_session", "No repository is open."))?;
+        // Read-only listing: a bare repository has objects even without a
+        // working copy, so only the tool lane stays work-tree bound.
+        let directory = if identity.is_bare {
+            identity.git_dir.as_path()
+        } else {
+            identity
+                .work_dir()
+                .map_err(|_| ProbeError::new("repo_worktree_missing", "The work tree is gone."))?
+        };
+        history::commit_files(directory, &oid)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn open_commit_diff(
+    app: tauri::AppHandle,
+    oid: String,
+) -> Result<extools::ToolResult, ProbeError> {
+    if !history::valid_oid(&oid) {
+        return Err(ProbeError::new(
+            "history_target_invalid",
+            "A diff can only be opened for a full commit id from the current view.",
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<extools::ToolState>();
+        let sessions = app.state::<session::SessionState>();
+        extools::execute_commit_diff(&state, &sessions, &oid)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -597,7 +648,9 @@ fn main() {
             clean_files,
             open_external_tool,
             cancel_exttool,
-            history_page
+            history_page,
+            commit_files,
+            open_commit_diff
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

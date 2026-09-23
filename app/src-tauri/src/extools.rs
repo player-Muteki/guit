@@ -41,6 +41,9 @@ pub enum ToolPurpose {
     OpenFile,
     DiffWorktree,
     DiffStaged,
+    /// Diff of one commit against its first parent (or the empty tree for
+    /// a root commit). Addressed by object id, not by snapshot file id.
+    DiffCommit,
 }
 
 /// Same contract shape as write operations: an outcome, redacted details and
@@ -111,6 +114,171 @@ pub(crate) fn run(
 
 type Dispatched = (Outcome, Option<i32>, String, Option<String>);
 
+/// Commit-wide diff: one slot in the tool lane, then the same
+/// execute → run → always-refresh contract as the file-scoped tools.
+pub fn execute_commit_diff(
+    state: &ToolState,
+    sessions: &session::SessionState,
+    oid: &str,
+) -> Result<ToolResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_commit_diff(state, sessions, oid);
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+fn run_commit_diff(
+    state: &ToolState,
+    sessions: &session::SessionState,
+    oid: &str,
+) -> Result<ToolResult, ProbeError> {
+    let (outcome, exit_code, message, details) = match commit_diff_baseline(sessions, oid) {
+        Err(error) => (Outcome::Rejected, None, error.message, None),
+        Ok((work_root, baseline)) => {
+            if state.cancelled.load(Ordering::SeqCst) {
+                (
+                    Outcome::Cancelled,
+                    None,
+                    "Cancelled before the tool ran.".into(),
+                    None,
+                )
+            } else {
+                match run_commit_difftool(&work_root, &baseline, oid, &state.cancelled) {
+                    Ok(output) => {
+                        let exit_code = output.status.code();
+                        if output.status.success() {
+                            (
+                                Outcome::Success,
+                                exit_code,
+                                "Diff tool closed.".into(),
+                                None,
+                            )
+                        } else {
+                            (
+                                Outcome::Failed,
+                                exit_code,
+                                "The diff tool reported a failure.".into(),
+                                Some(first_stderr_line(&output.stderr)),
+                            )
+                        }
+                    }
+                    Err(error) if error.code == "process_cancelled" => (
+                        Outcome::Cancelled,
+                        None,
+                        "Cancelled while the diff tool was running.".into(),
+                        None,
+                    ),
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    };
+    let snapshot = session::refresh(sessions)?;
+    Ok(ToolResult {
+        operation_id: 0,
+        purpose: ToolPurpose::DiffCommit,
+        outcome,
+        exit_code,
+        message,
+        details,
+        snapshot,
+    })
+}
+
+/// Resolves the live work root and the diff baseline at click time: the
+/// first parent, or the empty tree for a root commit. A commit that vanished
+/// since the history was rendered is rejected instead of diffing a
+/// lookalike object.
+fn commit_diff_baseline(
+    sessions: &session::SessionState,
+    oid: &str,
+) -> Result<(std::path::PathBuf, String), ProbeError> {
+    let identity = sessions
+        .current_identity()
+        .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
+    let work_root = identity.work_root.ok_or_else(|| {
+        ProbeError::new(
+            "write_bare_repo",
+            "A bare repository has no working copy for external tools.",
+        )
+    })?;
+    if rev_parse_verify(&work_root, &format!("{oid}^{{commit}}")).is_none() {
+        return Err(ProbeError::new(
+            "history_commit_missing",
+            "That commit is no longer present in this repository.",
+        ));
+    }
+    let baseline = match rev_parse_verify(&work_root, &format!("{oid}^")) {
+        Some(parent) => parent,
+        None => empty_tree(&work_root)?,
+    };
+    Ok((work_root, baseline))
+}
+
+fn rev_parse_verify(work_root: &Path, rev: &str) -> Option<String> {
+    let mut command = repo::user_git_command(work_root);
+    command.args(["rev-parse", "--verify", "-q", rev]);
+    let output = runner::run_with_limit(
+        command,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+        Duration::from_secs(10),
+        runner::DEFAULT_OUTPUT_LIMIT,
+        |_, _| {},
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+/// `git mktree` with empty stdin writes and prints the repository's empty
+/// tree object — SHA-1 or SHA-256, without hardcoding either hash.
+fn empty_tree(work_root: &Path) -> Result<String, ProbeError> {
+    let mut command = repo::user_git_command(work_root);
+    command.arg("mktree");
+    let output = runner::run_with_limit(
+        command,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+        Duration::from_secs(10),
+        runner::DEFAULT_OUTPUT_LIMIT,
+        |_, _| {},
+    )?;
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || !crate::history::valid_oid(&hash) {
+        return Err(ProbeError::new(
+            "external_tool_failed",
+            "Could not establish an empty baseline for the root commit.",
+        ));
+    }
+    Ok(hash)
+}
+
+fn run_commit_difftool(
+    work_root: &Path,
+    baseline: &str,
+    oid: &str,
+    cancelled: &AtomicBool,
+) -> Result<runner::CapturedOutput, ProbeError> {
+    let mut command = repo::user_git_command(work_root);
+    command.args(["difftool", "-y", "--no-prompt", "--trust-exit-code"]);
+    command.args([baseline, oid]).arg("--");
+    runner::run_with_limit(
+        command,
+        cancelled,
+        Duration::ZERO,
+        Duration::from_secs(3600),
+        runner::DEFAULT_OUTPUT_LIMIT,
+        |_, _| {},
+    )
+}
+
 fn dispatch(
     state: &ToolState,
     sessions: &session::SessionState,
@@ -132,6 +300,14 @@ fn dispatch(
         ));
     }
     match purpose {
+        // A commit diff is addressed by object id, not by snapshot file id;
+        // it has its own entry point below and cannot be expressed here.
+        ToolPurpose::DiffCommit => Ok((
+            Outcome::Rejected,
+            None,
+            "Commit diffs are requested by object id, not by file.".into(),
+            None,
+        )),
         ToolPurpose::OpenFile => match open_file(&path) {
             Ok(()) => Ok((
                 Outcome::Success,
@@ -469,5 +645,91 @@ mod tests {
             Some("saw"),
             "the fake tool must have been launched for the named file"
         );
+    }
+
+    fn configure_fake_tool(root: &Path, script: &str) {
+        repo::git_with(root, &[], &["config", "diff.tool", "guitfake"]);
+        repo::git_with(root, &[], &["config", "difftool.guitfake.cmd", script]);
+    }
+
+    #[test]
+    fn commit_diff_reaches_the_tool_even_for_a_root_commit() {
+        let repository = init_repo();
+        let root = repository.path();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        repo::git_with(root, COMMIT_ID, &["add", "--", "a.txt"]);
+        repo::git_with(root, COMMIT_ID, &["commit", "-q", "-m", "initial"]);
+        let output = std::process::Command::new("git")
+            .arg("-c")
+            .arg("core.autocrlf=false")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "HEAD"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/nonexistent-guit-test-config")
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap();
+        let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        assert!(crate::history::valid_oid(&commit));
+        // A failing tool proves the whole chain ran: if the empty-tree
+        // baseline were wrong, Git itself would fail before the tool.
+        configure_fake_tool(root, "echo launched >&2; exit 4");
+        let sessions = session::SessionState::default();
+        session::open(&sessions, root).unwrap();
+        let tools = ToolState::default();
+
+        let result = execute_commit_diff(&tools, &sessions, &commit).unwrap();
+        assert_eq!(
+            (result.outcome, result.exit_code),
+            (Outcome::Failed, Some(128)),
+            "details: {:?}",
+            result.details
+        );
+        assert_eq!(result.details.as_deref(), Some("launched"));
+        assert_eq!(result.purpose, ToolPurpose::DiffCommit);
+        assert!(result.snapshot.is_some());
+    }
+
+    #[test]
+    fn commit_diff_refuses_without_a_session_or_a_live_commit() {
+        let repository = init_repo();
+        let root = repository.path();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        let tools = ToolState::default();
+        let sessions = session::SessionState::default();
+
+        let result = execute_commit_diff(&tools, &sessions, &"f".repeat(40)).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected);
+        assert!(result.message.contains("No repository session"));
+
+        let view = session::open(&sessions, root).unwrap();
+        let result = execute_commit_diff(&tools, &sessions, &"f".repeat(40)).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected);
+        assert!(result.message.contains("no longer present"));
+        // The rejection re-read status like every other tool outcome.
+        assert!(result.snapshot.is_some());
+        let _ = view;
+    }
+
+    #[test]
+    fn file_scoped_entry_rejects_the_commit_purpose() {
+        let repository = init_repo();
+        let root = repository.path();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let tools = ToolState::default();
+
+        let result = execute(
+            &tools,
+            &sessions,
+            view.version,
+            file_id(&view, "a.txt"),
+            ToolPurpose::DiffCommit,
+        )
+        .unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected);
+        assert!(result.message.contains("object id"));
     }
 }

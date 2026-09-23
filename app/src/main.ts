@@ -90,7 +90,7 @@ type PreviewResult = {
   snapshot: SnapshotView;
 };
 
-type ToolPurpose = "openFile" | "diffWorktree" | "diffStaged";
+type ToolPurpose = "openFile" | "diffWorktree" | "diffStaged" | "diffCommit";
 
 type ToolResult = {
   operationId: number;
@@ -147,6 +147,25 @@ app.innerHTML = `
         <label><input id="commit-amend" type="checkbox" disabled /> Amend last commit</label>
         <button id="commit-button" disabled>Commit</button>
         <button id="commit-cancel" disabled>Cancel</button>
+      </div>
+    </div>
+  </section>
+  <section class="card">
+    <h1>History</h1>
+    <div id="history-list" class="history" role="list" aria-label="Commit history">
+      <div class="file-row placeholder">Open a repository to browse its history.</div>
+    </div>
+    <div class="actions">
+      <button id="history-more" disabled>Load older</button>
+    </div>
+    <p id="history-status" role="status"></p>
+    <div id="commit-detail" class="detail" hidden>
+      <dl id="detail-meta"></dl>
+      <pre id="detail-message" class="commit-message"></pre>
+      <ul id="detail-files" class="detail-files"></ul>
+      <div class="actions">
+        <button id="copy-oid">Copy OID</button>
+        <button id="diff-commit">Diff commit</button>
       </div>
     </div>
   </section>
@@ -272,6 +291,7 @@ function describeBranch(branch: BranchView | null): string {
 
 function renderSnapshot(snapshot: SnapshotView | null): void {
   sessionActive = snapshot !== null;
+  syncHistoryWithSnapshot();
   closeRepoButton.disabled = !sessionActive;
   refreshRepoButton.disabled = !sessionActive;
   syncCommitControls();
@@ -547,6 +567,7 @@ function syncCommitControls(): void {
   commitButton.disabled = locked;
   commitCancelButton.disabled = !writeRunning;
   toolCancelButton.disabled = !toolRunning;
+  diffCommitButton.disabled = toolRunning || selectedCommit === null;
   previewConfirmButton.disabled = writeRunning || pendingPreview === null;
   previewKeepButton.disabled = writeRunning;
 }
@@ -793,6 +814,214 @@ previewConfirmButton.addEventListener("click", () => void confirmPreview());
 previewKeepButton.addEventListener("click", () =>
   closePreviewPanel("Cancelled; nothing was changed."),
 );
+
+// --- History (M3-02): read-only commit browsing ---------------------------
+// Rows come from the backend's fixed-field log protocol; commits are
+// addressed only by full object ids and the frontend never builds Git
+// arguments or parses Git output itself.
+
+type CommitView = {
+  oid: string;
+  parents: string[];
+  subject: string;
+  message: string;
+  authorName: string;
+  authorEmail: string;
+  authorDate: string;
+  committerName: string;
+  commitDate: string;
+  refs: string[];
+};
+
+type HistoryPage = { start: number; commits: CommitView[]; hasMore: boolean };
+
+type CommitFileView = { status: string; path: string; oldPath: string | null };
+
+const historyList = document.querySelector<HTMLElement>("#history-list")!;
+const historyMoreButton = document.querySelector<HTMLButtonElement>("#history-more")!;
+const historyStatus = document.querySelector<HTMLElement>("#history-status")!;
+const commitDetail = document.querySelector<HTMLElement>("#commit-detail")!;
+const detailMeta = document.querySelector<HTMLElement>("#detail-meta")!;
+const detailMessage = document.querySelector<HTMLElement>("#detail-message")!;
+const detailFiles = document.querySelector<HTMLElement>("#detail-files")!;
+const copyOidButton = document.querySelector<HTMLButtonElement>("#copy-oid")!;
+const diffCommitButton = document.querySelector<HTMLButtonElement>("#diff-commit")!;
+
+let historyCommits: CommitView[] = [];
+let historyHasMore = false;
+let historyLoading = false;
+// undefined = no session; null = session without commits (unborn HEAD or
+// bare repo); a string = the HEAD oid the loaded pages belong to.
+let historyRepoKey: string | null | undefined;
+let selectedCommit: CommitView | null = null;
+
+function historyPlaceholder(message: string): void {
+  historyCommits = [];
+  historyHasMore = false;
+  historyMoreButton.disabled = true;
+  historyStatus.textContent = "";
+  const row = document.createElement("div");
+  row.className = "file-row placeholder";
+  row.textContent = message;
+  historyList.replaceChildren(row);
+}
+
+// Driven from renderSnapshot: a moved HEAD (commit, switch, external write)
+// re-reads page zero; a re-render of the same HEAD never touches Git.
+function syncHistoryWithSnapshot(): void {
+  const key = currentSnapshot ? currentSnapshot.branch?.oid ?? null : undefined;
+  if (key === historyRepoKey) return;
+  historyRepoKey = key;
+  selectedCommit = null;
+  commitDetail.hidden = true;
+  if (key === undefined) historyPlaceholder("Open a repository to browse its history.");
+  else if (key === null) historyPlaceholder("No commits yet.");
+  else void loadHistory(true);
+}
+
+async function loadHistory(reset: boolean): Promise<void> {
+  if (historyLoading || !currentSnapshot) return;
+  if (!reset && !historyHasMore) return;
+  if (reset) historyPlaceholder("Loading history…");
+  historyLoading = true;
+  historyMoreButton.disabled = true;
+  try {
+    const page = await invoke<HistoryPage>("history_page", {
+      start: historyCommits.length,
+      oid: null,
+    });
+    // The session may have closed or moved on while this request ran.
+    if (historyRepoKey !== (currentSnapshot?.branch?.oid ?? null)) return;
+    historyCommits = reset ? page.commits : historyCommits.concat(page.commits);
+    historyHasMore = page.hasMore;
+    historyStatus.textContent = `${historyCommits.length} commit(s)`
+      + (historyHasMore ? " so far." : " — all loaded.");
+    renderHistoryRows();
+  } catch (error) {
+    showError(error);
+    historyPlaceholder("History could not be loaded.");
+  } finally {
+    historyLoading = false;
+    historyMoreButton.disabled = !historyHasMore;
+  }
+}
+
+function renderHistoryRows(): void {
+  const rows = historyCommits.map((commit) => {
+    const row = document.createElement("div");
+    row.className = "file-row" + (selectedCommit?.oid === commit.oid ? " selected" : "");
+    row.setAttribute("role", "listitem");
+    const button = document.createElement("button");
+    button.className = "history-select";
+    button.textContent = `${commit.subject}  · ${commit.oid.slice(0, 8)}`;
+    button.title = commit.oid;
+    button.addEventListener("click", () => void selectCommit(commit));
+    row.append(button);
+    if (commit.refs.length > 0) {
+      const badge = document.createElement("span");
+      badge.className = "history-refs";
+      badge.textContent = commit.refs.join(" · ");
+      badge.title = commit.refs.join(" · ");
+      row.append(badge);
+    }
+    const when = document.createElement("span");
+    when.className = "history-date";
+    when.textContent = commit.authorDate.slice(0, 10);
+    row.append(when);
+    return row;
+  });
+  historyList.replaceChildren(...rows);
+}
+
+function detailFileNote(message: string): HTMLElement {
+  const item = document.createElement("li");
+  item.textContent = message;
+  return item;
+}
+
+async function selectCommit(commit: CommitView): Promise<void> {
+  selectedCommit = commit;
+  renderHistoryRows();
+  commitDetail.hidden = false;
+  detailMessage.textContent = commit.message;
+  const meta: Array<[string, string]> = [
+    ["Commit", commit.oid],
+    ["Author", `${commit.authorName} <${commit.authorEmail}> · ${commit.authorDate}`],
+    ["Committer", `${commit.committerName} · ${commit.commitDate}`],
+  ];
+  if (commit.refs.length > 0) meta.push(["Refs", commit.refs.join(", ")]);
+  detailMeta.replaceChildren();
+  for (const [term, value] of meta) {
+    const dt = document.createElement("dt");
+    dt.textContent = term;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    detailMeta.append(dt, dd);
+  }
+  detailFiles.replaceChildren(detailFileNote("Loading files…"));
+  try {
+    const files = await invoke<CommitFileView[]>("commit_files", { oid: commit.oid });
+    if (selectedCommit !== commit) return;
+    if (files.length === 0) {
+      detailFiles.replaceChildren(
+        detailFileNote("No files changed against its first parent."),
+      );
+    } else {
+      detailFiles.replaceChildren(...files.map((file) => {
+        const item = document.createElement("li");
+        const status = document.createElement("span");
+        status.className = "file-status";
+        status.textContent = file.status;
+        item.append(status, document.createTextNode(
+          file.oldPath ? `${file.oldPath} → ${file.path}` : file.path,
+        ));
+        return item;
+      }));
+    }
+  } catch (error) {
+    if (selectedCommit !== commit) return;
+    showError(error);
+    detailFiles.replaceChildren(detailFileNote("The file list could not be loaded."));
+  }
+}
+
+// Shares the external-tool lane with file diffs: one blocking tool at a
+// time, while staging and committing stay available.
+async function runCommitDiff(): Promise<void> {
+  if (!selectedCommit || toolRunning) return;
+  toolRunning = true;
+  syncCommitControls();
+  historyStatus.textContent = "Waiting for the diff tool to close…";
+  try {
+    const result = await invoke<ToolResult>("open_commit_diff", { oid: selectedCommit.oid });
+    applySnapshot(result.snapshot);
+    historyStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+  } catch (error) {
+    showError(error);
+    historyStatus.textContent = "The diff tool did not run.";
+  } finally {
+    toolRunning = false;
+    syncCommitControls();
+  }
+}
+
+historyMoreButton.addEventListener("click", () => void loadHistory(false));
+diffCommitButton.addEventListener("click", () => void runCommitDiff());
+copyOidButton.addEventListener("click", () => {
+  if (!selectedCommit) return;
+  const oid = selectedCommit.oid;
+  void navigator.clipboard.writeText(oid).then(
+    () => {
+      historyStatus.textContent = "Commit id copied.";
+    },
+    () => {
+      // Honest fallback: show the full id rather than claim a copy.
+      historyStatus.textContent = `Clipboard unavailable — commit id: ${oid}`;
+    },
+  );
+});
 
 function toggleGroup(group: FileGroupKey): void {
   if (collapsedGroups.has(group)) collapsedGroups.delete(group);

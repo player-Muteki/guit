@@ -44,6 +44,17 @@ pub struct HistoryPage {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitFileView {
+    /// Raw status token ("M", "A", "R100" — the score stays attached).
+    pub status: String,
+    /// Display name of the new-side path; never convertible back to bytes.
+    pub path: String,
+    /// Rename/copy source, display name only.
+    pub old_path: Option<String>,
+}
+
 /// Accepts only full object ids, so a frontend value can never be a revspec
 /// expression, option or path. Branch/tag listings hand out these ids.
 pub(crate) fn valid_oid(candidate: &str) -> bool {
@@ -166,6 +177,102 @@ pub fn page(
         commits,
         has_more,
     })
+}
+
+/// Parses `diff-tree -z --name-status` output: alternating status and path
+/// tokens, with rename/copy records carrying two paths (source first). The
+/// stream ends with NUL, so exactly one trailing empty token is expected.
+pub fn parse_files(bytes: &[u8]) -> Result<Vec<CommitFileView>, ProbeError> {
+    fn malformed() -> ProbeError {
+        ProbeError::new(
+            "history_protocol_error",
+            "Git returned a commit file list in an unexpected format; refusing to parse it.",
+        )
+    }
+    let mut tokens = bytes.split(|b| *b == RECORD_SEP).peekable();
+    let mut files = Vec::new();
+    while let Some(status) = tokens.next() {
+        if status.is_empty() {
+            if tokens.peek().is_none() {
+                break;
+            }
+            return Err(malformed());
+        }
+        let (kind, score) = status.split_first().expect("non-empty status");
+        let two_paths = match kind {
+            b'A' | b'D' | b'M' | b'T' | b'U' | b'X' | b'B' => {
+                if !score.is_empty() {
+                    return Err(malformed());
+                }
+                false
+            }
+            b'R' | b'C' => {
+                if score.is_empty() || !score.iter().all(u8::is_ascii_digit) {
+                    return Err(malformed());
+                }
+                true
+            }
+            _ => return Err(malformed()),
+        };
+        let first = tokens
+            .next()
+            .filter(|t| !t.is_empty())
+            .ok_or_else(malformed)?;
+        let (old_path, path) = if two_paths {
+            let second = tokens
+                .next()
+                .filter(|t| !t.is_empty())
+                .ok_or_else(malformed)?;
+            (Some(crate::model::display_name(first)), second)
+        } else {
+            (None, first)
+        };
+        files.push(CommitFileView {
+            status: lossy(status),
+            path: crate::model::display_name(path),
+            old_path,
+        });
+    }
+    Ok(files)
+}
+
+/// Files changed by one commit. `--root` includes the initial commit,
+/// `-M` surfaces renames, and first-parent diff semantics keep merges
+/// readable: what the merge brought into the line it continued.
+pub fn commit_files(directory: &Path, oid: &str) -> Result<Vec<CommitFileView>, ProbeError> {
+    let mut command = repo::user_git_command(directory);
+    command.args([
+        "diff-tree",
+        "-r",
+        "-z",
+        "--no-commit-id",
+        "--name-status",
+        "-M",
+        "--root",
+        "--diff-merges=first-parent",
+        oid,
+        "--",
+    ]);
+    let output = runner::run_with_limit(
+        command,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+        Duration::from_secs(30),
+        LOG_OUTPUT_LIMIT,
+        |_, _| {},
+    )?;
+    if output.truncated {
+        return Err(ProbeError::new(
+            "history_truncated",
+            "The commit file list exceeded the capture bound; nothing was parsed.",
+        ));
+    }
+    if !output.status.success() {
+        let detail = redact(&String::from_utf8_lossy(&output.stderr));
+        let first_line = detail.lines().next().unwrap_or("").to_owned();
+        return Err(ProbeError::new("commit_files_failed", first_line));
+    }
+    parse_files(&output.stdout)
 }
 
 #[cfg(test)]
@@ -352,5 +459,122 @@ mod tests {
         assert!(refs.iter().any(|t| t == "tag: v1"), "{refs:?}");
         assert!(refs.iter().any(|t| t.contains("main")), "{refs:?}");
         assert!(refs.iter().any(|t| t == "keep"), "{refs:?}");
+    }
+
+    fn touch(repo: &Path, name: &str, content: &str) {
+        std::fs::write(repo.join(name), content).unwrap();
+    }
+
+    fn commit_worktree(repo: &Path, message: &str) -> String {
+        git(repo, &["add", "--all"]);
+        commit(repo, message);
+        oid(repo, "HEAD")
+    }
+
+    #[test]
+    fn file_listing_covers_root_adds_and_later_modifications() {
+        let (_root, repo) = fixture();
+        touch(&repo, "a.txt", "one\n");
+        touch(&repo, "中文 文件.txt", "one\n");
+        let root_commit = commit_worktree(&repo, "initial");
+        let files = commit_files(&repo, &root_commit).unwrap();
+        // `--root` makes the initial commit listable; order is Git's.
+        let mut names: Vec<(&str, &str)> = files
+            .iter()
+            .map(|f| (f.status.as_str(), f.path.as_str()))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![("A", "a.txt"), ("A", "中文 文件.txt")],
+            "--root must include the initial commit"
+        );
+        touch(&repo, "a.txt", "two\n");
+        let second = commit_worktree(&repo, "modify");
+        let files = commit_files(&repo, &second).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            (files[0].status.as_str(), files[0].path.as_str()),
+            ("M", "a.txt")
+        );
+        assert_eq!(files[0].old_path, None);
+    }
+
+    #[test]
+    fn rename_records_carry_both_paths() {
+        let (_root, repo) = fixture();
+        touch(&repo, "old name.txt", "one\n");
+        commit_worktree(&repo, "before rename");
+        git(&repo, &["mv", "old name.txt", "新名.txt"]);
+        let renamed = commit_worktree(&repo, "rename");
+        let files = commit_files(&repo, &renamed).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "新名.txt");
+        assert_eq!(files[0].old_path.as_deref(), Some("old name.txt"));
+        assert_eq!(
+            files[0].status, "R100",
+            "score stays attached to the status token"
+        );
+    }
+
+    #[test]
+    fn merge_listing_shows_only_the_first_parent_difference() {
+        let (_root, repo) = fixture();
+        touch(&repo, "base.txt", "one\n");
+        commit_worktree(&repo, "base");
+        git(&repo, &["switch", "-q", "-c", "side"]);
+        touch(&repo, "side.txt", "side\n");
+        commit_worktree(&repo, "side work");
+        git(&repo, &["switch", "-q", "main"]);
+        touch(&repo, "main.txt", "main\n");
+        commit_worktree(&repo, "main work");
+        git(
+            &repo,
+            &["merge", "--no-ff", "-q", "-m", "the merge", "side"],
+        );
+        let merge = oid(&repo, "HEAD");
+        let files = commit_files(&repo, &merge).unwrap();
+        // Against the first parent (the mainline), only the merged-in file
+        // is new; main.txt was already there and base.txt is unchanged.
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["side.txt"]);
+    }
+
+    #[test]
+    fn unknown_commit_is_a_structured_failure() {
+        let (_root, repo) = fixture();
+        touch(&repo, "a.txt", "one\n");
+        commit_worktree(&repo, "only");
+        let error = commit_files(&repo, &"f".repeat(40)).unwrap_err();
+        assert_eq!(error.code, "commit_files_failed");
+        assert!(!error.message.is_empty());
+    }
+
+    #[test]
+    fn parse_files_rejects_malformed_streams_instead_of_guessing() {
+        assert!(parse_files(&[]).unwrap().is_empty());
+        // A bare NUL is not a stream diff-tree can produce: records always
+        // pair a status with at least one path.
+        assert_eq!(
+            parse_files(b"\x00").unwrap_err().code,
+            "history_protocol_error"
+        );
+        let one = parse_files(b"M\x00a.txt\x00").unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(
+            (one[0].status.as_str(), one[0].path.as_str()),
+            ("M", "a.txt")
+        );
+        for broken in [
+            &b"M\x00"[..],               // status without a path
+            &b"R100\x00from\x00"[..],    // rename missing its new path
+            &b"\x00\x00file"[..],        // empty token mid-stream
+            &b"Mbogus\x00a.txt\x00"[..], // modifiers only exist for R/C
+            &b"Q\x00a.txt\x00"[..],      // unknown status letter
+            &b"M\x00\x00a"[..],          // empty path token
+        ] {
+            let error = parse_files(broken).unwrap_err();
+            assert_eq!(error.code, "history_protocol_error", "input: {broken:?}");
+        }
     }
 }
