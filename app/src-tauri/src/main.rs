@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod probe;
+mod repo;
 mod runner;
+mod util;
 
 use probe::{GitProbe, ProbeError, ToolProbe};
 use std::io::Write;
