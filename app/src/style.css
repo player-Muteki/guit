@@ -1,0 +1,17 @@
+:root { font-family: system-ui, sans-serif; color: #dce3ef; background: #141923; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+header { display: flex; align-items: baseline; gap: 1rem; padding: 1rem 1.25rem; border-bottom: 1px solid #343c49; }
+header strong { font-size: 1.25rem; }
+header span, p, dt { color: #aeb9ca; }
+main { max-width: 780px; margin: auto; }
+.card { margin: 1rem; padding: 1.25rem; border: 1px solid #343c49; border-radius: .75rem; background: #1d2430; }
+h1, h2 { margin-top: 0; font-size: 1.1rem; }
+dl { display: grid; grid-template-columns: minmax(85px, 120px) 1fr; gap: .8rem; overflow-wrap: anywhere; }
+dd { margin: 0; }
+.actions { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; }
+button { padding: .5rem .85rem; color: inherit; background: #304d77; border: 1px solid #5677a8; border-radius: .35rem; cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, input:focus-visible { outline: 2px solid #8cc7ff; outline-offset: 2px; }
+#error { margin: 1rem; padding: .8rem; border: 1px solid #a65858; border-radius: .35rem; color: #ffd4d4; }
+@media (max-width: 480px) { header { display: block; } header span { display: block; margin-top: .3rem; } dl { grid-template-columns: 1fr; gap: .25rem; } dd { margin-bottom: .75rem; } }

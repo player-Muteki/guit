@@ -2,6 +2,8 @@
 /app/node_modules/
 /app/dist/
 /app/src-tauri/target/
+/app/src-tauri/gen/
+/app/src-tauri/icons/android/
+/app/src-tauri/icons/ios/
 /.DS_Store
 /Thumbs.db
-

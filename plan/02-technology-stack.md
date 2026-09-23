@@ -31,6 +31,16 @@
 - 不依赖 shell 管道或用户 shell 配置来完成 Git 操作；所有参数通过进程 API 传递。
 - Git 进程需要的环境变量由后端集中设置或继承，避免各模块行为不一致。
 
+## M0 实测基线（Linux，2026-09-23）
+
+完整证据见 [M0-validation.md](M0-validation.md)。锁定并验证的版本：Tauri CLI 2.11.5 / `@tauri-apps/api` 2.11.1 / tauri crate 2.11.6、`tauri-plugin-dialog` 2.x、Rust 1.96.1、Node 22、Git 2.53.0（`status --porcelain=v2 -z --branch` 能力探针通过）、WebKitGTK 2.52.6、GTK 3.24.52。运行时验证得到的技术结论：
+
+- `git difftool` 默认忽略 diff 工具退出码，必须传 `--trust-exit-code`（或配置 trustExitCode）才能感知失败；`mergetool` 需 `mergetool.keepBackup=false` 避免 `.orig` 残留。
+- GNOME Wayland HiDPI（scale=2）下 `outerSize`/`innerSize` 上报值含缩放偏差，直接保存会逐次重启增长；窗口设置改为保存视口像素（`innerWidth × scaleFactor`）+ 实测边框增量恢复。
+- 取消采用进程组终止（Unix `kill(-pgid)`、Windows 进程树 `taskkill /T /F`），超时须终止持有管道的后代进程，否则输出读取悬挂。
+- Git 子进程环境集中构造：剥离继承的 `GIT_*`，设置 `GIT_CONFIG_NOSYSTEM`、`GIT_CONFIG_GLOBAL`、`GIT_TERMINAL_PROMPT=0`（仅隔离探针；用户仓库操作沿用其自身配置）。
+- 无法截图时可用 AT-SPI（`gi.repository.Atspi`）驱动和断言窗口控件状态，作为 GUI 运行时验证手段。
+
 ## 资源占用策略
 
 启动时只加载主视图、最近仓库设置和当前仓库状态；历史等面板按需加载。列表使用虚拟滚动；历史按页读取。对文件监听事件防抖，对后台窗口降频。避免在每个文件上单独运行 Git。任何缓存必须有明确失效条件；仓库写入后以 Git 实际输出重建快照。

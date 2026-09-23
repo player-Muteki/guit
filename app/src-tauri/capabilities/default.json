@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal window operations for the M0 probe",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:window:allow-set-always-on-top", "core:window:allow-inner-size", "core:window:allow-outer-position", "core:window:allow-set-size", "core:window:allow-maximize", "core:window:allow-unmaximize", "core:window:allow-destroy", "dialog:allow-open"]
+}

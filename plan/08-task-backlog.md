@@ -1,17 +1,19 @@
 # 08 实施任务清单
 
-本清单把 [06-development-roadmap.md](06-development-roadmap.md) 的 M0–M6 拆成可独立评审的任务。方括号用于实施时跟踪；目前全部未开始。每项完成时应附对应代码、自动化测试或平台验证记录，而不是只勾选功能演示。
+本清单把 [06-development-roadmap.md](06-development-roadmap.md) 的 M0–M6 拆成可独立评审的任务。方括号用于实施时跟踪；M0 已完成（Linux 证据见 [M0-validation.md](M0-validation.md)，Windows/macOS 运行时验证为遗留交接门槛），M1 起未开始。每项完成时应附对应代码、自动化测试或平台验证记录，而不是只勾选功能演示。
 
 ## M0 工程与技术探针
 
-- [ ] **M0-01** 建立 Tauri 2、TypeScript、Rust 工程和锁文件，验证开发/生产构建命令；产出可启动空窗口。
-- [ ] **M0-02** 设计受控前后端命令协议和统一错误响应；验证错误能在 UI 中展示并在后端日志中脱敏。
-- [ ] **M0-03** 检测 Git 可执行文件、版本与关键命令能力；缺失时给出安装/路径配置提示。
-- [ ] **M0-04** 在 Windows、macOS、Linux 验证 WebView 和系统依赖；记录干净环境安装步骤。
-- [ ] **M0-05** 验证置顶、最小尺寸、DPI、多屏及窗口恢复；记录不一致的系统行为与降级策略。
-- [ ] **M0-06** 验证 Git 子进程进度管道、超时和取消；确认 UI 线程无阻塞。
-- [ ] **M0-07** 验证系统默认文件打开、`git difftool`、`git mergetool`；记录无配置和退出码情况。
-- [ ] **M0-08** 设计临时仓库测试夹具、隔离 Git 配置和 CI 最小门槛。
+M0 已于 2026-09-23 在 Linux 主机完成并记录证据，详见 [M0-validation.md](M0-validation.md)。Windows/macOS 仅准备了 CI 工作流（`.github/workflows/m0.yml`），运行时验证待矩阵执行，不构成三平台通过声明。
+
+- [x] **M0-01** 建立 Tauri 2、TypeScript、Rust 工程和锁文件，验证开发/生产构建命令；产出可启动空窗口。证据：`app/` 工程 + `package-lock.json`/`Cargo.lock`；`npm run build`、`cargo test --locked`、`tauri build --bundles deb,rpm` 通过；发布二进制窗口经 AT-SPI 运行时确认。
+- [x] **M0-02** 设计受控前后端命令协议和统一错误响应；验证错误能在 UI 中展示并在后端日志中脱敏。证据：`ProbeError{code,message}` 统一结构；URL userinfo/query 脱敏单元测试；UI 错误区展示 + `eprintln` 后端日志。
+- [x] **M0-03** 检测 Git 可执行文件、版本与关键命令能力；缺失时给出安装/路径配置提示。证据：`probe.rs` 隔离临时仓库探测 `status --porcelain=v2 -z --branch`；缺失/过旧 Git 的结构化错误与提示（单元测试覆盖）。
+- [x] **M0-04** 在 Windows、macOS、Linux 验证 WebView 和系统依赖；记录干净环境安装步骤。证据：Linux 实测（依赖版本见 M0-validation）；`M0-platform-setup.md` 记录三平台安装/运行步骤；CI 矩阵已准备未运行，Windows/macOS 运行时验证遗留为交接门槛。
+- [x] **M0-05** 验证置顶、最小尺寸、DPI、多屏及窗口恢复；记录不一致的系统行为与降级策略。证据：AT-SPI 驱动确认置顶、340×400 最小尺寸、紧凑/恢复、最大化；HiDPI scale=2 下外层尺寸增长问题根因与修复（视口像素+边框增量保存）；负原点多屏钳制单元测试；NVIDIA Wayland 置顶差异记入平台笔记。
+- [x] **M0-06** 验证 Git 子进程进度管道、超时和取消；确认 UI 线程无阻塞。证据：`runner.rs` 进程组 + 有界 64KiB 捕获；取消/超时（含持有管道的后代进程）Rust 测试；`clone --progress` 经 `probe-progress` 事件流式上报，运行中 UI 可继续交互。
+- [x] **M0-07** 验证系统默认文件打开、`git difftool`、`git mergetool`；记录无配置和退出码情况。证据：xdg-open + gnome-text-editor 中文文件名实测；fixture 测试覆盖 difftool `--trust-exit-code` 成败/工具缺失、mergetool 失败保留冲突/成功解决；无配置时 UI 报告未配置状态。
+- [x] **M0-08** 设计临时仓库测试夹具、隔离 Git 配置和 CI 最小门槛。证据：`tests/helpers/git.mjs` 剥离 GIT_* 并设置 NOSYSTEM/GLOBAL/TERMINAL_PROMPT；`node --test` 夹具通过；`.github/workflows/m0.yml` 三平台 lint/test/build 门槛。
 
 ## M1 只读仓库工作台
 
