@@ -105,7 +105,9 @@ type OperationResult = {
     | "revert"
     | "continue"
     | "abort"
-    | "skip";
+    | "skip"
+    | "reset"
+    | "resethard";
   outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted";
   exitCode: number | null;
   message: string;
@@ -233,6 +235,9 @@ app.innerHTML = `
         <button id="tag-from-commit">Tag from commit…</button>
         <button id="cherry-pick-commit" title="Apply this commit onto the current branch">Cherry-pick</button>
         <button id="revert-commit" title="Create a new commit undoing this one on the current branch">Revert</button>
+        <button id="reset-soft" title="Move the branch to this commit; keep the index and all file contents">Reset soft</button>
+        <button id="reset-mixed" title="Move the branch and index to this commit; keep file contents">Reset mixed</button>
+        <button id="reset-hard" class="danger" title="Move the branch to this commit and overwrite working-copy changes (with confirmation)">Reset hard…</button>
       </div>
     </div>
   </section>
@@ -809,9 +814,12 @@ commitMessage.addEventListener("keydown", (event) => {
 // server nonce that the backend re-checks against a fresh Git read at
 // every step.
 
-type PreviewKindKey = "discard" | "clean" | "branch" | "tag" | "stashDrop" | "stashPop";
+type PreviewKindKey = "discard" | "clean" | "branch" | "tag" | "stashDrop" | "stashPop" | "resetHard";
 
-const previewCopy: Record<PreviewKindKey, { warning: string; confirm: string; cancel: string }> = {
+const previewCopy: Record<
+  PreviewKindKey,
+  { warning: string; confirm: string; cancel: string; droppedLabel?: string }
+> = {
   discard: {
     warning: "Discarding reverts these files in the working copy. The uncommitted work-tree changes cannot be recovered.",
     confirm: "Discard",
@@ -846,9 +854,21 @@ const previewCopy: Record<PreviewKindKey, { warning: string; confirm: string; ca
     confirm: "Pop stash",
     cancel: "Keep entry",
   },
+  resetHard: {
+    warning:
+      "Hard reset overwrites the listed working-copy changes with the selected commit's contents and moves the branch back. Staged-only files may be deleted from disk, and the commits left behind become unreachable; Git may garbage-collect them. This cannot be undone from guit.",
+    confirm: "Reset hard",
+    cancel: "Keep everything",
+    droppedLabel: "Commits left behind",
+  },
 };
 
-const branchForceCopy = {
+const branchForceCopy: {
+  warning: string;
+  confirm: string;
+  cancel: string;
+  droppedLabel?: string;
+} = {
   warning: "This branch is not fully merged. Force-deleting makes its unique commits unreachable, and Git may garbage-collect them. This cannot be undone from guit.",
   confirm: "Force delete branch",
   cancel: "Keep branch",
@@ -863,6 +883,7 @@ type PendingPreview =
       branch?: undefined;
       tag?: undefined;
       stash?: undefined;
+      reset?: undefined;
     }
   | {
       kind: "branch";
@@ -872,6 +893,7 @@ type PendingPreview =
       branch: { name: string; force: boolean; targetOid: string | null };
       tag?: undefined;
       stash?: undefined;
+      reset?: undefined;
     }
   | {
       kind: "tag";
@@ -881,6 +903,7 @@ type PendingPreview =
       branch?: undefined;
       tag: { name: string; targetOid: string | null };
       stash?: undefined;
+      reset?: undefined;
     }
   | {
       kind: "stashDrop" | "stashPop";
@@ -890,6 +913,17 @@ type PendingPreview =
       branch?: undefined;
       tag?: undefined;
       stash: { index: number; targetOid: string | null };
+      reset?: undefined;
+    }
+  | {
+      kind: "resetHard";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset: { targetOid: string | null };
     };
 
 let pendingPreview: PendingPreview | null = null;
@@ -929,7 +963,8 @@ function renderPreviewPanel(): void {
     }),
   );
   previewDropped.hidden = pending.dropped.length === 0;
-  previewDropped.textContent = `Skipped (no work-tree changes): ${pending.dropped.join(", ")}`;
+  previewDropped.textContent =
+    `${copy.droppedLabel ?? "Skipped (no work-tree changes)"}: ${pending.dropped.join(", ")}`;
   syncCommitControls();
 }
 
@@ -1079,7 +1114,9 @@ async function confirmPreview(): Promise<void> {
             ? "Deleting stash entry…"
             : kind === "stashPop"
               ? "Popping stash entry…"
-              : "Deleting tag…";
+              : kind === "resetHard"
+                ? "Hard resetting…"
+                : "Deleting tag…";
   try {
     const result = await invoke<OperationResult>(
       kind === "discard"
@@ -1092,7 +1129,9 @@ async function confirmPreview(): Promise<void> {
               ? "stash_drop"
               : kind === "stashPop"
                 ? "stash_pop"
-                : "delete_tag",
+                : kind === "resetHard"
+                  ? "reset_hard"
+                  : "delete_tag",
       { nonce },
     );
     // Consume the panel before applying the snapshot so the version guard
@@ -1377,6 +1416,9 @@ const tagCreateButton = document.querySelector<HTMLButtonElement>("#tag-create")
 const tagFromCommitButton = document.querySelector<HTMLButtonElement>("#tag-from-commit")!;
 const cherryPickCommitButton = document.querySelector<HTMLButtonElement>("#cherry-pick-commit")!;
 const revertCommitButton = document.querySelector<HTMLButtonElement>("#revert-commit")!;
+const resetSoftButton = document.querySelector<HTMLButtonElement>("#reset-soft")!;
+const resetMixedButton = document.querySelector<HTMLButtonElement>("#reset-mixed")!;
+const resetHardButton = document.querySelector<HTMLButtonElement>("#reset-hard")!;
 const tagDetailPanel = document.querySelector<HTMLElement>("#tag-detail")!;
 const tagDetailMeta = document.querySelector<HTMLElement>("#tag-detail-meta")!;
 const tagDetailMessage = document.querySelector<HTMLElement>("#tag-detail-message")!;
@@ -1563,6 +1605,9 @@ function syncBranchControls(): void {
   branchFromCommitButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
   cherryPickCommitButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
   revertCommitButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
+  resetSoftButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
+  resetMixedButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
+  resetHardButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
   tagNameInput.disabled = !sessionActive || writeRunning;
   tagMessageInput.disabled = !sessionActive || writeRunning;
   tagCreateButton.disabled =
@@ -1613,12 +1658,13 @@ tagFromCommitButton.addEventListener("click", () => {
     + "enter a name and press Create tag.";
 });
 
-// Cherry-pick and revert ride the same backend write queue as the branch
-// operations, but report on the history status line the button sits on.
-// Only the selected commit's full oid ever leaves the frontend.
+// Cherry-pick, revert and soft/mixed reset ride the same backend write
+// queue as the branch operations, but report on the history status line
+// the button sits on. Only full commit ids (never paths or revspecs)
+// leave the frontend.
 async function runCommitWrite(
-  command: "pick_commit" | "revert_commit",
-  oid: string,
+  command: "pick_commit" | "revert_commit" | "reset",
+  args: Record<string, unknown>,
   running: string,
 ): Promise<void> {
   if (!currentSnapshot || writeRunning) return;
@@ -1628,7 +1674,7 @@ async function runCommitWrite(
   try {
     const result = await invoke<OperationResult>(command, {
       snapshotVersion: currentSnapshot.version,
-      oid,
+      ...args,
     });
     applySnapshot(result.snapshot);
     historyStatus.textContent = result.details
@@ -1646,13 +1692,50 @@ async function runCommitWrite(
 cherryPickCommitButton.addEventListener("click", () => {
   if (!selectedCommit) return;
   const oid = selectedCommit.oid;
-  void runCommitWrite("pick_commit", oid, `Cherry-picking ${oid.slice(0, 10)}…`);
+  void runCommitWrite("pick_commit", { oid }, `Cherry-picking ${oid.slice(0, 10)}…`);
 });
 revertCommitButton.addEventListener("click", () => {
   if (!selectedCommit) return;
   const oid = selectedCommit.oid;
-  void runCommitWrite("revert_commit", oid, `Reverting ${oid.slice(0, 10)}…`);
+  void runCommitWrite("revert_commit", { oid }, `Reverting ${oid.slice(0, 10)}…`);
 });
+
+// Soft and mixed reset change no file contents, so they act directly;
+// hard reset goes through the single-use preview ticket like every other
+// destructive entry and is never a default button.
+function runResetMode(mode: "soft" | "mixed"): void {
+  if (!selectedCommit) return;
+  const target = selectedCommit.oid;
+  void runCommitWrite("reset", { mode, target }, `Resetting (${mode}) to ${target.slice(0, 10)}…`);
+}
+resetSoftButton.addEventListener("click", () => runResetMode("soft"));
+resetMixedButton.addEventListener("click", () => runResetMode("mixed"));
+
+async function requestResetHard(): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview || !selectedCommit) return;
+  const target = selectedCommit.oid;
+  historyStatus.textContent = "Checking what a hard reset would discard…";
+  try {
+    const preview = await invoke<PreviewResult>("preview_reset_hard", {
+      snapshotVersion: currentSnapshot.version,
+      target,
+    });
+    applySnapshot(preview.snapshot);
+    pendingPreview = {
+      kind: "resetHard",
+      names: preview.candidates,
+      dropped: preview.dropped,
+      nonce: preview.nonce,
+      reset: { targetOid: preview.targetOid },
+    };
+    renderPreviewPanel();
+    previewConfirmButton.focus();
+  } catch (error) {
+    showError(error);
+    historyStatus.textContent = "The hard reset was refused before anything changed.";
+  }
+}
+resetHardButton.addEventListener("click", () => void requestResetHard());
 
 async function requestTagDelete(name: string): Promise<void> {
   if (!currentSnapshot || writeRunning || pendingPreview) return;

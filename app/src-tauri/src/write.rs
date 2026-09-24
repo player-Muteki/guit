@@ -13,6 +13,8 @@ use std::time::{Duration, SystemTime};
 /// edits; Clean removes untracked items; DeleteBranch removes a ref whose
 /// object id was captured at preview time. DropStash/PopStash consume a
 /// `stash@{N}` entry, the selector's commit oid re-checked at confirm.
+/// ResetHard binds the target commit, the observed HEAD and the exact
+/// tracked-dirty file set; all must still match at confirm.
 /// All share the one-time ticket flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewKind {
@@ -22,6 +24,7 @@ pub enum PreviewKind {
     DeleteTag,
     DropStash,
     PopStash,
+    ResetHard,
 }
 
 #[derive(Debug)]
@@ -31,6 +34,9 @@ struct Preview {
     paths: Vec<Vec<u8>>,
     /// Object id the branch pointed at when the delete was previewed.
     oid: Option<String>,
+    /// Second bound id, so far only the reset-hard ticket's HEAD; deletions
+    /// and stash tickets leave it None.
+    secondary: Option<String>,
     /// -d refuses unmerged branches; the force flag records an explicit,
     /// separately confirmed second stage (never a silent -D).
     force: bool,
@@ -94,6 +100,7 @@ impl WriteState {
             kind,
             paths: vec![name.into_bytes()],
             oid: Some(oid),
+            secondary: None,
             force,
         })
     }
@@ -120,6 +127,40 @@ impl WriteState {
             Some(_) => None,
             None => None,
         }
+    }
+
+    /// Everything a hard reset confirmation is bound to: the target commit,
+    /// the HEAD observed at preview time and the exact tracked-dirty set.
+    /// Hard reset is the only operation that may silently drop committed
+    /// work, so `reset_hard` re-checks all three before Git runs.
+    pub(crate) fn stage_reset_hard(
+        &self,
+        work_root: PathBuf,
+        dirty: Vec<Vec<u8>>,
+        target_oid: String,
+        head_oid: String,
+    ) -> String {
+        self.stage_preview(Preview {
+            work_root,
+            kind: PreviewKind::ResetHard,
+            paths: dirty,
+            oid: Some(target_oid),
+            secondary: Some(head_oid),
+            force: false,
+        })
+    }
+
+    pub(crate) fn take_reset_hard(
+        &self,
+        nonce: &str,
+    ) -> Option<(PathBuf, Vec<Vec<u8>>, String, String)> {
+        let ticket = self.take_preview(nonce, PreviewKind::ResetHard)?;
+        Some((
+            ticket.work_root,
+            ticket.paths,
+            ticket.oid?,
+            ticket.secondary?,
+        ))
     }
 
     pub(crate) fn clear_previews(&self) {
@@ -176,6 +217,8 @@ pub enum OperationKind {
     Continue,
     Abort,
     Skip,
+    Reset,
+    ResetHard,
 }
 
 impl OperationKind {
@@ -206,6 +249,8 @@ impl OperationKind {
             OperationKind::Continue => (&[], "Continued"),
             OperationKind::Abort => (&[], "Aborted"),
             OperationKind::Skip => (&[], "Skipped"),
+            OperationKind::Reset => (&[], "Reset"),
+            OperationKind::ResetHard => (&[], "Hard reset"),
         }
     }
 
@@ -498,6 +543,7 @@ pub(crate) fn preview_discard(
         kind: PreviewKind::Discard,
         paths: candidates.clone(),
         oid: None,
+        secondary: None,
         force: false,
     });
     Ok(PreviewResult {
@@ -714,6 +760,7 @@ pub(crate) fn preview_clean(
         kind: PreviewKind::Clean,
         paths,
         oid: None,
+        secondary: None,
         force: false,
     });
     Ok(PreviewResult {

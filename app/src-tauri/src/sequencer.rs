@@ -20,7 +20,7 @@ use std::time::Duration;
 /// 60 s read budget while keeping the shared output limit.
 const SEQUENCE_TIMEOUT: Duration = Duration::from_secs(600);
 
-fn run_git(
+pub(crate) fn run_git(
     work_root: &Path,
     noninteractive: bool,
     args: &[&str],
@@ -45,7 +45,7 @@ fn run_git(
 /// A merge/rebase target is either a full object id or the name of a
 /// branch refs::list reports; revspec strings (`HEAD~1`, `@{u}`) are never
 /// passed through to Git.
-fn validate_target(work_root: &Path, target: &str) -> bool {
+pub(crate) fn validate_target(work_root: &Path, target: &str) -> bool {
     if target.is_empty() || target.len() > branches::MAX_NAME_LEN {
         return false;
     }
@@ -334,7 +334,9 @@ fn run_start(
     })
 }
 
-fn in_progress_message(sessions: &session::SessionState) -> Result<Option<String>, ProbeError> {
+pub(crate) fn in_progress_message(
+    sessions: &session::SessionState,
+) -> Result<Option<String>, ProbeError> {
     let Some(identity) = sessions.current_identity() else {
         return Ok(Some("No repository is open.".into()));
     };
@@ -520,7 +522,7 @@ fn run_step_inner(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::inflight::OperationKindView;
     use std::sync::atomic::AtomicBool;
@@ -546,7 +548,7 @@ mod tests {
 
     /// main/side diverge on the same line of a.txt so merging them always
     /// conflicts; on separate files so a clean merge still makes a commit.
-    fn diverged_repo(clean: bool) -> tempfile::TempDir {
+    pub(crate) fn diverged_repo(clean: bool) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
         git(dir, &["init", "--quiet", "--initial-branch=main"]);
