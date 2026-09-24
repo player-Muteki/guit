@@ -797,6 +797,150 @@ mod tests {
     }
 
     #[test]
+    fn detached_head_keeps_refs_history_and_writes_consistent() {
+        use crate::model::HeadState;
+        let root = fixture();
+        let dir = root.path();
+        git(dir, &["commit", "-q", "--allow-empty", "-m", "second"]);
+        git(dir, &["branch", "side"]);
+        git(dir, &["switch", "-q", "--detach"]);
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, dir).unwrap();
+        let branch = view.branch.clone().unwrap();
+        assert_eq!(branch.head_state, HeadState::Detached);
+        assert!(branch.name.is_none() && branch.oid.is_some());
+
+        // No branch carries the head marker while HEAD is detached, so even
+        // "main" may be previewed for deletion — the ticket flow, not a
+        // checked-out guard, is what protects it there.
+        let listing = refs::list(dir).unwrap();
+        assert!(listing.branches.iter().all(|b| !b.head));
+        let writes = WriteState::default();
+        let preview = preview_delete_branch(&writes, &sessions, view.version, "main", false)
+            .expect("detached HEAD checks out no branch");
+        assert_eq!(preview.candidates, vec!["main".to_owned()]);
+
+        // History follows the detached HEAD, not any branch.
+        let page = history::page(dir, 0, None, history::PAGE_SIZE).unwrap();
+        assert_eq!(page.commits.len(), 2);
+        assert_eq!(page.commits[0].oid, head(dir));
+
+        // Re-attaching: a fresh branch lands on the detached commit, and a
+        // switch restores a named HEAD with the marker moved along.
+        let created =
+            create_branch(&writes, &sessions, preview.snapshot.version, "rescue", None).unwrap();
+        assert_eq!(created.outcome, Outcome::Success);
+        let switched = switch_branch(
+            &writes,
+            &sessions,
+            created.snapshot.unwrap().version,
+            "side",
+        )
+        .unwrap();
+        assert_eq!(switched.outcome, Outcome::Success);
+        let snapshot = switched.snapshot.unwrap();
+        let branch = snapshot.branch.clone().unwrap();
+        assert_eq!(branch.head_state, HeadState::Branch);
+        assert_eq!(branch.name.as_deref(), Some("side"));
+        let listing = refs::list(dir).unwrap();
+        assert!(listing.branches.iter().any(|b| b.name == "side" && b.head));
+        assert!(listing.branches.iter().all(|b| b.name != "main" || !b.head));
+    }
+
+    #[test]
+    fn unborn_head_refuses_writes_and_an_external_first_commit_unlocks_them() {
+        use crate::model::HeadState;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        git(dir, &["init", "--quiet", "--initial-branch=main"]);
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, dir).unwrap();
+        assert_eq!(view.branch.clone().unwrap().head_state, HeadState::Unborn);
+        let writes = WriteState::default();
+
+        // Without any commit there is nothing to point a new branch at:
+        // Git itself refuses, so the outcome is Failed (kept details), not a
+        // clean-looking rejection, and the state is re-read either way.
+        let created = create_branch(&writes, &sessions, view.version, "dev", None).unwrap();
+        assert_eq!(created.outcome, Outcome::Failed);
+        assert!(created.details.is_some());
+        let version = created.snapshot.expect("re-read").version;
+        let switched = switch_branch(&writes, &sessions, version, "main").unwrap();
+        assert_eq!(switched.outcome, Outcome::Failed);
+        let version = switched.snapshot.expect("re-read").version;
+        let preview = preview_delete_branch(&writes, &sessions, version, "main", false);
+        assert_eq!(preview.unwrap_err().code, "branch_missing");
+        // `git log` would error on an unborn HEAD — guit's command layer
+        // gates this on head_state, and the module keeps the structured
+        // failure for anything that does reach Git.
+        let error = history::page(dir, 0, None, history::PAGE_SIZE).unwrap_err();
+        assert_eq!(error.code, "history_page_failed");
+
+        // A commit made in an external terminal must flip the snapshot and
+        // make every read path meaningful without reopening the repository.
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "--", "a.txt"]);
+        git(dir, &["commit", "-q", "-m", "first from terminal"]);
+        let after = session::refresh(&sessions)
+            .unwrap()
+            .expect("session still open");
+        assert!(after.version > version);
+        assert_eq!(after.branch.clone().unwrap().head_state, HeadState::Branch);
+        let page = history::page(dir, 0, None, history::PAGE_SIZE).unwrap();
+        assert_eq!(page.commits.len(), 1);
+        let listing = refs::list(dir).unwrap();
+        assert!(listing.branches.iter().any(|b| b.name == "main" && b.head));
+    }
+
+    #[test]
+    fn external_terminal_moves_are_observed_by_writes_history_and_refs() {
+        let root = fixture();
+        let dir = root.path();
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, dir).unwrap();
+        let writes = WriteState::default();
+        let created = create_branch(&writes, &sessions, view.version, "feature", None).unwrap();
+        let version = created.snapshot.expect("re-read").version;
+
+        // Outside the app: feature is renamed away and main gains a commit.
+        git(dir, &["branch", "-m", "feature", "gone"]);
+        git(
+            dir,
+            &["commit", "-q", "--allow-empty", "-m", "external work"],
+        );
+
+        // The client never crashes on the vanished name: Git's own refusal
+        // is kept as a Failed outcome with the re-read riding along.
+        let ghost = switch_branch(&writes, &sessions, version, "feature").unwrap();
+        assert_eq!(ghost.outcome, Outcome::Failed);
+        assert!(ghost
+            .details
+            .as_deref()
+            .is_some_and(|line| !line.is_empty()));
+        let version = ghost.snapshot.expect("re-read").version;
+
+        // The renamed branch and the external commit are now visible.
+        let switched = switch_branch(&writes, &sessions, version, "gone").unwrap();
+        assert_eq!(switched.outcome, Outcome::Success);
+        let snapshot = switched.snapshot.expect("re-read");
+        assert_eq!(
+            snapshot.branch.as_ref().unwrap().name.as_deref(),
+            Some("gone")
+        );
+        // History follows the branch just switched to — "gone" still sits
+        // on the base commit while main carries the external work.
+        let listing = refs::list(dir).unwrap();
+        let gone = listing.branches.iter().find(|b| b.name == "gone").unwrap();
+        let main = listing.branches.iter().find(|b| b.name == "main").unwrap();
+        assert_ne!(gone.oid, main.oid);
+        assert!(gone.head && !main.head);
+        assert!(!listing.branches.iter().any(|b| b.name == "feature"));
+        let page = history::page(dir, 0, None, history::PAGE_SIZE).unwrap();
+        assert_eq!(page.commits.len(), 1);
+        assert_eq!(page.commits[0].oid, gone.oid);
+    }
+
+    #[test]
     fn cancelled_branch_write_never_reaches_git_and_still_refreshes() {
         let root = fixture();
         let dir = root.path();
