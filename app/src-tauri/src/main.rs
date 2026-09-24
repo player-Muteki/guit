@@ -4,11 +4,13 @@ mod branches;
 mod clone;
 mod extools;
 mod history;
+mod inflight;
 mod model;
 mod probe;
 mod refs;
 mod repo;
 mod runner;
+mod sequencer;
 mod session;
 mod stash;
 mod status;
@@ -889,6 +891,78 @@ async fn stash_drop(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn merge_start(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    target: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        sequencer::merge_start(&state, &sessions, snapshot_version, &target)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn rebase_start(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    target: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        sequencer::rebase_start(&state, &sessions, snapshot_version, &target)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn operation_continue(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        sequencer::operation_continue(&state, &sessions, snapshot_version)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn operation_abort(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        sequencer::operation_abort(&state, &sessions, snapshot_version)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn operation_skip(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        sequencer::operation_skip(&state, &sessions, snapshot_version)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -946,7 +1020,12 @@ fn main() {
             preview_stash_pop,
             stash_pop,
             preview_stash_drop,
-            stash_drop
+            stash_drop,
+            merge_start,
+            rebase_start,
+            operation_continue,
+            operation_abort,
+            operation_skip
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

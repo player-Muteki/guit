@@ -169,6 +169,11 @@ pub enum OperationKind {
     StashApply,
     StashPop,
     StashDrop,
+    Merge,
+    Rebase,
+    Continue,
+    Abort,
+    Skip,
 }
 
 impl OperationKind {
@@ -192,6 +197,11 @@ impl OperationKind {
             OperationKind::StashApply => (&[], "Applied"),
             OperationKind::StashPop => (&[], "Popped"),
             OperationKind::StashDrop => (&[], "Dropped"),
+            OperationKind::Merge => (&[], "Merged"),
+            OperationKind::Rebase => (&[], "Rebased"),
+            OperationKind::Continue => (&[], "Continued"),
+            OperationKind::Abort => (&[], "Aborted"),
+            OperationKind::Skip => (&[], "Skipped"),
         }
     }
 
@@ -209,6 +219,10 @@ pub enum Outcome {
     Cancelled,
     /// Refused before touching Git (stale snapshot, unknown file, bare repo).
     Rejected,
+    /// Git stopped with conflicts (merge/rebase/cherry-pick/revert). A
+    /// conflict is progress in a sequence, not an ordinary failure; the
+    /// snapshot's `operation` field drives the continue/abort affordances.
+    Conflicted,
 }
 
 /// Uniform answer for write operations (plan/03 数据契约). The embedded

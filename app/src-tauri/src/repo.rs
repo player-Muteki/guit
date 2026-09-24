@@ -32,6 +32,17 @@ pub fn user_git_command(path: &Path) -> Command {
     command
 }
 
+/// Fork of [`user_git_command`] for the two Git paths that measured-required
+/// an editor on Git 2.53 (`merge --continue`, conflicted `rebase --continue`).
+/// `GIT_EDITOR=:` makes Git's editor invocation a no-op that accepts the
+/// standard message; every other command keeps the inherited user setup.
+/// Windows behavior of `:` as an editor is unverified.
+pub fn user_git_command_noninteractive(path: &Path) -> Command {
+    let mut command = user_git_command(path);
+    command.env("GIT_EDITOR", ":");
+    command
+}
+
 fn rev_parse_line(path: &Path, flag: &str) -> Result<Option<String>, ProbeError> {
     let mut command = user_git_command(path);
     command.arg("rev-parse").arg(flag);

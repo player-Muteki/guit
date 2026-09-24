@@ -58,11 +58,19 @@ type BranchView = {
   behind: number | null;
 };
 
+type OperationView = {
+  kind: "merge" | "rebase" | "cherryPick" | "revert" | "unknown";
+  subject: string;
+  step: number | null;
+  total: number | null;
+};
+
 type SnapshotView = {
   version: number;
   repo: RepoView;
   branch: BranchView | null;
   files: FileView[];
+  operation: OperationView | null;
 };
 
 type CloneResult = {
@@ -90,8 +98,13 @@ type OperationResult = {
     | "stashsave"
     | "stashapply"
     | "stashpop"
-    | "stashdrop";
-  outcome: "success" | "failed" | "cancelled" | "rejected";
+    | "stashdrop"
+    | "merge"
+    | "rebase"
+    | "continue"
+    | "abort"
+    | "skip";
+  outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted";
   exitCode: number | null;
   message: string;
   details: string | null;
@@ -111,7 +124,7 @@ type ToolPurpose = "openFile" | "diffWorktree" | "diffStaged" | "diffCommit";
 type ToolResult = {
   operationId: number;
   purpose: ToolPurpose;
-  outcome: "success" | "failed" | "cancelled" | "rejected";
+  outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted";
   exitCode: number | null;
   message: string;
   details: string | null;
@@ -144,6 +157,14 @@ app.innerHTML = `
     <h2>Changes</h2>
     <div id="file-list" class="files" role="list" aria-label="Changed files" tabindex="0">
       <div id="file-virtual" class="virtual"><div id="file-rows" class="virtual-rows"></div></div>
+    </div>
+    <div id="operation-banner" class="preview" role="alert" hidden>
+      <p id="operation-summary"></p>
+      <div class="actions">
+        <button id="operation-continue">Continue</button>
+        <button id="operation-skip">Skip</button>
+        <button id="operation-abort" class="danger">Abort</button>
+      </div>
     </div>
     <p id="write-status" role="status"></p>
     <div id="confirm-preview" class="preview" role="alertdialog" aria-label="Confirm destructive operation" hidden>
@@ -286,6 +307,11 @@ const previewCandidates = document.querySelector<HTMLElement>("#preview-candidat
 const previewDropped = document.querySelector<HTMLElement>("#preview-dropped")!;
 const previewConfirmButton = document.querySelector<HTMLButtonElement>("#preview-confirm")!;
 const previewKeepButton = document.querySelector<HTMLButtonElement>("#preview-keep")!;
+const operationBanner = document.querySelector<HTMLElement>("#operation-banner")!;
+const operationSummary = document.querySelector<HTMLElement>("#operation-summary")!;
+const operationContinueButton = document.querySelector<HTMLButtonElement>("#operation-continue")!;
+const operationSkipButton = document.querySelector<HTMLButtonElement>("#operation-skip")!;
+const operationAbortButton = document.querySelector<HTMLButtonElement>("#operation-abort")!;
 
 const ROW_HEIGHT = 30;
 const OVERSCAN = 6;
@@ -347,6 +373,7 @@ function renderSnapshot(snapshot: SnapshotView | null): void {
   syncHistoryWithSnapshot();
   syncRefsWithSnapshot();
   syncStashWithSnapshot();
+  renderOperationBanner(snapshot);
   closeRepoButton.disabled = !sessionActive;
   refreshRepoButton.disabled = !sessionActive;
   syncCommitControls();
@@ -627,7 +654,73 @@ function syncCommitControls(): void {
   previewKeepButton.disabled = writeRunning;
   syncBranchControls();
   syncStashControls();
+  syncOperationControls();
 }
+
+// --- in-flight operation banner (M4-02) ------------------------------------
+// The banner renders solely from the snapshot's `operation` field: which
+// command continue/abort/skip maps to is decided by the backend re-reading
+// Git's own markers, so the UI never claims a capability it did not detect.
+function renderOperationBanner(snapshot: SnapshotView | null): void {
+  const operation = snapshot?.operation ?? null;
+  operationBanner.hidden = operation === null;
+  if (!operation) return;
+  const step =
+    operation.step !== null && operation.total !== null
+      ? ` (step ${operation.step} of ${operation.total})`
+      : "";
+  operationSummary.textContent = `${operation.subject}${step}`;
+  const skipAvailable =
+    operation.kind === "rebase" ||
+    operation.kind === "cherryPick" ||
+    operation.kind === "revert";
+  const known = operation.kind !== "unknown";
+  operationContinueButton.hidden = !known;
+  operationAbortButton.hidden = !known;
+  operationSkipButton.hidden = !known || !skipAvailable;
+  syncOperationControls();
+}
+
+function syncOperationControls(): void {
+  for (const button of [operationContinueButton, operationSkipButton, operationAbortButton]) {
+    button.disabled = writeRunning || pendingPreview !== null;
+  }
+}
+
+async function runOperationStep(
+  command: "operation_continue" | "operation_abort" | "operation_skip",
+  running: string,
+): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  writeRunning = true;
+  syncCommitControls();
+  writeStatus.textContent = running;
+  try {
+    const result = await invoke<OperationResult>(command, {
+      snapshotVersion: currentSnapshot.version,
+    });
+    applySnapshot(result.snapshot);
+    writeStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+  } catch (error) {
+    showError(error);
+    writeStatus.textContent = "The operation step did not run.";
+  } finally {
+    writeRunning = false;
+    syncCommitControls();
+  }
+}
+
+operationContinueButton.addEventListener("click", () =>
+  void runOperationStep("operation_continue", "Continuing the operation…"),
+);
+operationSkipButton.addEventListener("click", () =>
+  void runOperationStep("operation_skip", "Skipping the current step…"),
+);
+operationAbortButton.addEventListener("click", () =>
+  void runOperationStep("operation_abort", "Aborting the operation…"),
+);
 
 // A difftool call stays pending until the user closes the diff window, so
 // the lane has its own busy flag; staging and committing remain available
@@ -1345,7 +1438,13 @@ async function loadRefs(): Promise<void> {
 // same writeRunning lane as staging and committing; the fresh snapshot
 // returned by the backend flows through the standard version guard.
 async function runBranch(
-  command: "create_branch" | "switch_branch" | "rename_branch" | "create_tag",
+  command:
+    | "create_branch"
+    | "switch_branch"
+    | "rename_branch"
+    | "create_tag"
+    | "merge_start"
+    | "rebase_start",
   args: Record<string, unknown>,
   running: string,
 ): Promise<OperationResult | null> {
@@ -1679,6 +1778,27 @@ function renderRefs(listing: RefListing): void {
         el.append(
           refRowButton("Switch", `Switch to ${branch.name}`, () =>
             void runBranch("switch_branch", { name: branch.name }, `Switching to ${branch.name}…`),
+          ),
+          // Merges never touch the source branch and rebases are explicit
+          // per-click actions; the backend still refuses both while any
+          // operation is in progress.
+          refRowButton("Merge", `Merge ${branch.name} into the current branch`, () =>
+            void runBranch(
+              "merge_start",
+              { target: branch.name },
+              `Merging ${branch.name}…`,
+            ),
+          ),
+          refRowButton(
+            "Rebase onto",
+            `Rewrite the current branch onto ${branch.name}`,
+            () =>
+              void runBranch(
+                "rebase_start",
+                { target: branch.name },
+                `Rebasing the current branch onto ${branch.name}…`,
+              ),
+            true,
           ),
         );
       }

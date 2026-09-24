@@ -1,3 +1,4 @@
+use crate::inflight;
 use crate::model::{BranchView, FileId, FileView, PathTable};
 use crate::probe::ProbeError;
 use crate::repo::{self, RepoIdentity};
@@ -182,6 +183,9 @@ pub struct SnapshotView {
     /// Null for bare repositories, where Git refuses to report a status.
     pub branch: Option<BranchView>,
     pub files: Vec<FileView>,
+    /// A merge/rebase/cherry-pick/revert Git is midway through; the UI
+    /// renders continue/abort affordances only from this field.
+    pub operation: Option<inflight::OperationView>,
 }
 
 struct Capture {
@@ -190,20 +194,31 @@ struct Capture {
 }
 
 fn capture(identity: &RepoIdentity) -> Result<Capture, ProbeError> {
-    let (paths, branch, files) = if identity.is_bare {
+    let (paths, branch, files, operation) = if identity.is_bare {
         // Git refuses `status` in bare repositories; report no snapshot.
-        (PathTable::default(), None, Vec::new())
+        (PathTable::default(), None, Vec::new(), None)
     } else {
         let raw = repo::status_output(identity, true)?;
         let parsed = status::parse(&raw)?;
         let (paths, files) = PathTable::from_status(&parsed);
-        (paths, Some(BranchView::from_parsed(&parsed)), files)
+        let has_conflicts = parsed
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, status::StatusEntry::Unmerged { .. }));
+        let operation = inflight::detect(&identity.git_dir, has_conflicts)?;
+        (
+            paths,
+            Some(BranchView::from_parsed(&parsed)),
+            files,
+            operation,
+        )
     };
     let view = SnapshotView {
         version: 0,
         repo: RepoView::from_identity(identity),
         branch,
         files,
+        operation,
     };
     Ok(Capture { paths, view })
 }
