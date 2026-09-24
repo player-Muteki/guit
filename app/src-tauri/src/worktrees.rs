@@ -851,4 +851,86 @@ mod tests {
         let again = prune_worktrees(&state, &sessions, version).unwrap();
         assert_eq!(again.message, "No stale worktree records.");
     }
+
+    // M4-08 cross-module scenario: in-flight detection reads the session
+    // identity's own git dir, so a merge started inside a linked worktree
+    // is visible exactly where it runs — the work tree guit has open and
+    // the main checkout see different states.
+    #[test]
+    fn a_merge_in_progress_in_a_linked_worktree_is_detected_from_that_worktree() {
+        use crate::inflight::OperationKindView;
+        use crate::sequencer;
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        repo::git_with(root, &[], &["init", "--quiet", "--initial-branch=main"]);
+        std::fs::write(root.join("a.txt"), "base\n").unwrap();
+        git(root, &["add", "--", "a.txt"]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        git(root, &["branch", "side"]);
+        std::fs::write(root.join("a.txt"), "main edit\n").unwrap();
+        git(root, &["commit", "-aqm", "main edit"]);
+        git(root, &["switch", "-q", "side"]);
+        std::fs::write(root.join("a.txt"), "side edit\n").unwrap();
+        git(root, &["commit", "-aqm", "side edit"]);
+        git(root, &["switch", "-q", "main"]);
+        git(root, &["branch", "wt-branch"]);
+        let outer = tempfile::tempdir().unwrap();
+        let wt = outer.path().join("wt here");
+        git(
+            root,
+            &["worktree", "add", &wt.display().to_string(), "wt-branch"],
+        );
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, &wt).unwrap();
+        assert_eq!(list_view(&sessions).unwrap().len(), 2);
+        let writes = WriteState::default();
+        let merged = sequencer::merge_start(&writes, &sessions, view.version, "side").unwrap();
+        assert_eq!(
+            merged.outcome,
+            Outcome::Conflicted,
+            "msg: {}",
+            merged.message
+        );
+        let snapshot = merged.snapshot.expect("in-flight snapshot");
+        let operation = snapshot.operation.clone().expect("merge is in progress");
+        assert_eq!(operation.kind, OperationKindView::Merge);
+        assert!(operation.subject.contains("side"), "{}", operation.subject);
+
+        // The marker lives in the linked worktree's private git dir only.
+        let gitfile = std::fs::read_to_string(wt.join(".git")).unwrap();
+        let linked_dir = gitfile.trim_end().strip_prefix("gitdir: ").unwrap();
+        assert!(std::path::Path::new(linked_dir).join("MERGE_HEAD").exists());
+        assert!(
+            !root.join(".git").join("MERGE_HEAD").exists(),
+            "the common dir must stay free of this worktree's marker"
+        );
+        // The main checkout, opened as its own session, sees a clean state.
+        let main_sessions = session::SessionState::default();
+        let main_view = session::open(&main_sessions, root).unwrap();
+        assert!(main_view.operation.is_none());
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "main edit\n"
+        );
+
+        let aborted = sequencer::operation_abort(&writes, &sessions, snapshot.version).unwrap();
+        assert_eq!(
+            aborted.outcome,
+            Outcome::Success,
+            "msg: {}",
+            aborted.message
+        );
+        let after = aborted.snapshot.expect("re-read");
+        assert!(after.operation.is_none());
+        assert_eq!(
+            std::fs::read_to_string(wt.join("a.txt")).unwrap(),
+            "main edit\n"
+        );
+        assert!(session::refresh(&main_sessions)
+            .unwrap()
+            .expect("still open")
+            .operation
+            .is_none());
+    }
 }
