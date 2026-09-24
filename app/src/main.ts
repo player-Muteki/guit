@@ -123,7 +123,7 @@ type PreviewResult = {
   targetOid: string | null;
 };
 
-type ToolPurpose = "openFile" | "diffWorktree" | "diffStaged" | "diffCommit";
+type ToolPurpose = "openFile" | "diffWorktree" | "diffStaged" | "diffCommit" | "mergeFile";
 
 type ToolResult = {
   operationId: number;
@@ -596,6 +596,7 @@ function createRow(row: ListRow, index: number): HTMLElement {
   // the staged side only exists once the file is in the index.
   if (!file.untracked) toolActions.push({ label: "Diff", purpose: "diffWorktree" });
   if (file.staged) toolActions.push({ label: "Diff staged", purpose: "diffStaged" });
+  if (file.conflict) toolActions.push({ label: "Resolve", purpose: "mergeFile" });
   for (const tool of toolActions) {
     const button = document.createElement("button");
     button.className = "row-action tool";
@@ -611,8 +612,8 @@ function createRow(row: ListRow, index: number): HTMLElement {
   return element;
 }
 
-// Conflicts resolve through mergetool (M4), not staging; every other group
-// has exactly one sensible per-file write in M2's first loop.
+// Conflicts resolve through the per-row mergetool button, not staging;
+// every other group has exactly one sensible per-file write.
 function fileRowAction(file: FileView): "stage" | "unstage" | null {
   if (file.group === "conflict") return null;
   return file.group === "staged" ? "unstage" : "stage";
@@ -742,7 +743,9 @@ async function runTool(purpose: ToolPurpose, fileId: number): Promise<void> {
   writeStatus.textContent =
     purpose === "openFile"
       ? "Opening file…"
-      : "Waiting for the diff tool to close…";
+      : purpose === "mergeFile"
+        ? "Waiting for the merge tool to close…"
+        : "Waiting for the diff tool to close…";
   try {
     const result = await invoke<ToolResult>("open_external_tool", {
       snapshotVersion: currentSnapshot.version,
@@ -930,8 +933,8 @@ let pendingPreview: PendingPreview | null = null;
 let previewRenewing = false;
 
 function discardEligible(file: FileView): boolean {
-  // Untracked files go through clean; conflicts through mergetool (M4);
-  // only work-tree-side changes can be discarded.
+  // Untracked files go through clean; conflicts through the mergetool
+  // button; only work-tree-side changes can be discarded.
   return file.unstaged && !file.conflict && !file.untracked;
 }
 

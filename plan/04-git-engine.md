@@ -58,3 +58,5 @@ Git `clean` 预览与执行之间并非事务。应针对确认的路径集合�
 
 文件交给系统关联程序或配置的编辑器；diff 和 merge 优先沿用用户 Git `difftool`/`mergetool` 配置。每种工具先检查配置与可执行性，分清启动失败、工具非零退出和工具成功退出但仓库仍有冲突。外部工具参数模板由结构化参数组成，不通过 shell 展开。返回、窗口获焦和手动刷新均可重新读取状态。
 
+Git 2.53 实测（mergetool）：`git mergetool` 不支持 `--trust-exit-code`（该选项属 difftool，传入即用法错误）；工具自身退出码被 mergetool 忽略，只要 `$MERGED` 内容相对进入前有变化就会被 `git add`，即使冲突标记仍在；文件未变则触发 "Was the merge successful [y/n]" 交互询问，非交互 stdin 直接判失败退出码 1、冲突保留。因此 guit 的 MergeFile 结局一律以重读索引为准（该路径是否仍为 unmerged），退出码只作诊断保留。默认 `mergetool.keepBackup=true` 会留下 `<file>.orig`，如实出现在未跟踪列表。
+
