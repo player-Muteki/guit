@@ -84,7 +84,9 @@ type OperationResult = {
     | "branchcreate"
     | "branchswitch"
     | "branchrename"
-    | "branchdelete";
+    | "branchdelete"
+    | "tagcreate"
+    | "tagdelete";
   outcome: "success" | "failed" | "cancelled" | "rejected";
   exitCode: number | null;
   message: string;
@@ -167,10 +169,22 @@ app.innerHTML = `
       <button id="branch-create" disabled>Create branch</button>
       <button id="branch-force" class="danger" hidden>Force delete…</button>
     </div>
+    <div class="actions">
+      <input id="tag-name" type="text" placeholder="New tag name" aria-label="New tag name" disabled />
+      <input id="tag-message" type="text" placeholder="Annotation — blank makes a lightweight tag" aria-label="Tag annotation (optional)" disabled />
+      <button id="tag-create" disabled>Create tag</button>
+    </div>
     <div id="ref-list" class="refs" role="list" aria-label="Branches and tags">
       <div class="file-row placeholder">Open a repository to list its branches and tags.</div>
     </div>
     <p id="ref-status" role="status"></p>
+    <div id="tag-detail" class="detail" hidden>
+      <dl id="tag-detail-meta"></dl>
+      <pre id="tag-detail-message" class="commit-message"></pre>
+      <div class="actions">
+        <button id="tag-detail-close">Close</button>
+      </div>
+    </div>
   </section>
   <section class="card">
     <h1>History</h1>
@@ -189,6 +203,7 @@ app.innerHTML = `
         <button id="copy-oid">Copy OID</button>
         <button id="diff-commit">Diff commit</button>
         <button id="branch-from-commit">Branch from commit…</button>
+        <button id="tag-from-commit">Tag from commit…</button>
       </div>
     </div>
   </section>
@@ -675,11 +690,11 @@ commitMessage.addEventListener("keydown", (event) => {
 });
 
 // --- destructive operations: preview → recheck → confirm (plan/04 协议) ---
-// One panel serves discard (work-tree restore), clean (untracked removal)
-// and branch delete; all bind a single-use server nonce that the backend
-// re-checks against a fresh Git read at every step.
+// One panel serves discard (work-tree restore), clean (untracked removal),
+// branch delete and tag delete; all bind a single-use server nonce that the
+// backend re-checks against a fresh Git read at every step.
 
-type PreviewKindKey = "discard" | "clean" | "branch";
+type PreviewKindKey = "discard" | "clean" | "branch" | "tag";
 
 const previewCopy: Record<PreviewKindKey, { warning: string; confirm: string; cancel: string }> = {
   discard: {
@@ -693,9 +708,16 @@ const previewCopy: Record<PreviewKindKey, { warning: string; confirm: string; ca
     cancel: "Keep files",
   },
   branch: {
-    warning: "Deleting removes this branch name. Commits it points at stay reachable only through other refs; once unreachable, Git may garbage-collect them. This cannot be undone from guit.",
+    warning:
+      "Deleting removes this branch name. Commits it points at stay reachable only through other refs; once unreachable, Git may garbage-collect them. This cannot be undone from guit.",
     confirm: "Delete branch",
     cancel: "Keep branch",
+  },
+  tag: {
+    warning:
+      "Deleting removes this tag name. If the tagged commit is reachable from no branch or other ref, Git may garbage-collect it. This cannot be undone from guit.",
+    confirm: "Delete tag",
+    cancel: "Keep tag",
   },
 };
 
@@ -712,6 +734,7 @@ type PendingPreview =
       dropped: string[];
       nonce: string;
       branch?: undefined;
+      tag?: undefined;
     }
   | {
       kind: "branch";
@@ -719,6 +742,15 @@ type PendingPreview =
       dropped: string[];
       nonce: string;
       branch: { name: string; force: boolean; targetOid: string | null };
+      tag?: undefined;
+    }
+  | {
+      kind: "tag";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag: { name: string; targetOid: string | null };
     };
 
 let pendingPreview: PendingPreview | null = null;
@@ -742,7 +774,12 @@ function renderPreviewPanel(): void {
   previewWarning.textContent = copy.warning;
   previewConfirmButton.textContent = copy.confirm;
   previewKeepButton.textContent = copy.cancel;
-  const oid = pending.branch?.targetOid ?? null;
+  const oid =
+    pending.kind === "branch"
+      ? pending.branch.targetOid
+      : pending.kind === "tag"
+        ? pending.tag.targetOid
+        : null;
   previewCandidates.replaceChildren(
     ...pending.names.map((name) => {
       const item = document.createElement("li");
@@ -816,6 +853,9 @@ async function renewPreviewPanel(): Promise<void> {
     request.name = pending.branch.name;
     request.force = pending.branch.force;
   }
+  if (pending.kind === "tag") {
+    request.name = pending.tag.name;
+  }
   previewRenewing = true;
   try {
     const command =
@@ -823,7 +863,9 @@ async function renewPreviewPanel(): Promise<void> {
         ? "preview_discard"
         : pending.kind === "clean"
           ? "preview_clean"
-          : "preview_delete_branch";
+          : pending.kind === "branch"
+            ? "preview_delete_branch"
+            : "preview_delete_tag";
     const preview = await invoke<PreviewResult>(command, request);
     pendingPreview =
       pending.kind === "branch"
@@ -834,7 +876,15 @@ async function renewPreviewPanel(): Promise<void> {
             nonce: preview.nonce,
             branch: { ...pending.branch, targetOid: preview.targetOid },
           }
-        : { ...pending, names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
+        : pending.kind === "tag"
+          ? {
+              ...pending,
+              names: preview.candidates,
+              dropped: preview.dropped,
+              nonce: preview.nonce,
+              tag: { ...pending.tag, targetOid: preview.targetOid },
+            }
+          : { ...pending, names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
     // The preview re-read Git and published a newer version; adopting it
     // would re-enter this function, which the flag above keeps suppressed.
     applySnapshot(preview.snapshot);
@@ -867,14 +917,18 @@ async function confirmPreview(): Promise<void> {
       ? "Discarding work-tree changes…"
       : kind === "clean"
         ? "Deleting untracked files…"
-        : "Deleting branch…";
+        : kind === "branch"
+          ? "Deleting branch…"
+          : "Deleting tag…";
   try {
     const result = await invoke<OperationResult>(
       kind === "discard"
         ? "discard_files"
         : kind === "clean"
           ? "clean_files"
-          : "delete_branch",
+          : kind === "branch"
+            ? "delete_branch"
+            : "delete_tag",
       { nonce },
     );
     // Consume the panel before applying the snapshot so the version guard
@@ -1153,6 +1207,14 @@ const branchNameInput = document.querySelector<HTMLInputElement>("#branch-name")
 const branchCreateButton = document.querySelector<HTMLButtonElement>("#branch-create")!;
 const branchForceButton = document.querySelector<HTMLButtonElement>("#branch-force")!;
 const branchFromCommitButton = document.querySelector<HTMLButtonElement>("#branch-from-commit")!;
+const tagNameInput = document.querySelector<HTMLInputElement>("#tag-name")!;
+const tagMessageInput = document.querySelector<HTMLInputElement>("#tag-message")!;
+const tagCreateButton = document.querySelector<HTMLButtonElement>("#tag-create")!;
+const tagFromCommitButton = document.querySelector<HTMLButtonElement>("#tag-from-commit")!;
+const tagDetailPanel = document.querySelector<HTMLElement>("#tag-detail")!;
+const tagDetailMeta = document.querySelector<HTMLElement>("#tag-detail-meta")!;
+const tagDetailMessage = document.querySelector<HTMLElement>("#tag-detail-message")!;
+const tagDetailCloseButton = document.querySelector<HTMLButtonElement>("#tag-detail-close")!;
 
 let refsRequestSeq = 0;
 let refsSnapshotVersion = -1;
@@ -1160,6 +1222,7 @@ let lastRefs: RefListing | null = null;
 let renamingBranch: string | null = null;
 let branchStartOid: string | null = null;
 let branchForceTarget: string | null = null;
+let tagStartOid: string | null = null;
 
 function refPlaceholderRow(message: string): HTMLElement {
   const row = document.createElement("div");
@@ -1173,7 +1236,9 @@ function refPlaceholder(message: string): void {
   lastRefs = null;
   renamingBranch = null;
   branchStartOid = null;
+  tagStartOid = null;
   hideBranchForce();
+  hideTagDetail();
   refStatus.textContent = "";
   refList.replaceChildren(refPlaceholderRow(message));
 }
@@ -1209,11 +1274,11 @@ async function loadRefs(): Promise<void> {
   }
 }
 
-// Branch writes share the backend write queue, so they ride the same
-// writeRunning lane as staging and committing; the fresh snapshot returned
-// by the backend flows through the standard version guard.
+// Branch and tag writes share the backend write queue, so they ride the
+// same writeRunning lane as staging and committing; the fresh snapshot
+// returned by the backend flows through the standard version guard.
 async function runBranch(
-  command: "create_branch" | "switch_branch" | "rename_branch",
+  command: "create_branch" | "switch_branch" | "rename_branch" | "create_tag",
   args: Record<string, unknown>,
   running: string,
 ): Promise<OperationResult | null> {
@@ -1234,7 +1299,7 @@ async function runBranch(
     return result;
   } catch (error) {
     showError(error);
-    refStatus.textContent = "The branch operation did not run.";
+    refStatus.textContent = "The reference operation did not run.";
     return null;
   } finally {
     writeRunning = false;
@@ -1310,6 +1375,7 @@ branchNameInput.addEventListener("keydown", (event) => {
   }
 });
 branchNameInput.addEventListener("input", () => syncBranchControls());
+tagNameInput.addEventListener("input", () => syncBranchControls());
 branchFromCommitButton.addEventListener("click", () => {
   if (!selectedCommit) return;
   branchStartOid = selectedCommit.oid;
@@ -1323,7 +1389,125 @@ function syncBranchControls(): void {
   branchCreateButton.disabled =
     !sessionActive || writeRunning || branchNameInput.value.trim() === "";
   branchFromCommitButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
+  tagNameInput.disabled = !sessionActive || writeRunning;
+  tagMessageInput.disabled = !sessionActive || writeRunning;
+  tagCreateButton.disabled =
+    !sessionActive || writeRunning || tagNameInput.value.trim() === "";
+  tagFromCommitButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
 }
+
+// --- Tags (M3-05): create / view / delete -----------------------------------
+// A blank annotation box is an explicit lightweight tag; annotation text
+// travels to Git through a 0600 temp file on the Rust side and never appears
+// in results or logs. Deletion rides the same single-use nonce panel as
+// branch delete, bound to the object id captured at preview time.
+
+async function createTagFromInput(): Promise<void> {
+  const name = tagNameInput.value.trim();
+  if (!name || !currentSnapshot || writeRunning) return;
+  const annotation = tagMessageInput.value.trim();
+  const result = await runBranch(
+    "create_tag",
+    { name, targetOid: tagStartOid, message: annotation === "" ? null : annotation },
+    `Creating tag ${name}…`,
+  );
+  if (result?.outcome === "success") {
+    tagNameInput.value = "";
+    tagMessageInput.value = "";
+    tagStartOid = null;
+  }
+}
+
+tagCreateButton.addEventListener("click", () => void createTagFromInput());
+tagNameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void createTagFromInput();
+  }
+});
+tagMessageInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void createTagFromInput();
+  }
+});
+tagFromCommitButton.addEventListener("click", () => {
+  if (!selectedCommit) return;
+  tagStartOid = selectedCommit.oid;
+  tagNameInput.focus();
+  refStatus.textContent = `New tag will point at ${selectedCommit.oid.slice(0, 10)} — `
+    + "enter a name and press Create tag.";
+});
+
+async function requestTagDelete(name: string): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  refStatus.textContent = `Checking what deleting tag ${name} would remove…`;
+  try {
+    const preview = await invoke<PreviewResult>("preview_delete_tag", {
+      snapshotVersion: currentSnapshot.version,
+      name,
+    });
+    applySnapshot(preview.snapshot);
+    pendingPreview = {
+      kind: "tag",
+      names: preview.candidates,
+      dropped: preview.dropped,
+      nonce: preview.nonce,
+      tag: { name, targetOid: preview.targetOid },
+    };
+    renderPreviewPanel();
+    previewConfirmButton.focus();
+  } catch (error) {
+    showError(error);
+    refStatus.textContent = "The tag deletion was refused before anything changed.";
+  }
+}
+
+type TagDetail = {
+  name: string;
+  oid: string;
+  targetOid: string;
+  annotated: boolean;
+  message: string;
+};
+
+function hideTagDetail(): void {
+  tagDetailPanel.hidden = true;
+  tagDetailMeta.replaceChildren();
+  tagDetailMessage.textContent = "";
+}
+
+function showTagDetail(name: string): void {
+  void (async () => {
+    refStatus.textContent = `Reading tag ${name}…`;
+    try {
+      const detail = await invoke<TagDetail>("show_tag", { name });
+      const dlRow = (term: string, value: string): HTMLElement[] => {
+        const dt = document.createElement("dt");
+        dt.textContent = term;
+        const dd = document.createElement("dd");
+        dd.textContent = value;
+        return [dt, dd];
+      };
+      tagDetailMeta.replaceChildren(
+        ...dlRow("Tag", detail.name),
+        ...dlRow("Type", detail.annotated ? "annotated" : "lightweight"),
+        ...dlRow("Tag object", detail.oid),
+        ...dlRow("Commit", detail.targetOid),
+      );
+      tagDetailMessage.textContent = detail.annotated
+        ? detail.message
+        : "Lightweight tag — it names the commit directly and carries no annotation.";
+      tagDetailPanel.hidden = false;
+      refStatus.textContent = `Tag ${detail.name} (${detail.annotated ? "annotated" : "lightweight"}).`;
+    } catch (error) {
+      showError(error);
+      refStatus.textContent = "The tag could not be read.";
+    }
+  })();
+}
+
+tagDetailCloseButton.addEventListener("click", hideTagDetail);
 
 function refRowButton(
   label: string,
@@ -1458,14 +1642,27 @@ function renderRefs(listing: RefListing): void {
   rows.push(heading(`Tags (${listing.tags.length})`));
   for (const tag of listing.tags) {
     const target = tag.targetOid ?? tag.oid;
-    rows.push(
-      row(
-        tag.annotated ? "T" : "",
-        tag.name,
-        `${tag.annotated ? "annotated" : "lightweight"} → ${target.slice(0, 8)}`,
-        tag.addressable,
-      ),
+    const el = row(
+      tag.annotated ? "T" : "",
+      tag.name,
+      `${tag.annotated ? "annotated" : "lightweight"} → ${target.slice(0, 8)}`,
+      tag.addressable,
     );
+    // View reads the annotation through the backend's exact-ref query;
+    // delete goes through the same preview ticket flow as branches (tags
+    // have no force stage — `git tag -d` only removes the name).
+    if (tag.addressable) {
+      el.append(
+        refRowButton("View", `View tag ${tag.name}`, () => showTagDetail(tag.name)),
+        refRowButton(
+          "Delete",
+          `Delete tag ${tag.name}`,
+          () => void requestTagDelete(tag.name),
+          true,
+        ),
+      );
+    }
+    rows.push(el);
   }
   refList.replaceChildren(...rows);
 }

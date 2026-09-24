@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-const MAX_NAME_LEN: usize = 200;
+pub(crate) const MAX_NAME_LEN: usize = 200;
 
 /// Rust-side guardrails that hold before Git is consulted: reject option-like
 /// leading dashes so a name can never reach argv as a flag, reject `@{...}`
@@ -95,7 +95,7 @@ fn branch_exists(listing: &refs::RefListing, name: &str) -> bool {
     listing.branches.iter().any(|b| b.name == name)
 }
 
-fn run_git(
+pub(crate) fn run_git(
     work_root: &Path,
     args: &[&str],
     cancelled: &AtomicBool,
@@ -291,7 +291,7 @@ fn run(
 /// refusal the user should see as the outcome of their request; `Failed` is
 /// an infrastructure problem (a recheck that could not run), which must
 /// surface as a command error rather than a clean-looking refusal.
-enum PrepareError {
+pub(crate) enum PrepareError {
     Rejected(ProbeError),
     Failed(ProbeError),
 }
@@ -392,7 +392,13 @@ pub(crate) fn preview_delete_branch(
             "The checked-out branch cannot be deleted; switch elsewhere first.",
         ));
     }
-    let nonce = state.stage_ref_delete(work_root, name.to_owned(), branch.oid.clone(), force);
+    let nonce = state.stage_ref_delete(
+        crate::write::PreviewKind::DeleteBranch,
+        work_root,
+        name.to_owned(),
+        branch.oid.clone(),
+        force,
+    );
     let snapshot = session::refresh(sessions)?
         .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
     Ok(PreviewResult {
@@ -430,7 +436,9 @@ fn run_delete(
     let mut exit_code = None;
     let message;
     let mut details = None;
-    let Some((work_root, name, oid, force)) = state.take_ref_delete(nonce) else {
+    let Some((work_root, name, oid, force)) =
+        state.take_ref_delete(nonce, crate::write::PreviewKind::DeleteBranch)
+    else {
         let snapshot = session::refresh(sessions)?;
         return Ok(OperationResult {
             operation_id: 0,

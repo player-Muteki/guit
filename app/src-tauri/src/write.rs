@@ -17,6 +17,7 @@ pub enum PreviewKind {
     Discard,
     Clean,
     DeleteBranch,
+    DeleteTag,
 }
 
 #[derive(Debug)]
@@ -74,10 +75,11 @@ impl WriteState {
         nonce
     }
 
-    /// One-time confirmation ticket for a branch deletion, bound to the
-    /// branch name and the object id observed at preview time.
+    /// One-time confirmation ticket for a ref deletion (branch or tag),
+    /// bound to the name and the object id observed at preview time.
     pub(crate) fn stage_ref_delete(
         &self,
+        kind: PreviewKind,
         work_root: PathBuf,
         name: String,
         oid: String,
@@ -85,17 +87,21 @@ impl WriteState {
     ) -> String {
         self.stage_preview(Preview {
             work_root,
-            kind: PreviewKind::DeleteBranch,
+            kind,
             paths: vec![name.into_bytes()],
             oid: Some(oid),
             force,
         })
     }
 
-    /// Consumes a delete ticket; the branch must still point at the stored
+    /// Consumes a delete ticket; the ref must still point at the stored
     /// oid before Git runs, so any drift forces a fresh preview.
-    pub(crate) fn take_ref_delete(&self, nonce: &str) -> Option<(PathBuf, String, String, bool)> {
-        let ticket = self.take_preview(nonce, PreviewKind::DeleteBranch)?;
+    pub(crate) fn take_ref_delete(
+        &self,
+        nonce: &str,
+        kind: PreviewKind,
+    ) -> Option<(PathBuf, String, String, bool)> {
+        let ticket = self.take_preview(nonce, kind)?;
         let name = String::from_utf8(ticket.paths.first()?.clone()).ok()?;
         let oid = ticket.oid?;
         Some((ticket.work_root, name, oid, ticket.force))
@@ -153,6 +159,8 @@ pub enum OperationKind {
     BranchSwitch,
     BranchRename,
     BranchDelete,
+    TagCreate,
+    TagDelete,
 }
 
 impl OperationKind {
@@ -170,6 +178,8 @@ impl OperationKind {
             OperationKind::BranchSwitch => (&[], "Switched"),
             OperationKind::BranchRename => (&[], "Renamed"),
             OperationKind::BranchDelete => (&[], "Deleted"),
+            OperationKind::TagCreate => (&[], "Created"),
+            OperationKind::TagDelete => (&[], "Deleted"),
         }
     }
 

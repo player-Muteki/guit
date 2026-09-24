@@ -11,6 +11,7 @@ mod repo;
 mod runner;
 mod session;
 mod status;
+mod tags;
 mod util;
 mod watch;
 mod write;
@@ -715,6 +716,80 @@ async fn delete_branch(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn create_tag(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    name: String,
+    target_oid: Option<String>,
+    message: Option<String>,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        tags::create_tag(
+            &state,
+            &sessions,
+            snapshot_version,
+            &name,
+            target_oid.as_deref(),
+            message.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn show_tag(app: tauri::AppHandle, name: String) -> Result<tags::TagDetail, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        let identity = sessions
+            .current_identity()
+            .ok_or_else(|| ProbeError::new("refs_no_session", "No repository is open."))?;
+        // Read-only view: a bare repository resolves tags from its git dir.
+        let directory = if identity.is_bare {
+            identity.git_dir.as_path()
+        } else {
+            identity
+                .work_dir()
+                .map_err(|_| ProbeError::new("repo_worktree_missing", "The work tree is gone."))?
+        };
+        tags::tag_detail(directory, &name)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn preview_delete_tag(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    name: String,
+) -> Result<write::PreviewResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        tags::preview_delete_tag(&state, &sessions, snapshot_version, &name)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn delete_tag(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        tags::delete_tag(&state, &sessions, nonce)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -761,7 +836,11 @@ fn main() {
             switch_branch,
             rename_branch,
             preview_delete_branch,
-            delete_branch
+            delete_branch,
+            create_tag,
+            show_tag,
+            preview_delete_tag,
+            delete_tag
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");
