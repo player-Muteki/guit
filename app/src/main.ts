@@ -75,7 +75,16 @@ type CloneResult = {
 
 type OperationResult = {
   operationId: number;
-  kind: "stage" | "unstage" | "commit" | "discard" | "clean";
+  kind:
+    | "stage"
+    | "unstage"
+    | "commit"
+    | "discard"
+    | "clean"
+    | "branchcreate"
+    | "branchswitch"
+    | "branchrename"
+    | "branchdelete";
   outcome: "success" | "failed" | "cancelled" | "rejected";
   exitCode: number | null;
   message: string;
@@ -88,6 +97,7 @@ type PreviewResult = {
   candidates: string[];
   dropped: string[];
   snapshot: SnapshotView;
+  targetOid: string | null;
 };
 
 type ToolPurpose = "openFile" | "diffWorktree" | "diffStaged" | "diffCommit";
@@ -152,6 +162,11 @@ app.innerHTML = `
   </section>
   <section class="card">
     <h1>References</h1>
+    <div class="actions">
+      <input id="branch-name" type="text" placeholder="New branch name" aria-label="New branch name" disabled />
+      <button id="branch-create" disabled>Create branch</button>
+      <button id="branch-force" class="danger" hidden>Force delete…</button>
+    </div>
     <div id="ref-list" class="refs" role="list" aria-label="Branches and tags">
       <div class="file-row placeholder">Open a repository to list its branches and tags.</div>
     </div>
@@ -173,6 +188,7 @@ app.innerHTML = `
       <div class="actions">
         <button id="copy-oid">Copy OID</button>
         <button id="diff-commit">Diff commit</button>
+        <button id="branch-from-commit">Branch from commit…</button>
       </div>
     </div>
   </section>
@@ -578,6 +594,7 @@ function syncCommitControls(): void {
   diffCommitButton.disabled = toolRunning || selectedCommit === null;
   previewConfirmButton.disabled = writeRunning || pendingPreview === null;
   previewKeepButton.disabled = writeRunning;
+  syncBranchControls();
 }
 
 // A difftool call stays pending until the user closes the diff window, so
@@ -658,11 +675,11 @@ commitMessage.addEventListener("keydown", (event) => {
 });
 
 // --- destructive operations: preview → recheck → confirm (plan/04 协议) ---
-// One panel serves discard (work-tree restore) and clean (untracked
-// removal); both bind a single-use server nonce that the backend re-checks
-// against a fresh Git read at every step.
+// One panel serves discard (work-tree restore), clean (untracked removal)
+// and branch delete; all bind a single-use server nonce that the backend
+// re-checks against a fresh Git read at every step.
 
-type PreviewKindKey = "discard" | "clean";
+type PreviewKindKey = "discard" | "clean" | "branch";
 
 const previewCopy: Record<PreviewKindKey, { warning: string; confirm: string; cancel: string }> = {
   discard: {
@@ -675,9 +692,36 @@ const previewCopy: Record<PreviewKindKey, { warning: string; confirm: string; ca
     confirm: "Delete untracked",
     cancel: "Keep files",
   },
+  branch: {
+    warning: "Deleting removes this branch name. Commits it points at stay reachable only through other refs; once unreachable, Git may garbage-collect them. This cannot be undone from guit.",
+    confirm: "Delete branch",
+    cancel: "Keep branch",
+  },
 };
 
-let pendingPreview: { kind: PreviewKindKey; names: string[]; dropped: string[]; nonce: string } | null = null;
+const branchForceCopy = {
+  warning: "This branch is not fully merged. Force-deleting makes its unique commits unreachable, and Git may garbage-collect them. This cannot be undone from guit.",
+  confirm: "Force delete branch",
+  cancel: "Keep branch",
+};
+
+type PendingPreview =
+  | {
+      kind: "discard" | "clean";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+    }
+  | {
+      kind: "branch";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch: { name: string; force: boolean; targetOid: string | null };
+    };
+
+let pendingPreview: PendingPreview | null = null;
 let previewRenewing = false;
 
 function discardEligible(file: FileView): boolean {
@@ -691,20 +735,23 @@ function renderPreviewPanel(): void {
     confirmPanel.hidden = true;
     return;
   }
-  const copy = previewCopy[pendingPreview.kind];
+  const pending = pendingPreview;
+  const forced = pending.branch?.force === true;
+  const copy = pending.kind === "branch" && forced ? branchForceCopy : previewCopy[pending.kind];
   confirmPanel.hidden = false;
   previewWarning.textContent = copy.warning;
   previewConfirmButton.textContent = copy.confirm;
   previewKeepButton.textContent = copy.cancel;
+  const oid = pending.branch?.targetOid ?? null;
   previewCandidates.replaceChildren(
-    ...pendingPreview.names.map((name) => {
+    ...pending.names.map((name) => {
       const item = document.createElement("li");
-      item.textContent = name;
+      item.textContent = oid ? `${name} · at ${oid.slice(0, 10)}` : name;
       return item;
     }),
   );
-  previewDropped.hidden = pendingPreview.dropped.length === 0;
-  previewDropped.textContent = `Skipped (no work-tree changes): ${pendingPreview.dropped.join(", ")}`;
+  previewDropped.hidden = pending.dropped.length === 0;
+  previewDropped.textContent = `Skipped (no work-tree changes): ${pending.dropped.join(", ")}`;
   syncCommitControls();
 }
 
@@ -751,10 +798,11 @@ async function requestClean(): Promise<void> {
 // ambiguous names force a fresh preview), clean has no IDs at all.
 async function renewPreviewPanel(): Promise<void> {
   if (!pendingPreview || previewRenewing || !currentSnapshot) return;
+  const pending = pendingPreview;
   const request: Record<string, unknown> = { snapshotVersion: currentSnapshot.version };
-  if (pendingPreview.kind === "discard") {
+  if (pending.kind === "discard") {
     const ids: number[] = [];
-    for (const name of pendingPreview.names) {
+    for (const name of pending.names) {
       const matches = currentFiles.filter((file) => file.display === name && discardEligible(file));
       if (matches.length !== 1) {
         closePreviewPanel("The changed files moved after the preview; ask again to confirm.");
@@ -764,13 +812,29 @@ async function renewPreviewPanel(): Promise<void> {
     }
     request.fileIds = ids;
   }
+  if (pending.kind === "branch") {
+    request.name = pending.branch.name;
+    request.force = pending.branch.force;
+  }
   previewRenewing = true;
   try {
-    const preview = await invoke<PreviewResult>(
-      pendingPreview.kind === "discard" ? "preview_discard" : "preview_clean",
-      request,
-    );
-    pendingPreview = { kind: pendingPreview.kind, names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
+    const command =
+      pending.kind === "discard"
+        ? "preview_discard"
+        : pending.kind === "clean"
+          ? "preview_clean"
+          : "preview_delete_branch";
+    const preview = await invoke<PreviewResult>(command, request);
+    pendingPreview =
+      pending.kind === "branch"
+        ? {
+            ...pending,
+            names: preview.candidates,
+            dropped: preview.dropped,
+            nonce: preview.nonce,
+            branch: { ...pending.branch, targetOid: preview.targetOid },
+          }
+        : { ...pending, names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
     // The preview re-read Git and published a newer version; adopting it
     // would re-enter this function, which the flag above keeps suppressed.
     applySnapshot(preview.snapshot);
@@ -794,12 +858,25 @@ function closePreviewPanel(message?: string): void {
 async function confirmPreview(): Promise<void> {
   if (!pendingPreview || writeRunning) return;
   const { kind, nonce } = pendingPreview;
+  const branchName = pendingPreview.kind === "branch" ? pendingPreview.branch.name : null;
   writeRunning = true;
   syncCommitControls();
   renderFileRows();
-  writeStatus.textContent = kind === "discard" ? "Discarding work-tree changes…" : "Deleting untracked files…";
+  writeStatus.textContent =
+    kind === "discard"
+      ? "Discarding work-tree changes…"
+      : kind === "clean"
+        ? "Deleting untracked files…"
+        : "Deleting branch…";
   try {
-    const result = await invoke<OperationResult>(kind === "discard" ? "discard_files" : "clean_files", { nonce });
+    const result = await invoke<OperationResult>(
+      kind === "discard"
+        ? "discard_files"
+        : kind === "clean"
+          ? "clean_files"
+          : "delete_branch",
+      { nonce },
+    );
     // Consume the panel before applying the snapshot so the version guard
     // does not schedule a renew for an operation that already ran.
     pendingPreview = null;
@@ -808,6 +885,16 @@ async function confirmPreview(): Promise<void> {
     writeStatus.textContent = result.details
       ? `${result.message} ${result.details}`
       : result.message;
+    // Git refused an unmerged branch with -d: force is a *separate*
+    // confirmation with a stronger warning, never an automatic retry.
+    if (
+      kind === "branch" &&
+      branchName &&
+      result.outcome === "failed" &&
+      result.details?.toLowerCase().includes("not fully merged")
+    ) {
+      offerBranchForceDelete(branchName);
+    }
   } catch (error) {
     showError(error);
     writeStatus.textContent = "The operation did not run.";
@@ -1062,9 +1149,17 @@ type RefListing = { branches: BranchRef[]; remotes: RemoteRef[]; tags: TagRef[] 
 
 const refList = document.querySelector<HTMLElement>("#ref-list")!;
 const refStatus = document.querySelector<HTMLElement>("#ref-status")!;
+const branchNameInput = document.querySelector<HTMLInputElement>("#branch-name")!;
+const branchCreateButton = document.querySelector<HTMLButtonElement>("#branch-create")!;
+const branchForceButton = document.querySelector<HTMLButtonElement>("#branch-force")!;
+const branchFromCommitButton = document.querySelector<HTMLButtonElement>("#branch-from-commit")!;
 
 let refsRequestSeq = 0;
 let refsSnapshotVersion = -1;
+let lastRefs: RefListing | null = null;
+let renamingBranch: string | null = null;
+let branchStartOid: string | null = null;
+let branchForceTarget: string | null = null;
 
 function refPlaceholderRow(message: string): HTMLElement {
   const row = document.createElement("div");
@@ -1075,6 +1170,10 @@ function refPlaceholderRow(message: string): HTMLElement {
 
 function refPlaceholder(message: string): void {
   refsSnapshotVersion = -1;
+  lastRefs = null;
+  renamingBranch = null;
+  branchStartOid = null;
+  hideBranchForce();
   refStatus.textContent = "";
   refList.replaceChildren(refPlaceholderRow(message));
 }
@@ -1110,7 +1209,149 @@ async function loadRefs(): Promise<void> {
   }
 }
 
+// Branch writes share the backend write queue, so they ride the same
+// writeRunning lane as staging and committing; the fresh snapshot returned
+// by the backend flows through the standard version guard.
+async function runBranch(
+  command: "create_branch" | "switch_branch" | "rename_branch",
+  args: Record<string, unknown>,
+  running: string,
+): Promise<OperationResult | null> {
+  if (!currentSnapshot || writeRunning) return null;
+  writeRunning = true;
+  syncCommitControls();
+  if (lastRefs) renderRefs(lastRefs);
+  refStatus.textContent = running;
+  try {
+    const result = await invoke<OperationResult>(command, {
+      snapshotVersion: currentSnapshot.version,
+      ...args,
+    });
+    applySnapshot(result.snapshot);
+    refStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+    return result;
+  } catch (error) {
+    showError(error);
+    refStatus.textContent = "The branch operation did not run.";
+    return null;
+  } finally {
+    writeRunning = false;
+    syncCommitControls();
+    if (lastRefs) renderRefs(lastRefs);
+  }
+}
+
+function offerBranchForceDelete(name: string): void {
+  branchForceTarget = name;
+  branchForceButton.hidden = false;
+  branchForceButton.textContent = `Force delete "${name}"…`;
+}
+
+function hideBranchForce(): void {
+  branchForceTarget = null;
+  branchForceButton.hidden = true;
+}
+
+branchForceButton.addEventListener("click", () => {
+  if (!branchForceTarget) return;
+  const name = branchForceTarget;
+  hideBranchForce();
+  void requestBranchDelete(name, true);
+});
+
+async function requestBranchDelete(name: string, force: boolean): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  hideBranchForce();
+  refStatus.textContent = `Checking what deleting ${name} would remove…`;
+  try {
+    const preview = await invoke<PreviewResult>("preview_delete_branch", {
+      snapshotVersion: currentSnapshot.version,
+      name,
+      force,
+    });
+    applySnapshot(preview.snapshot);
+    pendingPreview = {
+      kind: "branch",
+      names: preview.candidates,
+      dropped: preview.dropped,
+      nonce: preview.nonce,
+      branch: { name, force, targetOid: preview.targetOid },
+    };
+    renderPreviewPanel();
+    previewConfirmButton.focus();
+  } catch (error) {
+    showError(error);
+    refStatus.textContent = "The branch deletion was refused before anything changed.";
+  }
+}
+
+async function createBranchFromInput(): Promise<void> {
+  const name = branchNameInput.value.trim();
+  if (!name || !currentSnapshot || writeRunning) return;
+  const startOid = branchStartOid;
+  const result = await runBranch(
+    "create_branch",
+    startOid ? { name, startOid } : { name },
+    `Creating branch ${name}…`,
+  );
+  if (result?.outcome === "success") {
+    branchNameInput.value = "";
+    branchStartOid = null;
+  }
+}
+
+branchCreateButton.addEventListener("click", () => void createBranchFromInput());
+branchNameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void createBranchFromInput();
+  }
+});
+branchNameInput.addEventListener("input", () => syncBranchControls());
+branchFromCommitButton.addEventListener("click", () => {
+  if (!selectedCommit) return;
+  branchStartOid = selectedCommit.oid;
+  branchNameInput.focus();
+  refStatus.textContent = `New branch will start at ${selectedCommit.oid.slice(0, 10)} — `
+    + "enter a name and press Create branch.";
+});
+
+function syncBranchControls(): void {
+  branchNameInput.disabled = !sessionActive || writeRunning;
+  branchCreateButton.disabled =
+    !sessionActive || writeRunning || branchNameInput.value.trim() === "";
+  branchFromCommitButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
+}
+
+function refRowButton(
+  label: string,
+  aria: string,
+  handler: () => void,
+  danger = false,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.className = "row-action" + (danger ? " danger" : "");
+  button.textContent = label;
+  button.setAttribute("aria-label", aria);
+  button.disabled = writeRunning;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+async function renameBranchThrough(oldName: string, newName: string): Promise<void> {
+  const result = await runBranch(
+    "rename_branch",
+    { old: oldName, new: newName },
+    `Renaming ${oldName}…`,
+  );
+  if (result) renamingBranch = null;
+  if (lastRefs) renderRefs(lastRefs);
+}
+
 function renderRefs(listing: RefListing): void {
+  lastRefs = listing;
   const rows: HTMLElement[] = [];
   const heading = (text: string) => {
     const el = document.createElement("div");
@@ -1148,7 +1389,66 @@ function renderRefs(listing: RefListing): void {
     if (branch.upstreamGone) parts.push("upstream gone");
     if (branch.ahead !== null) parts.push(`↑${branch.ahead}`);
     if (branch.behind !== null) parts.push(`↓${branch.behind}`);
-    rows.push(row(branch.head ? "*" : "", branch.name, parts.join("  "), branch.addressable));
+    const el = row(branch.head ? "*" : "", branch.name, parts.join("  "), branch.addressable);
+    // Only byte-round-trippable names can be write targets (plan/04); the
+    // checked-out branch can be renamed but never switched away or deleted.
+    if (branch.addressable && renamingBranch === branch.name) {
+      el.classList.add("renaming");
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "ref-rename";
+      input.value = branch.name;
+      input.disabled = writeRunning;
+      input.setAttribute("aria-label", `New name for ${branch.name}`);
+      const cancel = refRowButton("Cancel", `Cancel renaming ${branch.name}`, () => {
+        renamingBranch = null;
+        if (lastRefs) renderRefs(lastRefs);
+      });
+      const save = refRowButton("Save", `Rename ${branch.name} to the entered name`, () => {
+        const next = input.value.trim();
+        if (!next || next === branch.name) {
+          renamingBranch = null;
+          if (lastRefs) renderRefs(lastRefs);
+          return;
+        }
+        void renameBranchThrough(branch.name, next);
+      });
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          save.click();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          cancel.click();
+        }
+      });
+      el.append(input, save, cancel);
+    } else if (branch.addressable) {
+      if (!branch.head) {
+        el.append(
+          refRowButton("Switch", `Switch to ${branch.name}`, () =>
+            void runBranch("switch_branch", { name: branch.name }, `Switching to ${branch.name}…`),
+          ),
+        );
+      }
+      el.append(
+        refRowButton("Rename", `Rename branch ${branch.name}`, () => {
+          renamingBranch = branch.name;
+          if (lastRefs) renderRefs(lastRefs);
+        }),
+      );
+      if (!branch.head) {
+        el.append(
+          refRowButton(
+            "Delete",
+            `Delete branch ${branch.name}`,
+            () => void requestBranchDelete(branch.name, false),
+            true,
+          ),
+        );
+      }
+    }
+    rows.push(el);
   }
   rows.push(heading(`Remote branches (${listing.remotes.length})`));
   for (const remote of listing.remotes) {

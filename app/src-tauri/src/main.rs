@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod branches;
 mod clone;
 mod extools;
 mod history;
@@ -631,6 +632,89 @@ async fn list_refs(app: tauri::AppHandle) -> Result<refs::RefListing, ProbeError
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn create_branch(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    name: String,
+    start_oid: Option<String>,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        branches::create_branch(
+            &state,
+            &sessions,
+            snapshot_version,
+            &name,
+            start_oid.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn switch_branch(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    name: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        branches::switch_branch(&state, &sessions, snapshot_version, &name)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn rename_branch(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    old: String,
+    new: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        branches::rename_branch(&state, &sessions, snapshot_version, &old, &new)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn preview_delete_branch(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    name: String,
+    force: bool,
+) -> Result<write::PreviewResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        branches::preview_delete_branch(&state, &sessions, snapshot_version, &name, force)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn delete_branch(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        branches::delete_branch(&state, &sessions, nonce)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -672,7 +756,12 @@ fn main() {
             history_page,
             commit_files,
             open_commit_diff,
-            list_refs
+            list_refs,
+            create_branch,
+            switch_branch,
+            rename_branch,
+            preview_delete_branch,
+            delete_branch
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

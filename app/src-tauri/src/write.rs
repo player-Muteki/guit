@@ -10,11 +10,13 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 /// What a stored confirmation permits. Discard reverts tracked work-tree
-/// edits; Clean removes untracked items. Both share the one-time ticket flow.
+/// edits; Clean removes untracked items; DeleteBranch removes a ref whose
+/// object id was captured at preview time. All share the one-time ticket flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewKind {
     Discard,
     Clean,
+    DeleteBranch,
 }
 
 #[derive(Debug)]
@@ -22,6 +24,11 @@ struct Preview {
     work_root: PathBuf,
     kind: PreviewKind,
     paths: Vec<Vec<u8>>,
+    /// Object id the branch pointed at when the delete was previewed.
+    oid: Option<String>,
+    /// -d refuses unmerged branches; the force flag records an explicit,
+    /// separately confirmed second stage (never a silent -D).
+    force: bool,
 }
 
 /// Serializes every Git write in the repository (plan/03: 同仓库写入严格串行).
@@ -55,10 +62,43 @@ impl WriteState {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
+    /// The live cancel flag of the held operation; branch writers pass it to
+    /// the runner (process-group kill) and poll it before starting Git.
+    pub(crate) fn cancel_flag(&self) -> &AtomicBool {
+        &self.cancelled
+    }
+
     fn stage_preview(&self, ticket: Preview) -> String {
         let nonce = new_nonce();
         self.previews.lock().unwrap().insert(nonce.clone(), ticket);
         nonce
+    }
+
+    /// One-time confirmation ticket for a branch deletion, bound to the
+    /// branch name and the object id observed at preview time.
+    pub(crate) fn stage_ref_delete(
+        &self,
+        work_root: PathBuf,
+        name: String,
+        oid: String,
+        force: bool,
+    ) -> String {
+        self.stage_preview(Preview {
+            work_root,
+            kind: PreviewKind::DeleteBranch,
+            paths: vec![name.into_bytes()],
+            oid: Some(oid),
+            force,
+        })
+    }
+
+    /// Consumes a delete ticket; the branch must still point at the stored
+    /// oid before Git runs, so any drift forces a fresh preview.
+    pub(crate) fn take_ref_delete(&self, nonce: &str) -> Option<(PathBuf, String, String, bool)> {
+        let ticket = self.take_preview(nonce, PreviewKind::DeleteBranch)?;
+        let name = String::from_utf8(ticket.paths.first()?.clone()).ok()?;
+        let oid = ticket.oid?;
+        Some((ticket.work_root, name, oid, ticket.force))
     }
 
     /// Confirmation nonces are single-use: the take removes them even when
@@ -109,11 +149,16 @@ pub enum OperationKind {
     Commit,
     Discard,
     Clean,
+    BranchCreate,
+    BranchSwitch,
+    BranchRename,
+    BranchDelete,
 }
 
 impl OperationKind {
     /// Git argument prefix plus the past-tense verb for the result message.
-    /// Commit, discard and clean run through their own runners, never this plan.
+    /// Commit, discard, clean and the branch kinds run through their own
+    /// runners, never this plan.
     fn plan(self) -> (&'static [&'static str], &'static str) {
         match self {
             OperationKind::Stage => (&["add"], "Staged"),
@@ -121,6 +166,10 @@ impl OperationKind {
             OperationKind::Commit => (&[], "Committed"),
             OperationKind::Discard => (&["restore", "--worktree"], "Discarded"),
             OperationKind::Clean => (&[], "Cleaned"),
+            OperationKind::BranchCreate => (&[], "Created"),
+            OperationKind::BranchSwitch => (&[], "Switched"),
+            OperationKind::BranchRename => (&[], "Renamed"),
+            OperationKind::BranchDelete => (&[], "Deleted"),
         }
     }
 
@@ -361,6 +410,9 @@ pub struct PreviewResult {
     pub candidates: Vec<String>,
     pub dropped: Vec<String>,
     pub snapshot: session::SnapshotView,
+    /// For a branch deletion, the object id the branch pointed at; None for
+    /// discard/clean so the frontend never mistakes it for a file path.
+    pub target_oid: Option<String>,
 }
 
 /// Recompute what a discard would touch, from a fresh Git read — never from
@@ -405,6 +457,8 @@ pub(crate) fn preview_discard(
         work_root,
         kind: PreviewKind::Discard,
         paths: candidates.clone(),
+        oid: None,
+        force: false,
     });
     Ok(PreviewResult {
         nonce,
@@ -414,6 +468,7 @@ pub(crate) fn preview_discard(
             .collect(),
         dropped,
         snapshot,
+        target_oid: None,
     })
 }
 
@@ -618,12 +673,15 @@ pub(crate) fn preview_clean(
         work_root,
         kind: PreviewKind::Clean,
         paths,
+        oid: None,
+        force: false,
     });
     Ok(PreviewResult {
         nonce,
         candidates,
         dropped: Vec::new(),
         snapshot,
+        target_oid: None,
     })
 }
 
@@ -727,7 +785,7 @@ pub(crate) fn run_clean(
 
 /// Cheap pre-flight for restore-based operations: `git --version` parsed with
 /// the same gate the environment probe reports as `hasRestore`.
-fn restore_supported(work_root: &Path) -> bool {
+pub(crate) fn restore_supported(work_root: &Path) -> bool {
     let mut command = repo::user_git_command(work_root);
     command.arg("--version");
     match runner::run(
