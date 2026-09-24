@@ -18,6 +18,7 @@ mod status;
 mod tags;
 mod util;
 mod watch;
+mod worktrees;
 mod write;
 
 use probe::{GitProbe, ProbeError, ToolProbe};
@@ -1039,6 +1040,75 @@ async fn reset_hard(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn list_worktrees(app: tauri::AppHandle) -> Result<Vec<worktrees::WorktreeView>, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        worktrees::list_view(&sessions)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn add_worktree(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    path: String,
+    target: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        worktrees::worktree_add(&state, &sessions, snapshot_version, path, target)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn preview_remove_worktree(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    index: u32,
+) -> Result<write::PreviewResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        worktrees::preview_remove_worktree(&state, &sessions, snapshot_version, index)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn remove_worktree(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        worktrees::remove_worktree(&state, &sessions, nonce)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn prune_worktrees(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        worktrees::prune_worktrees(&state, &sessions, snapshot_version)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1106,7 +1176,12 @@ fn main() {
             revert_commit,
             reset,
             preview_reset_hard,
-            reset_hard
+            reset_hard,
+            list_worktrees,
+            add_worktree,
+            preview_remove_worktree,
+            remove_worktree,
+            prune_worktrees
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

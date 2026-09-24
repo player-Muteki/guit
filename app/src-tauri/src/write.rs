@@ -25,6 +25,7 @@ pub enum PreviewKind {
     DropStash,
     PopStash,
     ResetHard,
+    RemoveWorktree,
 }
 
 #[derive(Debug)]
@@ -219,6 +220,9 @@ pub enum OperationKind {
     Skip,
     Reset,
     ResetHard,
+    WorktreeAdd,
+    WorktreeRemove,
+    WorktreePrune,
 }
 
 impl OperationKind {
@@ -251,6 +255,9 @@ impl OperationKind {
             OperationKind::Skip => (&[], "Skipped"),
             OperationKind::Reset => (&[], "Reset"),
             OperationKind::ResetHard => (&[], "Hard reset"),
+            OperationKind::WorktreeAdd => (&[], "Added"),
+            OperationKind::WorktreeRemove => (&[], "Removed"),
+            OperationKind::WorktreePrune => (&[], "Pruned"),
         }
     }
 

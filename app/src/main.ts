@@ -107,7 +107,10 @@ type OperationResult = {
     | "abort"
     | "skip"
     | "reset"
-    | "resethard";
+    | "resethard"
+    | "worktreeadd"
+    | "worktreeremove"
+    | "worktreeprune";
   outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted";
   exitCode: number | null;
   message: string;
@@ -253,6 +256,18 @@ app.innerHTML = `
     <p id="stash-status" role="status"></p>
   </section>
   <section class="card">
+    <h2>Worktrees</h2>
+    <div class="actions">
+      <input id="worktree-target" type="text" placeholder="Local branch name or full commit id" aria-label="Worktree target" disabled />
+      <button id="worktree-add" disabled title="Choose a folder, then register a new linked worktree">Add worktree…</button>
+      <button id="worktree-prune" disabled title="Forget Git's records of worktree folders that no longer exist">Prune stale</button>
+    </div>
+    <div id="worktree-list" class="refs" role="list" aria-label="Linked worktrees">
+      <div class="file-row placeholder">Open a repository to list its worktrees.</div>
+    </div>
+    <p id="worktree-status" role="status"></p>
+  </section>
+  <section class="card">
     <h1>Environment check</h1>
     <p>M0 probes kept for regression checking; repository work happens in the card above.</p>
     <dl>
@@ -382,6 +397,7 @@ function renderSnapshot(snapshot: SnapshotView | null): void {
   syncHistoryWithSnapshot();
   syncRefsWithSnapshot();
   syncStashWithSnapshot();
+  syncWorktreesWithSnapshot();
   renderOperationBanner(snapshot);
   closeRepoButton.disabled = !sessionActive;
   refreshRepoButton.disabled = !sessionActive;
@@ -664,6 +680,7 @@ function syncCommitControls(): void {
   previewKeepButton.disabled = writeRunning;
   syncBranchControls();
   syncStashControls();
+  syncWorktreeControls();
   syncOperationControls();
 }
 
@@ -817,7 +834,7 @@ commitMessage.addEventListener("keydown", (event) => {
 // server nonce that the backend re-checks against a fresh Git read at
 // every step.
 
-type PreviewKindKey = "discard" | "clean" | "branch" | "tag" | "stashDrop" | "stashPop" | "resetHard";
+type PreviewKindKey = "discard" | "clean" | "branch" | "tag" | "stashDrop" | "stashPop" | "resetHard" | "worktreeRemove";
 
 const previewCopy: Record<
   PreviewKindKey,
@@ -864,6 +881,12 @@ const previewCopy: Record<
     cancel: "Keep everything",
     droppedLabel: "Commits left behind",
   },
+  worktreeRemove: {
+    warning:
+      "Removing unregisters this linked worktree and deletes its Git metadata link. guit never forces: if the worktree has uncommitted work, Git itself refuses and nothing is removed.",
+    confirm: "Remove worktree",
+    cancel: "Keep worktree",
+  },
 };
 
 const branchForceCopy: {
@@ -887,6 +910,7 @@ type PendingPreview =
       tag?: undefined;
       stash?: undefined;
       reset?: undefined;
+      worktree?: undefined;
     }
   | {
       kind: "branch";
@@ -897,6 +921,7 @@ type PendingPreview =
       tag?: undefined;
       stash?: undefined;
       reset?: undefined;
+      worktree?: undefined;
     }
   | {
       kind: "tag";
@@ -907,6 +932,7 @@ type PendingPreview =
       tag: { name: string; targetOid: string | null };
       stash?: undefined;
       reset?: undefined;
+      worktree?: undefined;
     }
   | {
       kind: "stashDrop" | "stashPop";
@@ -917,6 +943,7 @@ type PendingPreview =
       tag?: undefined;
       stash: { index: number; targetOid: string | null };
       reset?: undefined;
+      worktree?: undefined;
     }
   | {
       kind: "resetHard";
@@ -927,6 +954,18 @@ type PendingPreview =
       tag?: undefined;
       stash?: undefined;
       reset: { targetOid: string | null };
+      worktree?: undefined;
+    }
+  | {
+      kind: "worktreeRemove";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree: { index: number; targetOid: string | null };
     };
 
 let pendingPreview: PendingPreview | null = null;
@@ -957,7 +996,9 @@ function renderPreviewPanel(): void {
         ? pending.tag.targetOid
         : pending.kind === "stashDrop" || pending.kind === "stashPop"
           ? pending.stash.targetOid
-          : null;
+          : pending.kind === "worktreeRemove"
+            ? pending.worktree.targetOid
+            : null;
   previewCandidates.replaceChildren(
     ...pending.names.map((name) => {
       const item = document.createElement("li");
@@ -1038,6 +1079,9 @@ async function renewPreviewPanel(): Promise<void> {
   if (pending.kind === "stashDrop" || pending.kind === "stashPop") {
     request.index = pending.stash.index;
   }
+  if (pending.kind === "worktreeRemove") {
+    request.index = pending.worktree.index;
+  }
   previewRenewing = true;
   try {
     const command =
@@ -1051,7 +1095,9 @@ async function renewPreviewPanel(): Promise<void> {
               ? "preview_delete_tag"
               : pending.kind === "stashDrop"
                 ? "preview_stash_drop"
-                : "preview_stash_pop";
+                : pending.kind === "stashPop"
+                  ? "preview_stash_pop"
+                  : "preview_remove_worktree";
     const preview = await invoke<PreviewResult>(command, request);
     pendingPreview =
       pending.kind === "branch"
@@ -1078,7 +1124,15 @@ async function renewPreviewPanel(): Promise<void> {
                 nonce: preview.nonce,
                 stash: { ...pending.stash, targetOid: preview.targetOid },
               }
-          : { ...pending, names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
+            : pending.kind === "worktreeRemove"
+              ? {
+                  ...pending,
+                  names: preview.candidates,
+                  dropped: preview.dropped,
+                  nonce: preview.nonce,
+                  worktree: { ...pending.worktree, targetOid: preview.targetOid },
+                }
+              : { ...pending, names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
     // The preview re-read Git and published a newer version; adopting it
     // would re-enter this function, which the flag above keeps suppressed.
     applySnapshot(preview.snapshot);
@@ -1119,7 +1173,9 @@ async function confirmPreview(): Promise<void> {
               ? "Popping stash entry…"
               : kind === "resetHard"
                 ? "Hard resetting…"
-                : "Deleting tag…";
+                : kind === "worktreeRemove"
+                  ? "Removing worktree…"
+                  : "Deleting tag…";
   try {
     const result = await invoke<OperationResult>(
       kind === "discard"
@@ -1134,7 +1190,9 @@ async function confirmPreview(): Promise<void> {
                 ? "stash_pop"
                 : kind === "resetHard"
                   ? "reset_hard"
-                  : "delete_tag",
+                  : kind === "worktreeRemove"
+                    ? "remove_worktree"
+                    : "delete_tag",
       { nonce },
     );
     // Consume the panel before applying the snapshot so the version guard
@@ -2176,6 +2234,229 @@ function syncStashControls(): void {
   const locked = !sessionActive || writeRunning;
   stashMessage.disabled = locked;
   stashSaveButton.disabled = locked;
+}
+
+// --- Worktrees (M4-06): list / add / remove / prune ------------------------
+// Rows are addressed by their list position only; the backend re-reads
+// `git worktree list --porcelain` and binds a single-use removal ticket to
+// the entry's HEAD oid, so neither a path nor ref syntax typed by the
+// client can reach Git. guit never forces a removal: a dirty or current
+// worktree is refused by Git itself and reported verbatim. The add target
+// comes from the branch/commit field; the new folder comes from an OS
+// directory dialog, matching the clone precedent.
+
+type WorktreeView = {
+  index: number;
+  path: string;
+  head: string | null;
+  branch: string | null;
+  detached: boolean;
+  orphan: boolean;
+  bare: boolean;
+  locked: boolean;
+  prunable: boolean;
+  addressable: boolean;
+};
+
+const worktreeTarget = document.querySelector<HTMLInputElement>("#worktree-target")!;
+const worktreeAddButton = document.querySelector<HTMLButtonElement>("#worktree-add")!;
+const worktreePruneButton = document.querySelector<HTMLButtonElement>("#worktree-prune")!;
+const worktreeListElement = document.querySelector<HTMLElement>("#worktree-list")!;
+const worktreeStatus = document.querySelector<HTMLElement>("#worktree-status")!;
+
+let worktreeEntries: WorktreeView[] = [];
+let worktreeRequestSeq = 0;
+let worktreeSnapshotVersion = -1;
+
+function worktreePlaceholder(message: string): void {
+  worktreeSnapshotVersion = -1;
+  worktreeEntries = [];
+  worktreeStatus.textContent = "";
+  const row = document.createElement("div");
+  row.className = "file-row placeholder";
+  row.textContent = message;
+  worktreeListElement.replaceChildren(row);
+}
+
+function syncWorktreesWithSnapshot(): void {
+  if (!currentSnapshot) {
+    if (worktreeSnapshotVersion !== -1)
+      worktreePlaceholder("Open a repository to list its worktrees.");
+    return;
+  }
+  if (currentSnapshot.version === worktreeSnapshotVersion) return;
+  worktreeSnapshotVersion = currentSnapshot.version;
+  void loadWorktrees();
+}
+
+async function loadWorktrees(): Promise<void> {
+  const seq = ++worktreeRequestSeq;
+  worktreeStatus.textContent = "Loading worktrees…";
+  try {
+    const entries = await invoke<WorktreeView[]>("list_worktrees");
+    if (seq !== worktreeRequestSeq) return; // a newer request took over
+    renderWorktrees(entries);
+    worktreeStatus.textContent = entries.length === 0
+      ? "No worktrees."
+      : `${entries.length} worktree ${entries.length === 1 ? "entry" : "entries"}.`;
+  } catch (error) {
+    if (seq !== worktreeRequestSeq) return;
+    showError(error);
+    worktreeStatus.textContent = "The worktree list could not be loaded.";
+  }
+}
+
+function renderWorktrees(entries: WorktreeView[]): void {
+  worktreeEntries = entries;
+  if (entries.length === 0) {
+    const row = document.createElement("div");
+    row.className = "file-row placeholder";
+    row.textContent = "No worktrees.";
+    worktreeListElement.replaceChildren(row);
+    return;
+  }
+  const rows = entries.map((entry) => {
+    const el = document.createElement("div");
+    el.className = "file-row ref-row";
+    el.setAttribute("role", "listitem");
+    const badge = document.createElement("span");
+    badge.className = "file-status";
+    badge.textContent = `#${entry.index}`;
+    const label = document.createElement("span");
+    label.className = "ref-name";
+    label.textContent = entry.path;
+    label.title = entry.path;
+    const notes: string[] = [];
+    if (entry.branch) notes.push(entry.branch);
+    if (entry.detached) notes.push("detached");
+    if (entry.orphan) notes.push("orphan");
+    if (entry.bare) notes.push("bare");
+    if (entry.locked) notes.push("locked");
+    if (entry.prunable) notes.push("stale");
+    const meta = document.createElement("span");
+    meta.className = "ref-meta";
+    meta.textContent = notes.join(" · ");
+    el.append(badge, label, meta);
+    // Removal needs a stable HEAD oid and a round-trippable (UTF-8) path;
+    // bare, orphan and non-addressable entries are shown read-only.
+    if (!entry.bare && !entry.orphan && entry.addressable) {
+      el.append(
+        refRowButton(
+          "Remove…",
+          `Remove worktree ${entry.index} after confirmation`,
+          () => void requestWorktreeRemove(entry.index),
+          true,
+        ),
+      );
+    }
+    return el;
+  });
+  worktreeListElement.replaceChildren(...rows);
+}
+
+// Add and prune are ordinary queued writes; the backend re-reads and the
+// returned snapshot refreshes the list through syncWorktreesWithSnapshot.
+async function runWorktreeWrite(
+  command: "add_worktree" | "prune_worktrees",
+  args: Record<string, unknown>,
+  running: string,
+): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  writeRunning = true;
+  syncCommitControls();
+  renderWorktrees(worktreeEntries);
+  worktreeStatus.textContent = running;
+  try {
+    const result = await invoke<OperationResult>(command, {
+      snapshotVersion: currentSnapshot.version,
+      ...args,
+    });
+    applySnapshot(result.snapshot);
+    worktreeStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+    if (command === "add_worktree" && result.outcome === "success") {
+      worktreeTarget.value = "";
+    }
+  } catch (error) {
+    showError(error);
+    worktreeStatus.textContent = "The worktree operation did not run.";
+  } finally {
+    writeRunning = false;
+    syncCommitControls();
+    renderWorktrees(worktreeEntries);
+  }
+}
+
+async function addWorktree(): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  const target = worktreeTarget.value.trim();
+  if (target === "") {
+    worktreeStatus.textContent =
+      "Enter a local branch name or full commit id to check out.";
+    return;
+  }
+  let selected: unknown;
+  try {
+    selected = await open({ directory: true, multiple: false });
+  } catch (error) {
+    showError(error);
+    worktreeStatus.textContent = "The folder chooser could not be opened.";
+    return;
+  }
+  if (typeof selected !== "string") return; // dialog cancelled
+  await runWorktreeWrite(
+    "add_worktree",
+    { path: selected, target },
+    "Creating the linked worktree…",
+  );
+}
+
+worktreeAddButton.addEventListener("click", () => void addWorktree());
+worktreePruneButton.addEventListener("click", () =>
+  void runWorktreeWrite(
+    "prune_worktrees",
+    {},
+    "Forgetting worktree folders that no longer exist…",
+  ),
+);
+worktreeTarget.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void addWorktree();
+  }
+});
+
+async function requestWorktreeRemove(index: number): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  worktreeStatus.textContent = `Checking what removing worktree #${index} would do…`;
+  try {
+    const preview = await invoke<PreviewResult>("preview_remove_worktree", {
+      snapshotVersion: currentSnapshot.version,
+      index,
+    });
+    applySnapshot(preview.snapshot);
+    pendingPreview = {
+      kind: "worktreeRemove",
+      names: preview.candidates,
+      dropped: preview.dropped,
+      nonce: preview.nonce,
+      worktree: { index, targetOid: preview.targetOid },
+    };
+    renderPreviewPanel();
+    previewConfirmButton.focus();
+  } catch (error) {
+    showError(error);
+    worktreeStatus.textContent =
+      "The worktree removal was refused before anything changed.";
+  }
+}
+
+function syncWorktreeControls(): void {
+  const locked = !sessionActive || writeRunning;
+  worktreeTarget.disabled = locked;
+  worktreeAddButton.disabled = locked;
+  worktreePruneButton.disabled = locked;
 }
 
 function toggleGroup(group: FileGroupKey): void {
