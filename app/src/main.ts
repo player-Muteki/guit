@@ -101,6 +101,8 @@ type OperationResult = {
     | "stashdrop"
     | "merge"
     | "rebase"
+    | "cherrypick"
+    | "revert"
     | "continue"
     | "abort"
     | "skip";
@@ -229,6 +231,8 @@ app.innerHTML = `
         <button id="diff-commit">Diff commit</button>
         <button id="branch-from-commit">Branch from commit…</button>
         <button id="tag-from-commit">Tag from commit…</button>
+        <button id="cherry-pick-commit" title="Apply this commit onto the current branch">Cherry-pick</button>
+        <button id="revert-commit" title="Create a new commit undoing this one on the current branch">Revert</button>
       </div>
     </div>
   </section>
@@ -1371,6 +1375,8 @@ const tagNameInput = document.querySelector<HTMLInputElement>("#tag-name")!;
 const tagMessageInput = document.querySelector<HTMLInputElement>("#tag-message")!;
 const tagCreateButton = document.querySelector<HTMLButtonElement>("#tag-create")!;
 const tagFromCommitButton = document.querySelector<HTMLButtonElement>("#tag-from-commit")!;
+const cherryPickCommitButton = document.querySelector<HTMLButtonElement>("#cherry-pick-commit")!;
+const revertCommitButton = document.querySelector<HTMLButtonElement>("#revert-commit")!;
 const tagDetailPanel = document.querySelector<HTMLElement>("#tag-detail")!;
 const tagDetailMeta = document.querySelector<HTMLElement>("#tag-detail-meta")!;
 const tagDetailMessage = document.querySelector<HTMLElement>("#tag-detail-message")!;
@@ -1555,6 +1561,8 @@ function syncBranchControls(): void {
   branchCreateButton.disabled =
     !sessionActive || writeRunning || branchNameInput.value.trim() === "";
   branchFromCommitButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
+  cherryPickCommitButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
+  revertCommitButton.disabled = !sessionActive || writeRunning || selectedCommit === null;
   tagNameInput.disabled = !sessionActive || writeRunning;
   tagMessageInput.disabled = !sessionActive || writeRunning;
   tagCreateButton.disabled =
@@ -1603,6 +1611,47 @@ tagFromCommitButton.addEventListener("click", () => {
   tagNameInput.focus();
   refStatus.textContent = `New tag will point at ${selectedCommit.oid.slice(0, 10)} — `
     + "enter a name and press Create tag.";
+});
+
+// Cherry-pick and revert ride the same backend write queue as the branch
+// operations, but report on the history status line the button sits on.
+// Only the selected commit's full oid ever leaves the frontend.
+async function runCommitWrite(
+  command: "pick_commit" | "revert_commit",
+  oid: string,
+  running: string,
+): Promise<void> {
+  if (!currentSnapshot || writeRunning) return;
+  writeRunning = true;
+  syncCommitControls();
+  historyStatus.textContent = running;
+  try {
+    const result = await invoke<OperationResult>(command, {
+      snapshotVersion: currentSnapshot.version,
+      oid,
+    });
+    applySnapshot(result.snapshot);
+    historyStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+  } catch (error) {
+    showError(error);
+    historyStatus.textContent = "The commit operation did not run.";
+  } finally {
+    writeRunning = false;
+    syncCommitControls();
+  }
+}
+
+cherryPickCommitButton.addEventListener("click", () => {
+  if (!selectedCommit) return;
+  const oid = selectedCommit.oid;
+  void runCommitWrite("pick_commit", oid, `Cherry-picking ${oid.slice(0, 10)}…`);
+});
+revertCommitButton.addEventListener("click", () => {
+  if (!selectedCommit) return;
+  const oid = selectedCommit.oid;
+  void runCommitWrite("revert_commit", oid, `Reverting ${oid.slice(0, 10)}…`);
 });
 
 async function requestTagDelete(name: string): Promise<void> {

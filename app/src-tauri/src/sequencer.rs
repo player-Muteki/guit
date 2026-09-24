@@ -64,6 +64,28 @@ fn validate_target(work_root: &Path, target: &str) -> bool {
     }
 }
 
+/// cherry-pick/revert targets must additionally resolve to a real commit:
+/// the History button sends an oid it just read, so a vanished commit is a
+/// bug or a race, not something to hand to Git as an argument.
+fn validate_start_target(work_root: &Path, mode: Start, target: &str) -> bool {
+    if mode.accepts_branch_names() {
+        return validate_target(work_root, target);
+    }
+    history::valid_oid(target)
+        && branches::run_git(
+            work_root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{target}^{{commit}}"),
+            ],
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .map(|output| output.status.success() && !output.truncated)
+        .unwrap_or(false)
+}
+
 /// True when the re-read snapshot still shows an operation or conflicts —
 /// the difference between "Git stopped on conflicts" and "Git failed".
 fn still_stuck(snapshot: &Option<session::SnapshotView>) -> bool {
@@ -109,6 +131,41 @@ impl Step {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Start {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl Start {
+    fn verb(self) -> &'static str {
+        match self {
+            Start::Merge => "merge",
+            Start::Rebase => "rebase",
+            Start::CherryPick => "cherry-pick",
+            Start::Revert => "revert",
+        }
+    }
+
+    fn result_kind(self) -> OperationKind {
+        match self {
+            Start::Merge => OperationKind::Merge,
+            Start::Rebase => OperationKind::Rebase,
+            Start::CherryPick => OperationKind::CherryPick,
+            Start::Revert => OperationKind::Revert,
+        }
+    }
+
+    /// Merge and rebase may target a local branch name; cherry-pick and
+    /// revert ride the History detail buttons and accept only a full
+    /// commit id, so a stale list row can never silently retarget.
+    fn accepts_branch_names(self) -> bool {
+        matches!(self, Start::Merge | Start::Rebase)
+    }
+}
+
 pub(crate) fn merge_start(
     state: &WriteState,
     sessions: &session::SessionState,
@@ -116,7 +173,7 @@ pub(crate) fn merge_start(
     target: &str,
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_start(state, sessions, snapshot_version, target, false);
+    let result = run_start(state, sessions, snapshot_version, target, Start::Merge);
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -131,7 +188,37 @@ pub(crate) fn rebase_start(
     target: &str,
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_start(state, sessions, snapshot_version, target, true);
+    let result = run_start(state, sessions, snapshot_version, target, Start::Rebase);
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+pub(crate) fn pick_commit(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    oid: &str,
+) -> Result<OperationResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_start(state, sessions, snapshot_version, oid, Start::CherryPick);
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+pub(crate) fn revert_commit(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    oid: &str,
+) -> Result<OperationResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_start(state, sessions, snapshot_version, oid, Start::Revert);
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -144,14 +231,10 @@ fn run_start(
     sessions: &session::SessionState,
     snapshot_version: u64,
     target: &str,
-    is_rebase: bool,
+    mode: Start,
 ) -> Result<OperationResult, ProbeError> {
-    let kind = if is_rebase {
-        OperationKind::Rebase
-    } else {
-        OperationKind::Merge
-    };
-    let verb = if is_rebase { "rebase" } else { "merge" };
+    let kind = mode.result_kind();
+    let verb = mode.verb();
     let mut outcome = Outcome::Success;
     let mut exit_code = None;
     let message;
@@ -165,34 +248,40 @@ fn run_start(
             let in_progress = in_progress_message(sessions)?;
             if unborn {
                 outcome = Outcome::Rejected;
-                message = "Cannot merge or rebase before the first commit.".into();
+                message = format!("Cannot {verb} before the first commit.");
             } else if let Some(refusal) = in_progress {
                 outcome = Outcome::Rejected;
                 message = refusal;
-            } else if !validate_target(&work_root, target) {
+            } else if !validate_start_target(&work_root, mode, target) {
                 outcome = Outcome::Rejected;
-                message =
-                    "The target must be a full commit id or an existing local branch name.".into();
+                message = if mode.accepts_branch_names() {
+                    "The target must be a full commit id or an existing local branch name.".into()
+                } else {
+                    "The target must be a full commit id of an existing commit.".into()
+                };
             } else if state.cancel_flag().load(Ordering::SeqCst) {
                 outcome = Outcome::Cancelled;
                 message = "Cancelled before Git ran.".into();
             } else {
                 // `--no-edit` keeps Git from demanding a commit-message
-                // editor; rebases started non-interactively need nothing.
-                let args: Vec<&str> = if is_rebase {
-                    vec!["rebase", target]
-                } else {
-                    vec!["merge", "--no-edit", target]
+                // editor; cherry-pick and a plain rebase need nothing
+                // (measured on Git 2.53, plan/04).
+                let args: Vec<&str> = match mode {
+                    Start::Merge => vec!["merge", "--no-edit", target],
+                    Start::Rebase => vec!["rebase", target],
+                    Start::CherryPick => vec!["cherry-pick", target],
+                    Start::Revert => vec!["revert", "--no-edit", target],
                 };
                 match run_git(&work_root, false, &args, state) {
                     Ok(output) => {
                         exit_code = output.status.code();
                         let snapshot = session::refresh(sessions)?;
                         if output.status.success() && !output.truncated {
-                            message = if is_rebase {
-                                format!("Rebased onto {target}.")
-                            } else {
-                                format!("Merged {target}.")
+                            message = match mode {
+                                Start::Merge => format!("Merged {target}."),
+                                Start::Rebase => format!("Rebased onto {target}."),
+                                Start::CherryPick => format!("Cherry-picked {target}."),
+                                Start::Revert => format!("Reverted {target}."),
                             };
                             return Ok(OperationResult {
                                 operation_id: 0,
@@ -661,5 +750,125 @@ mod tests {
         let stale = merge_start(&writes, &sessions, current + 1, "side").unwrap();
         assert_eq!(stale.outcome, Outcome::Rejected);
         assert!(stale.message.contains("rejected"));
+    }
+
+    #[test]
+    fn clean_cherry_pick_replays_the_commit_and_keeps_its_message() {
+        let root = diverged_repo(true);
+        let dir = root.path();
+        let (writes, sessions, version) = merge_state_and_session(dir);
+        let side_oid = read(dir, &["rev-parse", "side"]);
+        let before = read(dir, &["rev-list", "--count", "HEAD"]);
+        let result = pick_commit(&writes, &sessions, version, &side_oid).unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert!(result.message.contains("Cherry-picked"));
+        let after = result.snapshot.expect("re-read");
+        assert!(after.operation.is_none());
+        assert_eq!(
+            read(dir, &["rev-list", "--count", "HEAD"]),
+            (before.parse::<u32>().unwrap() + 1).to_string()
+        );
+        // The replayed commit keeps the original subject and touches only
+        // its own file; the side branch itself did not move.
+        assert_eq!(read(dir, &["log", "-1", "--format=%s"]), "side work");
+        assert_eq!(read(dir, &["rev-parse", "side"]), side_oid);
+        assert!(dir.join("side.txt").exists());
+    }
+
+    #[test]
+    fn conflicting_pick_becomes_a_cherry_pick_operation_and_abort_restores() {
+        let root = diverged_repo(false);
+        let dir = root.path();
+        let (writes, sessions, version) = merge_state_and_session(dir);
+        let side_oid = read(dir, &["rev-parse", "side"]);
+        let head_before = read(dir, &["rev-parse", "HEAD"]);
+        let result = pick_commit(&writes, &sessions, version, &side_oid).unwrap();
+        assert_eq!(result.outcome, Outcome::Conflicted, "{}", result.message);
+        let view = result.snapshot.expect("in-flight");
+        let operation = view.operation.expect("cherry-pick detected");
+        assert_eq!(operation.kind, OperationKindView::CherryPick);
+        assert_eq!(operation.subject, format!("Cherry-picking {side_oid}…"));
+        assert!(view
+            .files
+            .iter()
+            .any(|file| file.group == FileGroup::Conflict));
+
+        let aborted = operation_abort(&writes, &sessions, view.version).unwrap();
+        assert_eq!(aborted.outcome, Outcome::Success, "{}", aborted.message);
+        let after = aborted.snapshot.expect("re-read");
+        assert!(after.operation.is_none());
+        assert!(after.files.is_empty());
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), head_before);
+    }
+
+    #[test]
+    fn externally_resolved_pick_continues_without_an_editor() {
+        let root = diverged_repo(false);
+        let dir = root.path();
+        let (writes, sessions, version) = merge_state_and_session(dir);
+        let side_oid = read(dir, &["rev-parse", "side"]);
+        let conflicted = pick_commit(&writes, &sessions, version, &side_oid).unwrap();
+        let view = conflicted.snapshot.expect("in-flight");
+
+        std::fs::write(dir.join("base.txt"), "picked resolution\n").unwrap();
+        git(dir, &["add", "base.txt"]);
+        let continued = operation_continue(&writes, &sessions, view.version).unwrap();
+        assert_eq!(continued.outcome, Outcome::Success, "{}", continued.message);
+        assert!(continued.snapshot.expect("re-read").operation.is_none());
+        // Git's own cherry-pick message names the original commit.
+        assert!(read(dir, &["log", "-1", "--format=%s"]).starts_with("side work"));
+    }
+
+    #[test]
+    fn revert_creates_an_inverting_commit_without_an_editor() {
+        let root = diverged_repo(true);
+        let dir = root.path();
+        let (writes, sessions, version) = merge_state_and_session(dir);
+        let head_oid = read(dir, &["rev-parse", "HEAD"]);
+        let result = revert_commit(&writes, &sessions, version, &head_oid).unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert!(result.message.contains("Reverted"));
+        assert!(result.snapshot.expect("re-read").operation.is_none());
+        assert_eq!(
+            read(dir, &["log", "-1", "--format=%s"]),
+            "Revert \"main work\""
+        );
+        assert!(
+            !dir.join("main.txt").exists(),
+            "the revert must undo the commit's own file"
+        );
+    }
+
+    #[test]
+    fn pick_and_revert_refuse_branch_names_and_missing_commits() {
+        let root = diverged_repo(true);
+        let dir = root.path();
+        let (writes, sessions, version) = merge_state_and_session(dir);
+        // Well-formed but nonexistent: refused by the rev-parse gate.
+        let ghost = "deadbeef".repeat(5);
+        let mut version = version;
+        for (command, target) in [
+            ("pick", "side".to_owned()),
+            ("pick", ghost.clone()),
+            ("revert", "side".to_owned()),
+            ("revert", ghost),
+        ] {
+            let result = if command == "pick" {
+                pick_commit(&writes, &sessions, version, &target).unwrap()
+            } else {
+                revert_commit(&writes, &sessions, version, &target).unwrap()
+            };
+            assert_eq!(
+                result.outcome,
+                Outcome::Rejected,
+                "{command} {target:?} accepted"
+            );
+            assert_eq!(result.exit_code, None, "{command} {target:?} reached git");
+            assert!(result.message.contains("full commit id"));
+            // Every outcome re-read state; the next attempt needs the new version.
+            version = result.snapshot.expect("re-read").version;
+        }
+        // Nothing moved.
+        assert_eq!(read(dir, &["rev-list", "--count", "HEAD"]), "2");
     }
 }

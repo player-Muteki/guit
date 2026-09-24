@@ -963,6 +963,36 @@ async fn operation_skip(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn pick_commit(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    oid: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        sequencer::pick_commit(&state, &sessions, snapshot_version, &oid)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn revert_commit(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    oid: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        sequencer::revert_commit(&state, &sessions, snapshot_version, &oid)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1025,7 +1055,9 @@ fn main() {
             rebase_start,
             operation_continue,
             operation_abort,
-            operation_skip
+            operation_skip,
+            pick_commit,
+            revert_commit
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");
