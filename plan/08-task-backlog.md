@@ -52,7 +52,8 @@ M1 已于 2026-09-23 在 Linux 主机完成交付验证，详见 [M1-validation.
 
 ## M4 进阶本地操作
 
-- [ ] **M4-01** 实现 stash 列表、保存、应用、弹出、删除及目标确认。
+- [x] **M4-01** 实现 stash 列表、保存、应用、弹出、删除及目标确认。
+  - 证据（2026-09-24，Linux / Git 2.53）：新模块 `stash.rs` + 7 个命令（`stash_list`/`stash_save`/`stash_apply`/`preview_stash_pop`/`stash_pop`/`preview_stash_drop`/`stash_drop`）。前端只提交 `u32` 位置索引，`stash@{N}` 选择器字符串仅由后端拼装（`selector_cannot_be_typed_by_the_client` 钉死注入面为零）。列表解析 `%gd%x1f%cI%x1f%s`（实测 Git 2.53 不解释 `%1f`，必须 `%x1f`；`%s` 折行保证记录不跨行）：选择器与位置交叉校验，形状不符即 `stash_protocol_error` fail-closed（`parse_is_fail_closed_on_shape_and_position`，含消息内嵌原始 0x1f 的宽容提取）。实测陷阱：干净工作区 `git stash push` 返回 rc=0 "No local changes to save"，故 save 前必做脏集合复查（`stash_nothing` 拒绝，绝不把无操作当成功）；冲突文件在场时拒绝 save（`stash_conflict`，merge --no-edit 冲突夹具实测）；unborn HEAD 拒绝；未跟踪文件默认不入 stash（round-trip 测试断言 `keep.txt` 幸存，UI 按钮 title 明示）。pop/drop 复用一次性票据（`PreviewKind::DropStash/PopStash`，oid 于预览时经 `rev-parse --verify` 捕获、确认时重算比对，位置漂移即拒），重放/跨 kind 消费均拒；apply 无票据但复查条目存在性。取消（Git 前）仍强刷快照且不产生 stash 条目；bare 仓库可读列表、一切写操作拒。10 个新 Rust 测试（`cargo test --locked` 143 通过），`tsc --noEmit`+vite、`cargo fmt --check`、fixture node 测试、`git diff --check` 全绿。遗留：键入 stash 消息的运行时冒烟受键盘注入缺口限制，归 M4-08 手工门槛；Windows `stash@{N}` argv 引号差异未实测。
 - [ ] **M4-02** 实现合并与变基的发起、进行中状态、继续和中止。
 - [ ] **M4-03** 实现 cherry-pick 与 revert 的目标选择、冲突处理、继续和中止。
 - [ ] **M4-04** 实现 reset 模式选择；`--hard` 单独高风险入口，不做默认选项。

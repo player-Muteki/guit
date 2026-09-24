@@ -10,6 +10,7 @@ mod refs;
 mod repo;
 mod runner;
 mod session;
+mod stash;
 mod status;
 mod tags;
 mod util;
@@ -790,6 +791,104 @@ async fn delete_tag(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn stash_list(app: tauri::AppHandle) -> Result<Vec<stash::StashEntry>, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        stash::list_view(&sessions)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn stash_save(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    message: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        stash::stash_save(&state, &sessions, snapshot_version, &message)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn stash_apply(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    index: u32,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        stash::stash_apply(&state, &sessions, snapshot_version, index)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn preview_stash_pop(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    index: u32,
+) -> Result<write::PreviewResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        stash::preview_stash_pop(&state, &sessions, snapshot_version, index)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn stash_pop(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        stash::stash_pop(&state, &sessions, nonce)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn preview_stash_drop(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    index: u32,
+) -> Result<write::PreviewResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        stash::preview_stash_drop(&state, &sessions, snapshot_version, index)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn stash_drop(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        stash::stash_drop(&state, &sessions, nonce)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -840,7 +939,14 @@ fn main() {
             create_tag,
             show_tag,
             preview_delete_tag,
-            delete_tag
+            delete_tag,
+            stash_list,
+            stash_save,
+            stash_apply,
+            preview_stash_pop,
+            stash_pop,
+            preview_stash_drop,
+            stash_drop
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

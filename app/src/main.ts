@@ -86,7 +86,11 @@ type OperationResult = {
     | "branchrename"
     | "branchdelete"
     | "tagcreate"
-    | "tagdelete";
+    | "tagdelete"
+    | "stashsave"
+    | "stashapply"
+    | "stashpop"
+    | "stashdrop";
   outcome: "success" | "failed" | "cancelled" | "rejected";
   exitCode: number | null;
   message: string;
@@ -206,6 +210,17 @@ app.innerHTML = `
         <button id="tag-from-commit">Tag from commit…</button>
       </div>
     </div>
+  </section>
+  <section class="card">
+    <h2>Stash</h2>
+    <div class="actions">
+      <input id="stash-message" type="text" placeholder="Stash message — blank uses Git's default WIP subject" aria-label="Stash message" disabled />
+      <button id="stash-save" disabled title="Stashes tracked-file changes only; untracked files stay in place">Stash changes</button>
+    </div>
+    <div id="stash-list" class="refs" role="list" aria-label="Stashed changes">
+      <div class="file-row placeholder">Open a repository to list its stashes.</div>
+    </div>
+    <p id="stash-status" role="status"></p>
   </section>
   <section class="card">
     <h1>Environment check</h1>
@@ -331,6 +346,7 @@ function renderSnapshot(snapshot: SnapshotView | null): void {
   sessionActive = snapshot !== null;
   syncHistoryWithSnapshot();
   syncRefsWithSnapshot();
+  syncStashWithSnapshot();
   closeRepoButton.disabled = !sessionActive;
   refreshRepoButton.disabled = !sessionActive;
   syncCommitControls();
@@ -610,6 +626,7 @@ function syncCommitControls(): void {
   previewConfirmButton.disabled = writeRunning || pendingPreview === null;
   previewKeepButton.disabled = writeRunning;
   syncBranchControls();
+  syncStashControls();
 }
 
 // A difftool call stays pending until the user closes the diff window, so
@@ -691,10 +708,11 @@ commitMessage.addEventListener("keydown", (event) => {
 
 // --- destructive operations: preview → recheck → confirm (plan/04 协议) ---
 // One panel serves discard (work-tree restore), clean (untracked removal),
-// branch delete and tag delete; all bind a single-use server nonce that the
-// backend re-checks against a fresh Git read at every step.
+// branch delete, tag delete and stash pop/drop; all bind a single-use
+// server nonce that the backend re-checks against a fresh Git read at
+// every step.
 
-type PreviewKindKey = "discard" | "clean" | "branch" | "tag";
+type PreviewKindKey = "discard" | "clean" | "branch" | "tag" | "stashDrop" | "stashPop";
 
 const previewCopy: Record<PreviewKindKey, { warning: string; confirm: string; cancel: string }> = {
   discard: {
@@ -719,6 +737,18 @@ const previewCopy: Record<PreviewKindKey, { warning: string; confirm: string; ca
     confirm: "Delete tag",
     cancel: "Keep tag",
   },
+  stashDrop: {
+    warning:
+      "Deleting discards this stashed snapshot permanently. Its commits become unreachable and Git may garbage-collect them. This cannot be undone from guit.",
+    confirm: "Delete stash",
+    cancel: "Keep stash",
+  },
+  stashPop: {
+    warning:
+      "Popping re-applies these changes to the working copy and discards the stash entry. If the apply conflicts, Git keeps the entry and reports a failure.",
+    confirm: "Pop stash",
+    cancel: "Keep entry",
+  },
 };
 
 const branchForceCopy = {
@@ -735,6 +765,7 @@ type PendingPreview =
       nonce: string;
       branch?: undefined;
       tag?: undefined;
+      stash?: undefined;
     }
   | {
       kind: "branch";
@@ -743,6 +774,7 @@ type PendingPreview =
       nonce: string;
       branch: { name: string; force: boolean; targetOid: string | null };
       tag?: undefined;
+      stash?: undefined;
     }
   | {
       kind: "tag";
@@ -751,6 +783,16 @@ type PendingPreview =
       nonce: string;
       branch?: undefined;
       tag: { name: string; targetOid: string | null };
+      stash?: undefined;
+    }
+  | {
+      kind: "stashDrop" | "stashPop";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash: { index: number; targetOid: string | null };
     };
 
 let pendingPreview: PendingPreview | null = null;
@@ -779,7 +821,9 @@ function renderPreviewPanel(): void {
       ? pending.branch.targetOid
       : pending.kind === "tag"
         ? pending.tag.targetOid
-        : null;
+        : pending.kind === "stashDrop" || pending.kind === "stashPop"
+          ? pending.stash.targetOid
+          : null;
   previewCandidates.replaceChildren(
     ...pending.names.map((name) => {
       const item = document.createElement("li");
@@ -856,6 +900,9 @@ async function renewPreviewPanel(): Promise<void> {
   if (pending.kind === "tag") {
     request.name = pending.tag.name;
   }
+  if (pending.kind === "stashDrop" || pending.kind === "stashPop") {
+    request.index = pending.stash.index;
+  }
   previewRenewing = true;
   try {
     const command =
@@ -865,7 +912,11 @@ async function renewPreviewPanel(): Promise<void> {
           ? "preview_clean"
           : pending.kind === "branch"
             ? "preview_delete_branch"
-            : "preview_delete_tag";
+            : pending.kind === "tag"
+              ? "preview_delete_tag"
+              : pending.kind === "stashDrop"
+                ? "preview_stash_drop"
+                : "preview_stash_pop";
     const preview = await invoke<PreviewResult>(command, request);
     pendingPreview =
       pending.kind === "branch"
@@ -884,6 +935,14 @@ async function renewPreviewPanel(): Promise<void> {
               nonce: preview.nonce,
               tag: { ...pending.tag, targetOid: preview.targetOid },
             }
+          : pending.kind === "stashDrop" || pending.kind === "stashPop"
+            ? {
+                ...pending,
+                names: preview.candidates,
+                dropped: preview.dropped,
+                nonce: preview.nonce,
+                stash: { ...pending.stash, targetOid: preview.targetOid },
+              }
           : { ...pending, names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
     // The preview re-read Git and published a newer version; adopting it
     // would re-enter this function, which the flag above keeps suppressed.
@@ -919,7 +978,11 @@ async function confirmPreview(): Promise<void> {
         ? "Deleting untracked files…"
         : kind === "branch"
           ? "Deleting branch…"
-          : "Deleting tag…";
+          : kind === "stashDrop"
+            ? "Deleting stash entry…"
+            : kind === "stashPop"
+              ? "Popping stash entry…"
+              : "Deleting tag…";
   try {
     const result = await invoke<OperationResult>(
       kind === "discard"
@@ -928,7 +991,11 @@ async function confirmPreview(): Promise<void> {
           ? "clean_files"
           : kind === "branch"
             ? "delete_branch"
-            : "delete_tag",
+            : kind === "stashDrop"
+              ? "stash_drop"
+              : kind === "stashPop"
+                ? "stash_pop"
+                : "delete_tag",
       { nonce },
     );
     // Consume the panel before applying the snapshot so the version guard
@@ -1665,6 +1732,195 @@ function renderRefs(listing: RefListing): void {
     rows.push(el);
   }
   refList.replaceChildren(...rows);
+}
+
+// --- Stash (M4-01): save / apply / pop / drop ------------------------------
+// Entries are addressed by their list position only; the backend turns a
+// position into the stash@{N} selector, so no ref syntax typed by a client
+// can ever reach Git. Pop and drop ride the same single-use ticket panel as
+// tag/branch deletion, bound to the entry's commit oid. Git's default stash
+// covers tracked files only — the UI says so and untracked work stays put.
+
+type StashEntry = { index: number; date: string; subject: string };
+
+const stashMessage = document.querySelector<HTMLInputElement>("#stash-message")!;
+const stashSaveButton = document.querySelector<HTMLButtonElement>("#stash-save")!;
+const stashListElement = document.querySelector<HTMLElement>("#stash-list")!;
+const stashStatus = document.querySelector<HTMLElement>("#stash-status")!;
+
+let stashEntries: StashEntry[] = [];
+let stashRequestSeq = 0;
+let stashSnapshotVersion = -1;
+
+function stashPlaceholder(message: string): void {
+  stashSnapshotVersion = -1;
+  stashEntries = [];
+  stashStatus.textContent = "";
+  const row = document.createElement("div");
+  row.className = "file-row placeholder";
+  row.textContent = message;
+  stashListElement.replaceChildren(row);
+}
+
+// Driven from renderSnapshot: every newly accepted snapshot version
+// re-reads the stash list once (save/apply/pop/drop all flow through the
+// shared version guard); a re-render of the same version never touches Git.
+function syncStashWithSnapshot(): void {
+  if (!currentSnapshot) {
+    if (stashSnapshotVersion !== -1) stashPlaceholder("Open a repository to list its stashes.");
+    return;
+  }
+  if (currentSnapshot.version === stashSnapshotVersion) return;
+  stashSnapshotVersion = currentSnapshot.version;
+  void loadStashes();
+}
+
+async function loadStashes(): Promise<void> {
+  const seq = ++stashRequestSeq;
+  stashStatus.textContent = "Loading stashes…";
+  try {
+    const entries = await invoke<StashEntry[]>("stash_list");
+    if (seq !== stashRequestSeq) return; // a newer request took over
+    renderStashes(entries);
+    stashStatus.textContent = entries.length === 0
+      ? "No stash entries."
+      : `${entries.length} stash ${entries.length === 1 ? "entry" : "entries"}.`;
+  } catch (error) {
+    if (seq !== stashRequestSeq) return;
+    showError(error);
+    stashStatus.textContent = "The stash list could not be loaded.";
+  }
+}
+
+function renderStashes(entries: StashEntry[]): void {
+  stashEntries = entries;
+  if (entries.length === 0) {
+    const row = document.createElement("div");
+    row.className = "file-row placeholder";
+    row.textContent = "No stash entries.";
+    stashListElement.replaceChildren(row);
+    return;
+  }
+  const rows = entries.map((entry) => {
+    const el = document.createElement("div");
+    el.className = "file-row ref-row";
+    el.setAttribute("role", "listitem");
+    const badge = document.createElement("span");
+    badge.className = "file-status";
+    badge.textContent = `#${entry.index}`;
+    const label = document.createElement("span");
+    label.className = "ref-name";
+    label.textContent = entry.subject;
+    label.title = entry.subject;
+    const when = document.createElement("span");
+    when.className = "ref-meta";
+    when.textContent = entry.date.slice(0, 10);
+    el.append(
+      badge,
+      label,
+      when,
+      refRowButton("Apply", `Apply stash ${entry.index}`, () =>
+        void runStashWrite(
+          "stash_apply",
+          { index: entry.index },
+          `Applying stash #${entry.index}…`,
+        )),
+      refRowButton("Pop…", `Pop stash ${entry.index} after confirmation`, () =>
+        void requestStashTicket("stashPop", entry.index)),
+      refRowButton(
+        "Delete…",
+        `Delete stash ${entry.index} after confirmation`,
+        () => void requestStashTicket("stashDrop", entry.index),
+        true,
+      ),
+    );
+    return el;
+  });
+  stashListElement.replaceChildren(...rows);
+}
+
+// Save and apply are ordinary queued writes (apply keeps the entry), so
+// they ride the shared write lane; the backend re-reads and the returned
+// snapshot refreshes the list through syncStashWithSnapshot.
+async function runStashWrite(
+  command: "stash_save" | "stash_apply",
+  args: Record<string, unknown>,
+  running: string,
+): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  writeRunning = true;
+  syncCommitControls();
+  renderStashes(stashEntries);
+  stashStatus.textContent = running;
+  try {
+    const result = await invoke<OperationResult>(command, {
+      snapshotVersion: currentSnapshot.version,
+      ...args,
+    });
+    applySnapshot(result.snapshot);
+    stashStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+    if (command === "stash_save" && result.outcome === "success") {
+      stashMessage.value = "";
+    }
+  } catch (error) {
+    showError(error);
+    stashStatus.textContent = "The stash operation did not run.";
+  } finally {
+    writeRunning = false;
+    syncCommitControls();
+    renderStashes(stashEntries);
+  }
+}
+
+async function saveStash(): Promise<void> {
+  await runStashWrite(
+    "stash_save",
+    { message: stashMessage.value },
+    "Stashing tracked changes… untracked files stay in place.",
+  );
+}
+
+stashSaveButton.addEventListener("click", () => void saveStash());
+stashMessage.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void saveStash();
+  }
+});
+
+async function requestStashTicket(kind: "stashDrop" | "stashPop", index: number): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  stashStatus.textContent =
+    kind === "stashDrop"
+      ? `Checking what deleting stash #${index} would discard…`
+      : `Checking what popping stash #${index} would do…`;
+  try {
+    const preview = await invoke<PreviewResult>(
+      kind === "stashDrop" ? "preview_stash_drop" : "preview_stash_pop",
+      { snapshotVersion: currentSnapshot.version, index },
+    );
+    applySnapshot(preview.snapshot);
+    pendingPreview = {
+      kind,
+      names: preview.candidates,
+      dropped: preview.dropped,
+      nonce: preview.nonce,
+      stash: { index, targetOid: preview.targetOid },
+    };
+    renderPreviewPanel();
+    previewConfirmButton.focus();
+  } catch (error) {
+    showError(error);
+    stashStatus.textContent = "The stash operation was refused before anything changed.";
+  }
+}
+
+function syncStashControls(): void {
+  const locked = !sessionActive || writeRunning;
+  stashMessage.disabled = locked;
+  stashSaveButton.disabled = locked;
 }
 
 function toggleGroup(group: FileGroupKey): void {

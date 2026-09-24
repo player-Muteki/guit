@@ -11,13 +11,17 @@ use std::time::{Duration, SystemTime};
 
 /// What a stored confirmation permits. Discard reverts tracked work-tree
 /// edits; Clean removes untracked items; DeleteBranch removes a ref whose
-/// object id was captured at preview time. All share the one-time ticket flow.
+/// object id was captured at preview time. DropStash/PopStash consume a
+/// `stash@{N}` entry, the selector's commit oid re-checked at confirm.
+/// All share the one-time ticket flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewKind {
     Discard,
     Clean,
     DeleteBranch,
     DeleteTag,
+    DropStash,
+    PopStash,
 }
 
 #[derive(Debug)]
@@ -161,12 +165,16 @@ pub enum OperationKind {
     BranchDelete,
     TagCreate,
     TagDelete,
+    StashSave,
+    StashApply,
+    StashPop,
+    StashDrop,
 }
 
 impl OperationKind {
     /// Git argument prefix plus the past-tense verb for the result message.
-    /// Commit, discard, clean and the branch kinds run through their own
-    /// runners, never this plan.
+    /// Commit, discard, clean, the branch, tag and stash kinds run through
+    /// their own runners, never this plan.
     fn plan(self) -> (&'static [&'static str], &'static str) {
         match self {
             OperationKind::Stage => (&["add"], "Staged"),
@@ -180,6 +188,10 @@ impl OperationKind {
             OperationKind::BranchDelete => (&[], "Deleted"),
             OperationKind::TagCreate => (&[], "Created"),
             OperationKind::TagDelete => (&[], "Deleted"),
+            OperationKind::StashSave => (&[], "Stashed"),
+            OperationKind::StashApply => (&[], "Applied"),
+            OperationKind::StashPop => (&[], "Popped"),
+            OperationKind::StashDrop => (&[], "Dropped"),
         }
     }
 
@@ -589,7 +601,7 @@ pub(crate) fn run_discard(
 
 /// Fresh porcelain-v2 read keyed by raw path bytes, used to recompute
 /// destructive candidates independently of any client state.
-fn status_index(
+pub(crate) fn status_index(
     sessions: &session::SessionState,
 ) -> Result<BTreeMap<Vec<u8>, StatusEntry>, ProbeError> {
     let identity = sessions
