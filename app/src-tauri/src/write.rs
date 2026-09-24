@@ -223,6 +223,7 @@ pub enum OperationKind {
     WorktreeAdd,
     WorktreeRemove,
     WorktreePrune,
+    SubmoduleUpdate,
 }
 
 impl OperationKind {
@@ -258,6 +259,7 @@ impl OperationKind {
             OperationKind::WorktreeAdd => (&[], "Added"),
             OperationKind::WorktreeRemove => (&[], "Removed"),
             OperationKind::WorktreePrune => (&[], "Pruned"),
+            OperationKind::SubmoduleUpdate => (&[], "Updated"),
         }
     }
 

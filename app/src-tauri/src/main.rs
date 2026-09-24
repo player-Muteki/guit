@@ -15,6 +15,7 @@ mod sequencer;
 mod session;
 mod stash;
 mod status;
+mod submodules;
 mod tags;
 mod util;
 mod watch;
@@ -1109,6 +1110,35 @@ async fn prune_worktrees(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn submodule_status(
+    app: tauri::AppHandle,
+) -> Result<Vec<submodules::SubmoduleView>, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        submodules::list_view(&sessions)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn submodule_init_update(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    index: Option<u32>,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        submodules::init_update(&state, &sessions, snapshot_version, index, &mut |line| {
+            let _ = app.emit("submodule-progress", line);
+        })
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1181,7 +1211,9 @@ fn main() {
             add_worktree,
             preview_remove_worktree,
             remove_worktree,
-            prune_worktrees
+            prune_worktrees,
+            submodule_status,
+            submodule_init_update
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

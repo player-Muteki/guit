@@ -110,7 +110,8 @@ type OperationResult = {
     | "resethard"
     | "worktreeadd"
     | "worktreeremove"
-    | "worktreeprune";
+    | "worktreeprune"
+    | "submoduleupdate";
   outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted";
   exitCode: number | null;
   message: string;
@@ -268,6 +269,16 @@ app.innerHTML = `
     <p id="worktree-status" role="status"></p>
   </section>
   <section class="card">
+    <h2>Submodules</h2>
+    <div class="actions">
+      <button id="submodule-update-all" disabled title="Initialize and update every listed submodule (git submodule update --init --recursive)">Init &amp; update all</button>
+    </div>
+    <div id="submodule-list" class="refs" role="list" aria-label="Submodules">
+      <div class="file-row placeholder">Open a repository to list its submodules.</div>
+    </div>
+    <p id="submodule-status" role="status"></p>
+  </section>
+  <section class="card">
     <h1>Environment check</h1>
     <p>M0 probes kept for regression checking; repository work happens in the card above.</p>
     <dl>
@@ -398,6 +409,7 @@ function renderSnapshot(snapshot: SnapshotView | null): void {
   syncRefsWithSnapshot();
   syncStashWithSnapshot();
   syncWorktreesWithSnapshot();
+  syncSubmodulesWithSnapshot();
   renderOperationBanner(snapshot);
   closeRepoButton.disabled = !sessionActive;
   refreshRepoButton.disabled = !sessionActive;
@@ -681,6 +693,7 @@ function syncCommitControls(): void {
   syncBranchControls();
   syncStashControls();
   syncWorktreeControls();
+  syncSubmoduleControls();
   syncOperationControls();
 }
 
@@ -2457,6 +2470,159 @@ function syncWorktreeControls(): void {
   worktreeTarget.disabled = locked;
   worktreeAddButton.disabled = locked;
   worktreePruneButton.disabled = locked;
+}
+
+// --- Submodules (M4-07): list / init & update ------------------------------
+// Rows are addressed by their list position only; the backend re-reads the
+// index (mode-160000 entries are authoritative) and reconstructs a literal
+// pathspec itself, so neither a path nor ref syntax typed by the client can
+// reach Git. Update clones can run for a long time: progress lines arrive
+// redacted over the "submodule-progress" event and Stop (cancel_write)
+// reaches the running Git process. A cancelled or failed update may leave
+// the state incomplete — the backend message says so and the re-read list
+// shows what actually survived.
+
+type SubmoduleView = {
+  index: number;
+  path: string;
+  name: string | null;
+  url: string | null;
+  recordedOid: string;
+  checkedOutOid: string | null;
+  state: "upToDate" | "uninitialized" | "outOfSync" | "conflicted" | "unmapped";
+};
+
+const submoduleStateLabels: Record<SubmoduleView["state"], string> = {
+  upToDate: "up to date",
+  uninitialized: "not initialized",
+  outOfSync: "checked-out commit differs from the index",
+  conflicted: "conflicted",
+  unmapped: "no .gitmodules mapping",
+};
+
+const submoduleUpdateAllButton = document.querySelector<HTMLButtonElement>(
+  "#submodule-update-all",
+)!;
+const submoduleListElement = document.querySelector<HTMLElement>("#submodule-list")!;
+const submoduleStatus = document.querySelector<HTMLElement>("#submodule-status")!;
+
+let submoduleEntries: SubmoduleView[] = [];
+let submoduleRequestSeq = 0;
+let submoduleSnapshotVersion = -1;
+
+function submodulePlaceholder(message: string): void {
+  submoduleSnapshotVersion = -1;
+  submoduleEntries = [];
+  submoduleStatus.textContent = "";
+  const row = document.createElement("div");
+  row.className = "file-row placeholder";
+  row.textContent = message;
+  submoduleListElement.replaceChildren(row);
+}
+
+function syncSubmodulesWithSnapshot(): void {
+  if (!currentSnapshot) {
+    if (submoduleSnapshotVersion !== -1)
+      submodulePlaceholder("Open a repository to list its submodules.");
+    return;
+  }
+  if (currentSnapshot.version === submoduleSnapshotVersion) return;
+  submoduleSnapshotVersion = currentSnapshot.version;
+  void loadSubmodules();
+}
+
+async function loadSubmodules(): Promise<void> {
+  const seq = ++submoduleRequestSeq;
+  submoduleStatus.textContent = "Loading submodules…";
+  try {
+    const entries = await invoke<SubmoduleView[]>("submodule_status");
+    if (seq !== submoduleRequestSeq) return; // a newer request took over
+    renderSubmodules(entries);
+    submoduleStatus.textContent =
+      entries.length === 0
+        ? "No submodules."
+        : `${entries.length} submodule ${entries.length === 1 ? "entry" : "entries"}.`;
+  } catch (error) {
+    if (seq !== submoduleRequestSeq) return;
+    showError(error);
+    submoduleStatus.textContent = "The submodule list could not be loaded.";
+  }
+}
+
+function renderSubmodules(entries: SubmoduleView[]): void {
+  submoduleEntries = entries;
+  if (entries.length === 0) {
+    const row = document.createElement("div");
+    row.className = "file-row placeholder";
+    row.textContent = "No submodules.";
+    submoduleListElement.replaceChildren(row);
+    return;
+  }
+  const rows = entries.map((entry) => {
+    const el = document.createElement("div");
+    el.className = "file-row ref-row";
+    el.setAttribute("role", "listitem");
+    const badge = document.createElement("span");
+    badge.className = "file-status";
+    badge.textContent = `#${entry.index}`;
+    const label = document.createElement("span");
+    label.className = "ref-name";
+    label.textContent = entry.path;
+    label.title = entry.url ? `${entry.path} ← ${entry.url}` : entry.path;
+    const notes: string[] = [submoduleStateLabels[entry.state]];
+    if (entry.name) notes.push(entry.name);
+    const meta = document.createElement("span");
+    meta.className = "ref-meta";
+    meta.textContent = notes.join(" · ");
+    el.append(badge, label, meta);
+    el.append(
+      refRowButton(
+        "Init & update",
+        `Initialize and update submodule ${entry.index}`,
+        () => void runSubmoduleUpdate(entry.index),
+      ),
+    );
+    return el;
+  });
+  submoduleListElement.replaceChildren(...rows);
+}
+
+async function runSubmoduleUpdate(index: number | null): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  writeRunning = true;
+  syncCommitControls();
+  renderSubmodules(submoduleEntries);
+  submoduleStatus.textContent = "Initializing and updating submodules…";
+  let unlisten: (() => void) | undefined;
+  try {
+    unlisten = await listen<string>("submodule-progress", ({ payload }) => {
+      submoduleStatus.textContent = payload;
+    });
+    const result = await invoke<OperationResult>("submodule_init_update", {
+      snapshotVersion: currentSnapshot.version,
+      index,
+    });
+    applySnapshot(result.snapshot);
+    submoduleStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+  } catch (error) {
+    showError(error);
+    submoduleStatus.textContent = "The submodule update did not run.";
+  } finally {
+    unlisten?.();
+    writeRunning = false;
+    syncCommitControls();
+    renderSubmodules(submoduleEntries);
+  }
+}
+
+submoduleUpdateAllButton.addEventListener("click", () =>
+  void runSubmoduleUpdate(null),
+);
+
+function syncSubmoduleControls(): void {
+  submoduleUpdateAllButton.disabled = !sessionActive || writeRunning;
 }
 
 function toggleGroup(group: FileGroupKey): void {

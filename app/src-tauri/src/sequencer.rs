@@ -684,7 +684,7 @@ pub(crate) mod tests {
     fn rebase_abort_restores_the_original_commit() {
         let root = diverged_repo(false);
         let dir = root.path();
-        let (writes, sessions, version) = merge_state_and_session(dir);
+        let (writes, sessions, _version) = merge_state_and_session(dir);
         git(dir, &["checkout", "-q", "side"]);
         let version = session::refresh(&sessions)
             .unwrap()

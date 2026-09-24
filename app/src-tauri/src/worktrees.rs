@@ -743,7 +743,6 @@ mod tests {
         let preview = preview_remove_worktree(&state, &sessions, version, 1).unwrap();
         assert_eq!(preview.candidates, vec![wt.display().to_string()]);
         assert!(preview.target_oid.is_some());
-        let version = preview.snapshot.version;
 
         // Drift: the worktree moves after the preview.
         std::fs::write(wt.join("a.txt"), "moved\n").unwrap();
