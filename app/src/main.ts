@@ -111,7 +111,13 @@ type OperationResult = {
     | "worktreeadd"
     | "worktreeremove"
     | "worktreeprune"
-    | "submoduleupdate";
+    | "submoduleupdate"
+    | "remoteadd"
+    | "remoteseturl"
+    | "removeremote"
+    | "fetch"
+    | "setupstream"
+    | "pull";
   outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted";
   exitCode: number | null;
   message: string;
@@ -285,6 +291,13 @@ app.innerHTML = `
       <input id="remote-url" type="text" placeholder="Remote URL or local path" aria-label="New remote URL" disabled />
       <button id="remote-add" disabled title="Register a new remote (git remote add)">Add remote</button>
       <button id="remote-fetch-all" disabled title="Fetch every configured remote (git fetch --prune)">Fetch all</button>
+      <select id="pull-strategy" aria-label="Pull strategy" disabled title="How the fetched upstream is integrated into the current branch">
+        <option value="default">Git default</option>
+        <option value="merge">Merge</option>
+        <option value="ffonly">Fast-forward only</option>
+        <option value="rebase">Rebase</option>
+      </select>
+      <button id="remote-pull" disabled title="Fetch the current branch's upstream, then integrate it per the strategy">Pull</button>
     </div>
     <div id="remote-list" class="refs" role="list" aria-label="Remotes">
       <div class="file-row placeholder">Open a repository to list its remotes.</div>
@@ -3187,7 +3200,7 @@ void (async () => {
   await refresh();
 })();
 
-// --- Remotes (M5-01/02): list / add / set-url / remove / fetch --------------
+// --- Remotes (M5-01/02/03): list / add / set-url / remove / fetch / pull ----
 // The backend reads `git remote` + `get-url` itself and hands over only
 // redacted URLs — a URL can embed a credentials token, so the raw form
 // never travels to this file. Removal is destructive (it takes the
@@ -3195,7 +3208,10 @@ void (async () => {
 // ticket panel; adding and re-pointing URLs are ordinary queued writes.
 // Fetch rides the same lane with the 3600 s network budget: progress lines
 // arrive redacted over "sync-progress" and the mandatory re-read refreshes
-// the ↑n ↓m badges in the branch header and References rows.
+// the ↑n ↓m badges in the branch header and References rows. Pull is one
+// queue unit (fetch + integrate); the strategy select names the lane and
+// its "Git default" entry shows the effective rule the backend read from
+// the user's own pull.rebase/pull.ff config.
 
 type RemoteView = {
   name: string;
@@ -3206,21 +3222,33 @@ type RemoteView = {
 
 type SyncProgress = { operationId: number; line: string };
 
+type PullDefault = {
+  rebase: { value: string; scope: string } | null;
+  ff: { value: string; scope: string } | null;
+  effective: string;
+  note: string | null;
+};
+
 const remoteNameInput = document.querySelector<HTMLInputElement>("#remote-name")!;
 const remoteUrlInput = document.querySelector<HTMLInputElement>("#remote-url")!;
 const remoteAddButton = document.querySelector<HTMLButtonElement>("#remote-add")!;
 const remoteFetchAllButton = document.querySelector<HTMLButtonElement>("#remote-fetch-all")!;
+const pullStrategySelect = document.querySelector<HTMLSelectElement>("#pull-strategy")!;
+const remotePullButton = document.querySelector<HTMLButtonElement>("#remote-pull")!;
 const remoteListElement = document.querySelector<HTMLElement>("#remote-list")!;
 const remoteStatus = document.querySelector<HTMLElement>("#remote-status")!;
 
 let remoteEntries: RemoteView[] = [];
 let remoteRequestSeq = 0;
 let remoteSnapshotVersion = -1;
+let pullDefaultRequestSeq = 0;
 
 function remotePlaceholder(message: string): void {
   remoteSnapshotVersion = -1;
   remoteEntries = [];
   remoteStatus.textContent = "";
+  pullStrategySelect.options[0].textContent = "Git default";
+  pullStrategySelect.options[0].title = "";
   const row = document.createElement("div");
   row.className = "file-row placeholder";
   row.textContent = message;
@@ -3249,6 +3277,7 @@ async function loadRemotes(): Promise<void> {
       entries.length === 0
         ? "No remotes configured."
         : `${entries.length} remote${entries.length === 1 ? "" : "s"} configured.`;
+    void loadPullDefault();
   } catch (error) {
     if (seq !== remoteRequestSeq) return;
     showError(error);
@@ -3394,6 +3423,71 @@ async function runFetch(
   }
 }
 
+// The "default" strategy label carries the rule Git's own config would
+// pick, so the user sees what a plain pull does before choosing it. The
+// read is best-effort: a failure leaves the neutral "Git default" text.
+async function loadPullDefault(): Promise<void> {
+  const seq = ++pullDefaultRequestSeq;
+  try {
+    const view = await invoke<PullDefault>("pull_default");
+    if (seq !== pullDefaultRequestSeq || !currentSnapshot) return;
+    const option = pullStrategySelect.options[0];
+    option.textContent = `Git default (${view.effective})`;
+    const configured = [
+      view.rebase ? `pull.rebase=${view.rebase.value || "true"} (${view.rebase.scope})` : null,
+      view.ff ? `pull.ff=${view.ff.value || "true"} (${view.ff.scope})` : null,
+    ].filter((entry): entry is string => entry !== null);
+    option.title = [
+      configured.length > 0
+        ? `Your config: ${configured.join(", ")}; effective: ${view.effective}.`
+        : `No pull.rebase or pull.ff configured; effective: ${view.effective}.`,
+      view.note ?? "",
+    ]
+      .filter((part) => part !== "")
+      .join(" ");
+  } catch {
+    if (seq === pullDefaultRequestSeq) {
+      pullStrategySelect.options[0].textContent = "Git default";
+    }
+  }
+}
+
+// Pull is one queue unit end to end: the backend fetches the upstream's
+// remote and integrates in the same slot, so the UI never offers a second
+// write while the fetch leg runs. Conflicts arrive as `conflicted` with
+// the banner already showing the sequencer state the snapshot re-read
+// found; the next step belongs to the banner, not to a dialog.
+async function runPull(): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  const strategy = pullStrategySelect.value as "default" | "ffonly" | "merge" | "rebase";
+  writeRunning = true;
+  syncCommitControls();
+  renderRemotes(remoteEntries);
+  remoteStatus.textContent = "Pulling…";
+  let unlisten: (() => void) | undefined;
+  try {
+    unlisten = await listen<SyncProgress>("sync-progress", ({ payload }) => {
+      remoteStatus.textContent = payload.line;
+    });
+    const result = await invoke<OperationResult>("pull", {
+      snapshotVersion: currentSnapshot.version,
+      strategy,
+    });
+    applySnapshot(result.snapshot);
+    remoteStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+  } catch (error) {
+    showError(error);
+    remoteStatus.textContent = "The pull did not run.";
+  } finally {
+    unlisten?.();
+    writeRunning = false;
+    syncCommitControls();
+    renderRemotes(remoteEntries);
+  }
+}
+
 function runRemoteSetUrl(name: string, push: boolean): void {
   const url = remoteUrlInput.value.trim();
   if (url === "") {
@@ -3436,6 +3530,7 @@ remoteAddButton.addEventListener("click", addRemote);
 remoteFetchAllButton.addEventListener("click", () =>
   void runFetch("all", "Fetching every remote…"),
 );
+remotePullButton.addEventListener("click", () => void runPull());
 remoteUrlInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -3449,4 +3544,6 @@ function syncRemoteControls(): void {
   remoteUrlInput.disabled = locked;
   remoteAddButton.disabled = locked;
   remoteFetchAllButton.disabled = locked;
+  pullStrategySelect.disabled = locked;
+  remotePullButton.disabled = locked;
 }

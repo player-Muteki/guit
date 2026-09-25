@@ -1240,6 +1240,42 @@ async fn fetch(
 }
 
 #[tauri::command]
+async fn pull(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    strategy: network::PullStrategy,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        network::pull(
+            &state,
+            &sessions,
+            snapshot_version,
+            strategy,
+            &mut |operation_id, line| {
+                let _ = app.emit(
+                    "sync-progress",
+                    serde_json::json!({ "operationId": operation_id, "line": line }),
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn pull_default(app: tauri::AppHandle) -> Result<network::PullDefault, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        network::pull_default(&sessions)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
 async fn set_upstream(
     app: tauri::AppHandle,
     snapshot_version: u64,
@@ -1336,6 +1372,8 @@ fn main() {
             preview_remove_remote,
             remove_remote,
             fetch,
+            pull,
+            pull_default,
             set_upstream
         ])
         .run(tauri::generate_context!())

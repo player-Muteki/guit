@@ -38,7 +38,7 @@ pub struct RemoteView {
     pub addressable: bool,
 }
 
-fn session_directory(sessions: &session::SessionState) -> Result<PathBuf, ProbeError> {
+pub(crate) fn session_directory(sessions: &session::SessionState) -> Result<PathBuf, ProbeError> {
     let identity = sessions
         .current_identity()
         .ok_or_else(|| ProbeError::new("remote_no_session", "No repository is open."))?;

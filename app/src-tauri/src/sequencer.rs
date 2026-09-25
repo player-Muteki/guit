@@ -132,8 +132,11 @@ impl Step {
 }
 
 #[derive(Clone, Copy)]
-enum Start {
+pub(crate) enum Start {
     Merge,
+    /// Pull's honoring of `pull.ff=false`: the same merge leg, forced to
+    /// produce a merge commit even where a fast-forward is possible.
+    MergeNoFf,
     Rebase,
     CherryPick,
     Revert,
@@ -142,7 +145,7 @@ enum Start {
 impl Start {
     fn verb(self) -> &'static str {
         match self {
-            Start::Merge => "merge",
+            Start::Merge | Start::MergeNoFf => "merge",
             Start::Rebase => "rebase",
             Start::CherryPick => "cherry-pick",
             Start::Revert => "revert",
@@ -151,7 +154,7 @@ impl Start {
 
     fn result_kind(self) -> OperationKind {
         match self {
-            Start::Merge => OperationKind::Merge,
+            Start::Merge | Start::MergeNoFf => OperationKind::Merge,
             Start::Rebase => OperationKind::Rebase,
             Start::CherryPick => OperationKind::CherryPick,
             Start::Revert => OperationKind::Revert,
@@ -162,7 +165,7 @@ impl Start {
     /// revert ride the History detail buttons and accept only a full
     /// commit id, so a stale list row can never silently retarget.
     fn accepts_branch_names(self) -> bool {
-        matches!(self, Start::Merge | Start::Rebase)
+        matches!(self, Start::Merge | Start::MergeNoFf | Start::Rebase)
     }
 }
 
@@ -173,7 +176,7 @@ pub(crate) fn merge_start(
     target: &str,
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_start(state, sessions, snapshot_version, target, Start::Merge);
+    let result = start_in_slot(state, sessions, snapshot_version, target, Start::Merge);
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -188,7 +191,7 @@ pub(crate) fn rebase_start(
     target: &str,
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_start(state, sessions, snapshot_version, target, Start::Rebase);
+    let result = start_in_slot(state, sessions, snapshot_version, target, Start::Rebase);
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -203,7 +206,7 @@ pub(crate) fn pick_commit(
     oid: &str,
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_start(state, sessions, snapshot_version, oid, Start::CherryPick);
+    let result = start_in_slot(state, sessions, snapshot_version, oid, Start::CherryPick);
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -218,7 +221,7 @@ pub(crate) fn revert_commit(
     oid: &str,
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_start(state, sessions, snapshot_version, oid, Start::Revert);
+    let result = start_in_slot(state, sessions, snapshot_version, oid, Start::Revert);
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -226,7 +229,12 @@ pub(crate) fn revert_commit(
     })
 }
 
-fn run_start(
+/// Assumes the queue slot is already held by the caller — every local
+/// start wrapper and the pull integration leg call this from inside their
+/// `WriteState::begin`/`finish` pair, so pull reuses the exact merge/rebase
+/// gates (in-flight refusal, target validation, cancellation) rather than
+/// growing a second set of semantics.
+pub(crate) fn start_in_slot(
     state: &WriteState,
     sessions: &session::SessionState,
     snapshot_version: u64,
@@ -268,6 +276,7 @@ fn run_start(
                 // (measured on Git 2.53, plan/04).
                 let args: Vec<&str> = match mode {
                     Start::Merge => vec!["merge", "--no-edit", target],
+                    Start::MergeNoFf => vec!["merge", "--no-edit", "--no-ff", target],
                     Start::Rebase => vec!["rebase", target],
                     Start::CherryPick => vec!["cherry-pick", target],
                     Start::Revert => vec!["revert", "--no-edit", target],
@@ -278,7 +287,7 @@ fn run_start(
                         let snapshot = session::refresh(sessions)?;
                         if output.status.success() && !output.truncated {
                             message = match mode {
-                                Start::Merge => format!("Merged {target}."),
+                                Start::Merge | Start::MergeNoFf => format!("Merged {target}."),
                                 Start::Rebase => format!("Rebased onto {target}."),
                                 Start::CherryPick => format!("Cherry-picked {target}."),
                                 Start::Revert => format!("Reverted {target}."),
