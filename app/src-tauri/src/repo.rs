@@ -262,6 +262,12 @@ pub fn status_output(identity: &RepoIdentity, untracked: bool) -> Result<Vec<u8>
             .map_err(|_| ProbeError::new("repo_worktree_missing", "The work tree is gone."))?
     };
     let mut command = user_git_command(directory);
+    // `--no-optional-locks` is a top-level git option and must precede the
+    // subcommand. Beyond skipping opportunistic index writes, it stops Git
+    // from creating and removing `.git/index.lock` at all: those events fed
+    // the file watcher, so a single real change made guit refresh forever
+    // (measured on the M6 tmpfs fixtures, ~3.5 refreshes/s never settling).
+    command.args(["--no-optional-locks"]);
     // Option values must use the `=` form: `--untracked-files all` would treat
     // `all` as a pathspec and silently report an empty repository.
     command.args([
@@ -276,9 +282,7 @@ pub fn status_output(identity: &RepoIdentity, untracked: bool) -> Result<Vec<u8>
         "--ignored=no",
     ]);
     if identity.is_bare {
-        command
-            .env("GIT_DIR", &identity.git_dir)
-            .arg("--no-optional-locks");
+        command.env("GIT_DIR", &identity.git_dir);
     }
     let output = runner::run_with_limit(
         command,
@@ -461,5 +465,55 @@ mod tests {
         // surface as a structured error instead of a falsely clean repository.
         let error = status_output(&detect(&bare).unwrap(), true).unwrap_err();
         assert_eq!(error.code, "git_status_failed");
+    }
+
+    #[test]
+    fn status_output_never_acquires_the_index_lock() {
+        // Git creates and deletes `.git/index.lock` on ordinary (non-bare)
+        // status runs even when it rewrites nothing; those create/remove
+        // events re-trigger guit's own file watcher, so one real change used
+        // to make the refresh loop self-sustaining. The top-level
+        // `--no-optional-locks` option must suppress the lock entirely.
+        use notify::Watcher;
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo, "guit test", "test@example.invalid");
+        std::fs::write(repo.join("file.txt"), b"one\n").unwrap();
+        git_raw(&repo, &["add", "."]);
+        git_with(
+            &repo,
+            &[
+                "-c",
+                "user.name=guit test",
+                "-c",
+                "user.email=test@example.invalid",
+            ],
+            &["commit", "-qm", "base"],
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher =
+            notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = event {
+                    for path in event.paths {
+                        if path.file_name().is_some_and(|name| name == "index.lock") {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+            })
+            .unwrap();
+        watcher
+            .watch(&repo.join(".git"), notify::RecursiveMode::Recursive)
+            .unwrap();
+        let identity = detect(&repo).unwrap();
+        status_output(&identity, true).unwrap();
+        std::fs::write(repo.join("file.txt"), b"one\n").unwrap();
+        status_output(&identity, true).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            rx.try_iter().next().is_none(),
+            "status took .git/index.lock"
+        );
     }
 }
