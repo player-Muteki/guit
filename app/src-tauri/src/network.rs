@@ -16,7 +16,7 @@
 use crate::probe::ProbeError;
 use crate::repo;
 use crate::runner;
-use crate::write::{self, OperationKind, OperationResult, Outcome, WriteState};
+use crate::write::{self, OperationKind, OperationResult, Outcome, PreviewResult, WriteState};
 use crate::{branches, history, refs, remotes, sequencer, session, submodules};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -505,27 +505,33 @@ fn pull_result(
     }
 }
 
-struct PullPlan {
+struct UpstreamPlan {
+    /// Name of the single checked-out branch.
+    branch: String,
+    /// Commit that branch points at in the same fresh listing.
+    branch_oid: String,
     /// Display form of the tracking ref, e.g. `origin/main`.
     upstream: String,
     remote: String,
 }
 
 /// Derives branch, upstream and remote from one fresh listing: the client
-/// names none of them. Every refusal here happens before any process runs.
-fn plan_pull(work_root: &Path, unborn: bool) -> Result<PullPlan, ProbeError> {
+/// names none of them. `action` only shapes the refusal messages ("pull",
+/// "push", "force push"). Every refusal here happens before any process
+/// runs.
+fn plan_upstream(work_root: &Path, unborn: bool, action: &str) -> Result<UpstreamPlan, ProbeError> {
     if unborn {
         return Err(ProbeError::new(
-            "pull_unborn",
-            "Cannot pull before the first commit.",
+            "plan_unborn",
+            format!("Cannot {action} before the first commit."),
         ));
     }
     let listing = refs::list(work_root)?;
     let mut heads = listing.branches.iter().filter(|branch| branch.head);
     let (Some(branch), None) = (heads.next(), heads.next()) else {
         return Err(ProbeError::new(
-            "pull_no_branch",
-            "Pull updates the checked-out branch; HEAD is not attached to one.",
+            "plan_no_branch",
+            format!("No branch is checked out, so there is nothing to {action}."),
         ));
     };
     if !branch.addressable {
@@ -537,7 +543,7 @@ fn plan_pull(work_root: &Path, unborn: bool) -> Result<PullPlan, ProbeError> {
     }
     let Some(upstream) = branch.upstream.clone() else {
         return Err(ProbeError::new(
-            "pull_no_upstream",
+            "plan_no_upstream",
             format!(
                 "\"{}\" has no upstream branch; publish it to a remote (or set an upstream) \
                  first.",
@@ -549,7 +555,7 @@ fn plan_pull(work_root: &Path, unborn: bool) -> Result<PullPlan, ProbeError> {
         Some((remote, _)) => remote.to_owned(),
         None => {
             return Err(ProbeError::new(
-                "pull_protocol",
+                "plan_protocol",
                 format!("The upstream {upstream} is not shaped like <remote>/<branch>."),
             ))
         }
@@ -558,7 +564,7 @@ fn plan_pull(work_root: &Path, unborn: bool) -> Result<PullPlan, ProbeError> {
     let raws = remotes::raw_names(work_root)?;
     if !raws.iter().any(|raw| raw.as_slice() == remote.as_bytes()) {
         return Err(ProbeError::new(
-            "pull_remote_missing",
+            "plan_remote_missing",
             format!(
                 "The upstream {upstream} names remote \"{remote}\", which is no longer \
                  configured."
@@ -572,10 +578,15 @@ fn plan_pull(work_root: &Path, unborn: bool) -> Result<PullPlan, ProbeError> {
     {
         return Err(ProbeError::new(
             "upstream_not_addressable",
-            "That upstream name cannot be addressed losslessly; the pull was refused.",
+            format!("That upstream name cannot be addressed losslessly; the {action} was refused."),
         ));
     }
-    Ok(PullPlan { upstream, remote })
+    Ok(UpstreamPlan {
+        branch: branch.name.clone(),
+        branch_oid: branch.oid.clone(),
+        upstream,
+        remote,
+    })
 }
 
 /// The integration target is re-read from the tracking ref after the
@@ -665,7 +676,7 @@ fn run_pull(
 ) -> Result<OperationResult, ProbeError> {
     let gates = match sessions.commit_context(snapshot_version) {
         Err(error) => Err(error.message),
-        Ok((work_root, unborn)) => match plan_pull(&work_root, unborn) {
+        Ok((work_root, unborn)) => match plan_upstream(&work_root, unborn, "pull") {
             Err(error) => Err(error.message),
             Ok(plan) => {
                 if state.cancel_flag().load(Ordering::SeqCst) {
@@ -778,6 +789,746 @@ fn run_pull(
             Ok(result)
         }
     }
+}
+
+// --- push family (M5-04) ----------------------------------------------------
+// Push, publish, remote-branch delete and the lease-guarded force push all
+// ride the same write lane and network budget as fetch. The client names
+// nothing: the branch, upstream, remote and lease value come from a fresh
+// server-side listing, and the two irreversible remote writes (delete,
+// force push) go through the shared one-time ticket protocol.
+
+/// One streamed `git push` leg inside the held queue slot.
+struct Leg {
+    ok: bool,
+    exit: Option<i32>,
+    stderr: Vec<u8>,
+    cancelled: bool,
+}
+
+fn push_leg(
+    state: &WriteState,
+    work_root: &Path,
+    args: &[&str],
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Leg, ProbeError> {
+    let mut command = repo::user_git_command(work_root);
+    command.arg("push");
+    command.args(args);
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut collect = |_: bool, bytes: &[u8]| {
+        submodules::take_progress_bytes(&mut buffer, bytes, on_line);
+    };
+    match runner::run_with_limit(
+        command,
+        state.cancel_flag(),
+        Duration::ZERO,
+        FETCH_TIMEOUT,
+        FETCH_OUTPUT_LIMIT,
+        &mut collect,
+    ) {
+        Ok(output) => {
+            if !buffer.is_empty() {
+                let remainder = std::mem::take(&mut buffer);
+                submodules::emit_line(&remainder, on_line);
+            }
+            Ok(Leg {
+                ok: output.status.success() && !output.truncated,
+                exit: output.status.code(),
+                stderr: output.stderr,
+                cancelled: false,
+            })
+        }
+        Err(error) if error.code == "process_cancelled" => Ok(Leg {
+            ok: false,
+            exit: None,
+            stderr: Vec::new(),
+            cancelled: true,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+/// Progress chatter fills the head of a rejected push's stderr, so the
+/// honest detail line is the first one that actually carries a verdict.
+fn push_failure_line(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("[rejected]")
+            || trimmed.starts_with("error:")
+            || trimmed.starts_with("fatal:")
+            || trimmed.starts_with("remote:")
+        {
+            return write::first_stderr_line(trimmed.as_bytes());
+        }
+    }
+    write::first_stderr_line(stderr)
+}
+
+fn op_result(
+    kind: OperationKind,
+    outcome: Outcome,
+    exit_code: Option<i32>,
+    message: String,
+    details: Option<String>,
+    snapshot: Option<session::SnapshotView>,
+) -> OperationResult {
+    OperationResult {
+        operation_id: 0,
+        kind,
+        outcome,
+        exit_code,
+        message,
+        details,
+        snapshot,
+    }
+}
+
+pub(crate) fn push(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    emit: &mut dyn FnMut(u64, &str),
+) -> Result<OperationResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_push(state, sessions, snapshot_version, &mut |line| {
+        emit(operation_id, line)
+    });
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+/// Pushes the checked-out branch to its upstream's remote with both ends
+/// named explicitly — `push.default` ambiguity never applies. A non-FF
+/// refusal from the remote is the default protection: no push path here
+/// ever carries a force flag.
+fn run_push(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<OperationResult, ProbeError> {
+    let gates = match sessions.commit_context(snapshot_version) {
+        Err(error) => Err(error.message),
+        Ok((work_root, unborn)) => match plan_upstream(&work_root, unborn, "push") {
+            Err(error) => Err(error.message),
+            Ok(plan) => {
+                if state.cancel_flag().load(Ordering::SeqCst) {
+                    let snapshot = session::refresh(sessions)?;
+                    return Ok(op_result(
+                        OperationKind::Push,
+                        Outcome::Cancelled,
+                        None,
+                        "Cancelled before Git ran; nothing was pushed.".into(),
+                        None,
+                        snapshot,
+                    ));
+                }
+                Ok((work_root, plan))
+            }
+        },
+    };
+    let (work_root, plan) = match gates {
+        Err(refusal) => {
+            let snapshot = session::refresh(sessions)?;
+            return Ok(op_result(
+                OperationKind::Push,
+                Outcome::Rejected,
+                None,
+                refusal,
+                None,
+                snapshot,
+            ));
+        }
+        Ok(pair) => pair,
+    };
+    let leg = push_leg(
+        state,
+        &work_root,
+        &["--progress", &plan.remote, &plan.branch],
+        on_line,
+    )?;
+    let snapshot = session::refresh(sessions)?;
+    Ok(if leg.cancelled {
+        op_result(
+            OperationKind::Push,
+            Outcome::Cancelled,
+            None,
+            "Cancelled while the push was running; the remote may or may not have received the update.".into(),
+            None,
+            snapshot,
+        )
+    } else if leg.ok {
+        op_result(
+            OperationKind::Push,
+            Outcome::Success,
+            leg.exit,
+            format!("Pushed {} to {}.", plan.branch, plan.upstream),
+            None,
+            snapshot,
+        )
+    } else {
+        op_result(
+            OperationKind::Push,
+            Outcome::Failed,
+            leg.exit,
+            "git push reported a failure; the remote did not accept the update.".into(),
+            Some(push_failure_line(&leg.stderr)),
+            snapshot,
+        )
+    })
+}
+
+pub(crate) fn publish(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    remote: String,
+    emit: &mut dyn FnMut(u64, &str),
+) -> Result<OperationResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_publish(state, sessions, snapshot_version, &remote, &mut |line| {
+        emit(operation_id, line)
+    });
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+fn build_publish_plan(
+    work_root: &Path,
+    unborn: bool,
+    remote: &str,
+) -> Result<(String, String), ProbeError> {
+    if unborn {
+        return Err(ProbeError::new(
+            "plan_unborn",
+            "Cannot publish before the first commit.",
+        ));
+    }
+    remotes::validate_remote_name(remote)?;
+    let listing = refs::list(work_root)?;
+    let mut heads = listing.branches.iter().filter(|branch| branch.head);
+    let (Some(branch), None) = (heads.next(), heads.next()) else {
+        return Err(ProbeError::new(
+            "plan_no_branch",
+            "No branch is checked out, so there is nothing to publish.",
+        ));
+    };
+    if !branch.addressable {
+        return Err(ProbeError::new(
+            "branch_not_addressable",
+            "That branch name does not round-trip byte-exactly; guit refuses to guess which \
+             branch was meant.",
+        ));
+    }
+    if let Some(upstream) = &branch.upstream {
+        return Err(ProbeError::new(
+            "publish_has_upstream",
+            format!(
+                "\"{}\" already tracks {upstream}; use Push instead of publishing again.",
+                branch.name
+            ),
+        ));
+    }
+    let raws = remotes::raw_names(work_root)?;
+    if !raws.iter().any(|raw| raw.as_slice() == remote.as_bytes()) {
+        return Err(ProbeError::new(
+            "remote_missing",
+            format!("No remote named \"{remote}\" is configured; refresh the list."),
+        ));
+    }
+    let target = format!("{remote}/{}", branch.name);
+    if listing.remotes.iter().any(|seen| seen.name == target) {
+        return Err(ProbeError::new(
+            "publish_target_exists",
+            format!(
+                "\"{remote}\" already has a {target} tracking ref as far as guit can see; \
+                 fetch, then Push or set the upstream instead."
+            ),
+        ));
+    }
+    Ok((branch.name.clone(), target))
+}
+
+/// First push of a branch: creates it on the remote and binds the upstream
+/// in one step (`--set-upstream`), which is why it demands the branch have
+/// no upstream yet — silently re-pointing an existing binding is Push's
+/// job, and Push's gates apply there.
+fn run_publish(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    remote: &str,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<OperationResult, ProbeError> {
+    let gates = match sessions.commit_context(snapshot_version) {
+        Err(error) => Err(error.message),
+        Ok((work_root, unborn)) => match build_publish_plan(&work_root, unborn, remote) {
+            Err(error) => Err(error.message),
+            Ok(plan) => {
+                if state.cancel_flag().load(Ordering::SeqCst) {
+                    let snapshot = session::refresh(sessions)?;
+                    return Ok(op_result(
+                        OperationKind::Publish,
+                        Outcome::Cancelled,
+                        None,
+                        "Cancelled before Git ran; nothing was pushed.".into(),
+                        None,
+                        snapshot,
+                    ));
+                }
+                Ok((work_root, plan))
+            }
+        },
+    };
+    let (work_root, (branch, target)) = match gates {
+        Err(refusal) => {
+            let snapshot = session::refresh(sessions)?;
+            return Ok(op_result(
+                OperationKind::Publish,
+                Outcome::Rejected,
+                None,
+                refusal,
+                None,
+                snapshot,
+            ));
+        }
+        Ok(pair) => pair,
+    };
+    let leg = push_leg(
+        state,
+        &work_root,
+        &["--set-upstream", "--progress", remote, &branch],
+        on_line,
+    )?;
+    let snapshot = session::refresh(sessions)?;
+    Ok(if leg.cancelled {
+        op_result(
+            OperationKind::Publish,
+            Outcome::Cancelled,
+            None,
+            "Cancelled while the push was running; the remote may or may not have received the \
+             new branch."
+                .into(),
+            None,
+            snapshot,
+        )
+    } else if leg.ok {
+        op_result(
+            OperationKind::Publish,
+            Outcome::Success,
+            leg.exit,
+            format!("Published {branch} to {target} and set it as the upstream."),
+            None,
+            snapshot,
+        )
+    } else {
+        op_result(
+            OperationKind::Publish,
+            Outcome::Failed,
+            leg.exit,
+            "git push reported a failure; the branch was not published.".into(),
+            Some(push_failure_line(&leg.stderr)),
+            snapshot,
+        )
+    })
+}
+
+pub(crate) fn preview_delete_remote_branch(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    target: String,
+) -> Result<PreviewResult, ProbeError> {
+    let (work_root, _unborn) = sessions.commit_context(snapshot_version)?;
+    let Some((remote, branch)) = target.split_once('/') else {
+        return Err(ProbeError::new(
+            "remote_ref_missing",
+            format!("\"{target}\" is not shaped like <remote>/<branch>."),
+        ));
+    };
+    remotes::validate_remote_name(remote)?;
+    let listing = refs::list(&work_root)?;
+    let Some(seen) = listing.remotes.iter().find(|seen| seen.name == target) else {
+        return Err(ProbeError::new(
+            "remote_ref_missing",
+            format!("\"{target}\" is not a fetched remote-tracking branch; refresh the list."),
+        ));
+    };
+    if !seen.addressable {
+        return Err(ProbeError::new(
+            "upstream_not_addressable",
+            "That ref name cannot be addressed losslessly; the delete was refused.",
+        ));
+    }
+    if seen.symref.is_some() {
+        return Err(ProbeError::new(
+            "remote_ref_symref",
+            format!("{target} is symbolic (the remote's default-branch marker); guit will not delete it."),
+        ));
+    }
+    let raws = remotes::raw_names(&work_root)?;
+    if !raws.iter().any(|raw| raw.as_slice() == remote.as_bytes()) {
+        return Err(ProbeError::new(
+            "remote_missing",
+            format!("No remote named \"{remote}\" is configured; refresh the list."),
+        ));
+    }
+    let nonce = state.stage_remote_branch_delete(
+        work_root,
+        remote.to_owned(),
+        branch.to_owned(),
+        seen.oid.clone(),
+    );
+    let snapshot = session::refresh(sessions)?
+        .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
+    Ok(PreviewResult {
+        nonce,
+        candidates: vec![target],
+        dropped: Vec::new(),
+        snapshot,
+        target_oid: Some(seen.oid.clone()),
+    })
+}
+
+pub(crate) fn delete_remote_branch(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    nonce: String,
+    emit: &mut dyn FnMut(u64, &str),
+) -> Result<OperationResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_delete_remote_branch(state, sessions, &nonce, &mut |line| {
+        emit(operation_id, line)
+    });
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+/// Deleting a branch on the remote is irreversible for everyone who pulls
+/// from it, so the confirm re-verifies everything the ticket bound — the
+/// remote, and the tracking ref still pointing at the previewed oid —
+/// before a byte leaves the machine.
+fn run_delete_remote_branch(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    nonce: &str,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<OperationResult, ProbeError> {
+    let Some((dir, remote, branch, oid)) = state.take_remote_branch_delete(nonce) else {
+        let snapshot = session::refresh(sessions)?;
+        return Ok(op_result(
+            OperationKind::DeleteRemoteBranch,
+            Outcome::Rejected,
+            None,
+            "That confirmation has expired; preview the action again.".into(),
+            None,
+            snapshot,
+        ));
+    };
+    let same_repo = sessions
+        .current_identity()
+        .is_some_and(|identity| identity.work_root.as_deref() == Some(dir.as_path()));
+    let target = format!("{remote}/{branch}");
+    let unchanged = same_repo
+        && remotes::raw_names(&dir)?
+            .iter()
+            .any(|raw| raw.as_slice() == remote.as_bytes())
+        && refs::list(&dir)?
+            .remotes
+            .iter()
+            .any(|seen| seen.name == target && seen.oid == oid);
+    if !unchanged {
+        let snapshot = session::refresh(sessions)?;
+        return Ok(op_result(
+            OperationKind::DeleteRemoteBranch,
+            Outcome::Rejected,
+            None,
+            "The remote branch changed after the preview; nothing was deleted.".into(),
+            None,
+            snapshot,
+        ));
+    }
+    if state.cancel_flag().load(Ordering::SeqCst) {
+        let snapshot = session::refresh(sessions)?;
+        return Ok(op_result(
+            OperationKind::DeleteRemoteBranch,
+            Outcome::Cancelled,
+            None,
+            "Cancelled before Git ran; nothing was deleted.".into(),
+            None,
+            snapshot,
+        ));
+    }
+    let refspec = format!("refs/heads/{branch}");
+    let leg = push_leg(
+        state,
+        &dir,
+        &["--progress", &remote, "--delete", &refspec],
+        on_line,
+    )?;
+    let snapshot = session::refresh(sessions)?;
+    Ok(if leg.cancelled {
+        op_result(
+            OperationKind::DeleteRemoteBranch,
+            Outcome::Cancelled,
+            None,
+            format!(
+                "Cancelled while the delete was running; {target} may or may not still exist \
+                     on \"{remote}\"."
+            ),
+            None,
+            snapshot,
+        )
+    } else if leg.ok {
+        op_result(
+            OperationKind::DeleteRemoteBranch,
+            Outcome::Success,
+            leg.exit,
+            format!("Deleted {target} from \"{remote}\"."),
+            None,
+            snapshot,
+        )
+    } else {
+        op_result(
+            OperationKind::DeleteRemoteBranch,
+            Outcome::Failed,
+            leg.exit,
+            format!("git push --delete reported a failure; {target} was not removed."),
+            Some(push_failure_line(&leg.stderr)),
+            snapshot,
+        )
+    })
+}
+
+/// Commit lines in force-push previews: the count is exact, the subjects
+/// are display-only and capped, mirroring the ref-list truncation idiom.
+const FORCE_PUSH_PREVIEW_LIMIT: usize = 20;
+
+pub(crate) fn preview_force_push(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+) -> Result<PreviewResult, ProbeError> {
+    let (work_root, unborn) = sessions.commit_context(snapshot_version)?;
+    let plan = plan_upstream(&work_root, unborn, "force push")?;
+    let listing = refs::list(&work_root)?;
+    let Some(tracking) = listing
+        .remotes
+        .iter()
+        .find(|seen| seen.name == plan.upstream)
+    else {
+        return Err(ProbeError::new(
+            "forcepush_no_tracking",
+            format!(
+                "{} has no fetched tracking ref; fetch first so guit can pin the lease.",
+                plan.upstream
+            ),
+        ));
+    };
+    let range = format!("{}..{}", plan.branch_oid, tracking.oid);
+    let count_out = branches::run_git(
+        &work_root,
+        &["rev-list", "--count", &range],
+        &AtomicBool::new(false),
+    )?;
+    let count: u64 = String::from_utf8_lossy(&count_out.stdout)
+        .trim()
+        .parse()
+        .ok()
+        .filter(|_| count_out.status.success() && !count_out.truncated)
+        .ok_or_else(|| {
+            ProbeError::new(
+                "forcepush_count_failed",
+                "Git would not count the commits a force push would overwrite; the force push \
+                 was refused.",
+            )
+        })?;
+    let rows_out = branches::run_git(
+        &work_root,
+        &[
+            "log",
+            "--max-count",
+            &FORCE_PUSH_PREVIEW_LIMIT.to_string(),
+            "--pretty=format:%h\u{1f}%s",
+            &range,
+        ],
+        &AtomicBool::new(false),
+    )?;
+    if !rows_out.status.success() || rows_out.truncated {
+        return Err(ProbeError::new(
+            "forcepush_count_failed",
+            "Git would not list the commits a force push would overwrite; the force push was \
+             refused.",
+        ));
+    }
+    let mut candidates = vec![format!(
+        "Overwrites {} on \"{}\": {count} remote-only commit(s) become unreachable.",
+        plan.branch, plan.remote
+    )];
+    let text = String::from_utf8_lossy(&rows_out.stdout);
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let (short, subject) = line.split_once('\u{1f}').ok_or_else(|| {
+            ProbeError::new(
+                "forcepush_count_failed",
+                "Git listed the commits in an unexpected shape; the force push was refused.",
+            )
+        })?;
+        candidates.push(format!("{short} {subject}"));
+    }
+    let shown = candidates.len() - 1;
+    if count > shown as u64 {
+        candidates.push(format!("... and {} more", count - shown as u64));
+    }
+    let nonce = state.stage_force_push(
+        work_root,
+        plan.remote.clone(),
+        plan.branch.clone(),
+        plan.branch_oid.clone(),
+        tracking.oid.clone(),
+    );
+    let snapshot = session::refresh(sessions)?
+        .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
+    Ok(PreviewResult {
+        nonce,
+        candidates,
+        dropped: Vec::new(),
+        snapshot,
+        target_oid: Some(tracking.oid.clone()),
+    })
+}
+
+pub(crate) fn force_push(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    nonce: String,
+    emit: &mut dyn FnMut(u64, &str),
+) -> Result<OperationResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_force_push(state, sessions, &nonce, &mut |line| {
+        emit(operation_id, line)
+    });
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+/// The only force path in guit, and it is never a plain `--force`: the
+/// lease pins the remote ref to the tracking oid the user confirmed, so
+/// anything fetched in between (or pushed by anyone else) makes Git refuse
+/// with "stale info" rather than overwrite blindly.
+fn run_force_push(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    nonce: &str,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<OperationResult, ProbeError> {
+    let Some((dir, remote, branch, local_oid, lease)) = state.take_force_push(nonce) else {
+        let snapshot = session::refresh(sessions)?;
+        return Ok(op_result(
+            OperationKind::ForcePush,
+            Outcome::Rejected,
+            None,
+            "That confirmation has expired; preview the action again.".into(),
+            None,
+            snapshot,
+        ));
+    };
+    let same_repo = sessions
+        .current_identity()
+        .is_some_and(|identity| identity.work_root.as_deref() == Some(dir.as_path()));
+    let target = format!("{remote}/{branch}");
+    let listing = refs::list(&dir)?;
+    let unchanged = same_repo
+        && remotes::raw_names(&dir)?
+            .iter()
+            .any(|raw| raw.as_slice() == remote.as_bytes())
+        && listing.branches.iter().any(|seen| {
+            seen.head
+                && seen.name == branch
+                && seen.oid == local_oid
+                && seen.upstream.as_deref() == Some(target.as_str())
+        })
+        && listing
+            .remotes
+            .iter()
+            .any(|seen| seen.name == target && seen.oid == lease);
+    if !unchanged {
+        let snapshot = session::refresh(sessions)?;
+        return Ok(op_result(
+            OperationKind::ForcePush,
+            Outcome::Rejected,
+            None,
+            "The branch or the remote changed after the preview; the force push was refused."
+                .into(),
+            None,
+            snapshot,
+        ));
+    }
+    if state.cancel_flag().load(Ordering::SeqCst) {
+        let snapshot = session::refresh(sessions)?;
+        return Ok(op_result(
+            OperationKind::ForcePush,
+            Outcome::Cancelled,
+            None,
+            "Cancelled before Git ran; nothing was pushed.".into(),
+            None,
+            snapshot,
+        ));
+    }
+    // Measured on Git 2.53: the lease key must be the full ref name of the
+    // push target — the short form resolves to a different ref and guards
+    // nothing — hence this exact shape and the tests around it.
+    let lease_arg = format!("--force-with-lease=refs/heads/{branch}:{lease}");
+    let leg = push_leg(
+        state,
+        &dir,
+        &["--progress", &lease_arg, &remote, &branch],
+        on_line,
+    )?;
+    let snapshot = session::refresh(sessions)?;
+    Ok(if leg.cancelled {
+        op_result(
+            OperationKind::ForcePush,
+            Outcome::Cancelled,
+            None,
+            "Cancelled while the push was running; the remote may or may not have accepted the \
+             forced update."
+                .into(),
+            None,
+            snapshot,
+        )
+    } else if leg.ok {
+        op_result(
+            OperationKind::ForcePush,
+            Outcome::Success,
+            leg.exit,
+            format!("Force-pushed {branch} to {target} under the lease."),
+            None,
+            snapshot,
+        )
+    } else {
+        op_result(
+            OperationKind::ForcePush,
+            Outcome::Failed,
+            leg.exit,
+            "git push --force-with-lease reported a failure; the remote kept its history.".into(),
+            Some(push_failure_line(&leg.stderr)),
+            snapshot,
+        )
+    })
 }
 
 /// Binds (or clears) the upstream of one local branch. This only rewrites
@@ -1712,7 +2463,7 @@ mod tests {
         // Measured on Git 2.53: with branch.main.remote pointing at a remote
         // that is not configured, for-each-ref elides %(upstream) entirely,
         // so guit sees "no upstream" rather than a remote name to refuse.
-        // plan_pull's pull_remote_missing branch stays as defense-in-depth
+        // plan_upstream's plan_remote_missing branch stays as defense-in-depth
         // (and `git remote remove` deletes branch.<name>.* config outright).
         git(&work, &["config", "branch.main.remote", "ghost"]);
         git(&work, &["config", "branch.main.merge", "refs/heads/main"]);
@@ -1789,7 +2540,7 @@ mod tests {
         // bytes makes for-each-ref elide %(upstream), so guit reports
         // "no upstream" instead of guessing a lossy target. The snapshot
         // that pull_env builds already proves refs::list survives the raw
-        // tracking ref; plan_pull's upstream_not_addressable branch stays
+        // tracking ref; plan_upstream's upstream_not_addressable branch stays
         // as defense-in-depth.
         let status = std::process::Command::new("git")
             .arg("-C")
@@ -1856,5 +2607,495 @@ mod tests {
         assert!(serde_json::from_str::<PullStrategy>(r#""DEFAULT""#).is_err());
         assert!(serde_json::from_str::<PullStrategy>("42").is_err());
         assert!(serde_json::from_str::<PullStrategy>(r#"{"nope":null}"#).is_err());
+    }
+
+    /// Publishes `feature` to the shared bare with raw Git, so the remote-
+    /// side fixtures of the delete tests never depend on the code they test.
+    fn push_feature(root: &Path, work: &Path) -> String {
+        git(work, &["checkout", "-q", "-b", "feature"]);
+        commit(work, "feature work");
+        git(work, &["push", "-q", "origin", "feature"]);
+        git(work, &["checkout", "-q", "main"]);
+        read(&root.join("origin.git"), &["rev-parse", "feature"])
+    }
+
+    fn ref_exists(dir: &Path, name: &str) -> bool {
+        branches::run_git(
+            dir,
+            &["rev-parse", "--verify", "--quiet", name],
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .status
+        .success()
+    }
+
+    #[test]
+    fn push_advances_the_bare_and_names_the_target() {
+        let (root, work) = mirrored();
+        commit(&work, "local work");
+        let local_tip = branch_of(&work, "main").oid;
+        let (state, sessions, version) = pull_env(&work);
+        let mut lines: Vec<String> = Vec::new();
+        let result = push(&state, &sessions, version, &mut |_, line| {
+            lines.push(line.to_owned())
+        })
+        .unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert_eq!(result.kind, OperationKind::Push);
+        assert_eq!(result.message, "Pushed main to origin/main.");
+        assert!(result.operation_id > 0, "the wrapper stamps the id");
+        assert_eq!(
+            read(&root.path().join("origin.git"), &["rev-parse", "main"]),
+            local_tip
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("main -> main")),
+            "the progress leg streamed: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn push_non_fast_forward_reports_the_rejection_and_leaves_the_bare() {
+        let (root, work) = mirrored();
+        let (_local, bare_tip) = diverged(root.path(), &work);
+        let (state, sessions, version) = pull_env(&work);
+        let result = push(&state, &sessions, version, &mut |_, _| {}).unwrap();
+        assert_eq!(result.outcome, Outcome::Failed, "{}", result.message);
+        assert!(result.exit_code.is_some(), "Git's refusal code survives");
+        // Measured on Git 2.53: a stale tracking ref earns the "fetch
+        // first" label; a fresh-but-diverged one says "non-fast-forward".
+        let details = result.details.expect("git's verdict survives");
+        assert!(
+            details.contains("[rejected]") && details.contains("fetch first"),
+            "details: {details}"
+        );
+        assert_eq!(
+            read(&root.path().join("origin.git"), &["rev-parse", "main"]),
+            bare_tip,
+            "the refused push moved nothing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_hook_rejection_surfaces_the_remote_verdict() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, work) = mirrored();
+        let bare = root.path().join("origin.git");
+        let hook = bare.join("hooks").join("update");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho \"hook declined to update refs/heads/$1\" >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        commit(&work, "will be declined");
+        let (state, sessions, version) = pull_env(&work);
+        let result = push(&state, &sessions, version, &mut |_, _| {}).unwrap();
+        assert_eq!(result.outcome, Outcome::Failed, "{}", result.message);
+        let details = result.details.expect("the remote's line survives");
+        assert!(details.contains("hook declined"), "details: {details}");
+        assert_eq!(
+            read(&bare, &["rev-parse", "main"]).len(),
+            40,
+            "the hook held the remote tip at the base commit"
+        );
+    }
+
+    #[test]
+    fn publish_first_push_creates_the_branch_binds_upstream_and_streams_progress() {
+        let (root, work) = mirrored();
+        git(&work, &["checkout", "-q", "-b", "feature"]);
+        commit(&work, "feature work");
+        let tip = branch_of(&work, "feature").oid;
+        let (state, sessions, version) = pull_env(&work);
+        let mut lines: Vec<String> = Vec::new();
+        let result = publish(
+            &state,
+            &sessions,
+            version,
+            "origin".into(),
+            &mut |_, line| lines.push(line.to_owned()),
+        )
+        .unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert_eq!(result.kind, OperationKind::Publish);
+        assert_eq!(
+            result.message,
+            "Published feature to origin/feature and set it as the upstream."
+        );
+        assert_eq!(
+            read(&root.path().join("origin.git"), &["rev-parse", "feature"]),
+            tip
+        );
+        assert_eq!(
+            branch_of(&work, "feature").upstream.as_deref(),
+            Some("origin/feature")
+        );
+        assert!(
+            refs::list(&work)
+                .unwrap()
+                .remotes
+                .iter()
+                .any(|seen| seen.name == "origin/feature" && seen.oid == tip),
+            "the push itself created the tracking ref"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("[new branch]") && line.contains("feature -> feature")),
+            "the progress leg streamed: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn publish_refusals_stop_before_git() {
+        let (root, work) = mirrored();
+        let (state, sessions, version) = pull_env(&work);
+        let mut version = {
+            let result = run_publish(&state, &sessions, version, "origin", &mut |_| {}).unwrap();
+            assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
+            assert!(
+                result.message.contains("use Push"),
+                "msg: {}",
+                result.message
+            );
+            assert_eq!(result.exit_code, None, "Git must not have been invoked");
+            result.snapshot.expect("re-read").version
+        };
+        // No upstream, but the remote already visibly has this branch.
+        git(&work, &["branch", "--unset-upstream"]);
+        let result = run_publish(&state, &sessions, version, "origin", &mut |_| {}).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
+        assert!(
+            result
+                .message
+                .contains("already has a origin/main tracking ref"),
+            "msg: {}",
+            result.message
+        );
+        version = result.snapshot.expect("re-read").version;
+        // A remote that is not configured never reaches the push.
+        let result = run_publish(&state, &sessions, version, "ghost", &mut |_| {}).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
+        assert!(
+            result.message.contains("No remote named"),
+            "msg: {}",
+            result.message
+        );
+        version = result.snapshot.expect("re-read").version;
+        // Detached HEAD: no branch to publish.
+        git(&work, &["checkout", "-q", "--detach"]);
+        let result = run_publish(&state, &sessions, version, "origin", &mut |_| {}).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
+        assert!(
+            result.message.contains("No branch is checked out"),
+            "msg: {}",
+            result.message
+        );
+        assert_eq!(
+            read(&root.path().join("origin.git"), &["rev-parse", "main"]).len(),
+            40,
+            "nothing was created on the bare by a refusal"
+        );
+
+        // An unborn repository refuses before any ref is looked for.
+        let solo_root = tempfile::tempdir().unwrap();
+        let solo = solo_root.path().join("solo");
+        std::fs::create_dir(&solo).unwrap();
+        git(&solo, &["init", "-q", "--initial-branch=main"]);
+        git(
+            &solo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &solo_root.path().join("elsewhere.git").to_string_lossy(),
+            ],
+        );
+        let state = WriteState::default();
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, &solo).unwrap();
+        let result = run_publish(&state, &sessions, view.version, "origin", &mut |_| {}).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
+        assert!(
+            result.message.contains("before the first commit"),
+            "msg: {}",
+            result.message
+        );
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[test]
+    fn delete_remote_branch_preview_and_confirm_ride_the_bare() {
+        let (root, work) = mirrored();
+        let tip = push_feature(root.path(), &work);
+        let (state, sessions, version) = pull_env(&work);
+        let preview =
+            preview_delete_remote_branch(&state, &sessions, version, "origin/feature".into())
+                .unwrap();
+        assert_eq!(preview.candidates, vec!["origin/feature".to_string()]);
+        assert_eq!(preview.target_oid.as_deref(), Some(tip.as_str()));
+        let result =
+            run_delete_remote_branch(&state, &sessions, &preview.nonce, &mut |_| {}).unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert_eq!(result.kind, OperationKind::DeleteRemoteBranch);
+        assert_eq!(result.message, "Deleted origin/feature from \"origin\".");
+        assert!(result.snapshot.is_some(), "the confirm re-read Git");
+        assert!(
+            !ref_exists(&root.path().join("origin.git"), "refs/heads/feature"),
+            "the branch is gone from the bare"
+        );
+        assert!(
+            !refs::list(&work)
+                .unwrap()
+                .remotes
+                .iter()
+                .any(|seen| seen.name == "origin/feature"),
+            "push --delete pruned the local tracking ref"
+        );
+        assert!(
+            ref_exists(&work, "refs/heads/feature"),
+            "the local branch survives"
+        );
+    }
+
+    #[test]
+    fn delete_remote_branch_preview_refusals_never_stage_a_ticket() {
+        let (root, work) = mirrored();
+        push_feature(root.path(), &work);
+        let (state, sessions, version) = pull_env(&work);
+        let cases = [
+            ("feature", "remote_ref_missing"),
+            ("origin/never-fetched", "remote_ref_missing"),
+        ];
+        for (target, code) in cases {
+            let error = preview_delete_remote_branch(&state, &sessions, version, target.into())
+                .unwrap_err();
+            assert_eq!(error.code, code, "target {target} gave {:?}", error.code);
+        }
+        // The remote's default-branch marker is a symref, not a branch.
+        git(&work, &["remote", "set-head", "origin", "main"]);
+        let error = preview_delete_remote_branch(&state, &sessions, version, "origin/HEAD".into())
+            .unwrap_err();
+        assert_eq!(error.code, "remote_ref_symref");
+        // A ref whose remote vanished from the config cannot be deleted either.
+        let oid = branch_of(&work, "main").oid;
+        git(
+            &work,
+            &["update-ref", "refs/remotes/ghost/x", &oid.to_string()],
+        );
+        let error =
+            preview_delete_remote_branch(&state, &sessions, version, "ghost/x".into()).unwrap_err();
+        assert_eq!(error.code, "remote_missing");
+        // None of that staged anything: every error returned before the
+        // stage call, so the only live tickets would answer to a nonce the
+        // refused previews never handed out.
+        assert!(ref_exists(
+            &root.path().join("origin.git"),
+            "refs/heads/feature"
+        ));
+    }
+
+    #[test]
+    fn delete_remote_branch_confirm_refuses_drift_then_expiry_on_replay() {
+        let (root, work) = mirrored();
+        push_feature(root.path(), &work);
+        let (state, sessions, version) = pull_env(&work);
+        let first =
+            preview_delete_remote_branch(&state, &sessions, version, "origin/feature".into())
+                .unwrap();
+        // The branch moves on the bare (and the tracking ref follows the
+        // push) between preview and confirm.
+        git(&work, &["checkout", "-q", "feature"]);
+        commit(&work, "more feature");
+        git(&work, &["push", "-q", "origin", "feature"]);
+        git(&work, &["checkout", "-q", "main"]);
+        let drifted =
+            run_delete_remote_branch(&state, &sessions, &first.nonce, &mut |_| {}).unwrap();
+        assert_eq!(drifted.outcome, Outcome::Rejected, "{}", drifted.message);
+        assert!(
+            drifted.message.contains("changed after the preview"),
+            "msg: {}",
+            drifted.message
+        );
+        assert_eq!(drifted.exit_code, None, "Git must not have been invoked");
+        assert!(ref_exists(
+            &root.path().join("origin.git"),
+            "refs/heads/feature"
+        ));
+        // Re-preview, confirm, then replay the consumed nonce.
+        let version = drifted.snapshot.expect("re-read").version;
+        let second =
+            preview_delete_remote_branch(&state, &sessions, version, "origin/feature".into())
+                .unwrap();
+        let done = run_delete_remote_branch(&state, &sessions, &second.nonce, &mut |_| {}).unwrap();
+        assert_eq!(done.outcome, Outcome::Success, "{}", done.message);
+        let replay =
+            run_delete_remote_branch(&state, &sessions, &second.nonce, &mut |_| {}).unwrap();
+        assert_eq!(replay.outcome, Outcome::Rejected, "{}", replay.message);
+        assert!(
+            replay.message.contains("has expired"),
+            "msg: {}",
+            replay.message
+        );
+    }
+
+    #[test]
+    fn force_push_preview_counts_and_confirm_overwrites_under_the_lease() {
+        let (root, work) = mirrored();
+        let (local_tip, bare_tip) = diverged(root.path(), &work);
+        git(&work, &["fetch", "-q", "origin"]);
+        let (state, sessions, version) = pull_env(&work);
+        let preview = preview_force_push(&state, &sessions, version).unwrap();
+        assert_eq!(
+            preview.candidates.len(),
+            2,
+            "rows: {:?}",
+            preview.candidates
+        );
+        assert_eq!(
+            preview.candidates[0],
+            "Overwrites main on \"origin\": 1 remote-only commit(s) become unreachable."
+        );
+        assert!(
+            preview.candidates[1].contains("peer work"),
+            "rows: {:?}",
+            preview.candidates
+        );
+        assert_eq!(preview.target_oid.as_deref(), Some(bare_tip.as_str()));
+        let result = run_force_push(&state, &sessions, &preview.nonce, &mut |_| {}).unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert_eq!(result.kind, OperationKind::ForcePush);
+        assert_eq!(
+            result.message,
+            "Force-pushed main to origin/main under the lease."
+        );
+        assert_eq!(
+            read(&root.path().join("origin.git"), &["rev-parse", "main"]),
+            local_tip
+        );
+    }
+
+    #[test]
+    fn force_push_lease_refuses_a_remote_that_moved_without_a_fetch() {
+        let (root, work) = mirrored();
+        let (_local, bare_tip) = diverged(root.path(), &work);
+        // No fetch: the lease pins the stale tracking ref, so the
+        // confirmation checks pass but Git itself sees the mismatch.
+        let (state, sessions, version) = pull_env(&work);
+        let preview = preview_force_push(&state, &sessions, version).unwrap();
+        assert_eq!(
+            preview.candidates.len(),
+            1,
+            "rows: {:?}",
+            preview.candidates
+        );
+        let result = run_force_push(&state, &sessions, &preview.nonce, &mut |_| {}).unwrap();
+        assert_eq!(result.outcome, Outcome::Failed, "{}", result.message);
+        // Measured on Git 2.53: the lease mismatch label is "stale info".
+        let details = result.details.expect("git's verdict survives");
+        assert!(details.contains("stale info"), "details: {details}");
+        assert_eq!(
+            read(&root.path().join("origin.git"), &["rev-parse", "main"]),
+            bare_tip,
+            "the lease held: nothing was overwritten"
+        );
+    }
+
+    #[test]
+    fn force_push_confirm_refuses_a_moved_branch_then_expiry_on_replay() {
+        let (root, work) = mirrored();
+        let (_local, bare_tip) = diverged(root.path(), &work);
+        git(&work, &["fetch", "-q", "origin"]);
+        let (state, sessions, version) = pull_env(&work);
+        let first = preview_force_push(&state, &sessions, version).unwrap();
+        commit(&work, "extra local work");
+        let drifted = run_force_push(&state, &sessions, &first.nonce, &mut |_| {}).unwrap();
+        assert_eq!(drifted.outcome, Outcome::Rejected, "{}", drifted.message);
+        assert!(
+            drifted.message.contains("changed after the preview"),
+            "msg: {}",
+            drifted.message
+        );
+        assert_eq!(drifted.exit_code, None, "Git must not have been invoked");
+        assert_eq!(
+            read(&root.path().join("origin.git"), &["rev-parse", "main"]),
+            bare_tip
+        );
+        // Re-preview against the newest state, then replay the used nonce.
+        let version = drifted.snapshot.expect("re-read").version;
+        let second = preview_force_push(&state, &sessions, version).unwrap();
+        let done = run_force_push(&state, &sessions, &second.nonce, &mut |_| {}).unwrap();
+        assert_eq!(done.outcome, Outcome::Success, "{}", done.message);
+        assert_eq!(
+            read(&root.path().join("origin.git"), &["rev-parse", "main"]),
+            branch_of(&work, "main").oid
+        );
+        let replay = run_force_push(&state, &sessions, &second.nonce, &mut |_| {}).unwrap();
+        assert_eq!(replay.outcome, Outcome::Rejected, "{}", replay.message);
+        assert!(
+            replay.message.contains("has expired"),
+            "msg: {}",
+            replay.message
+        );
+    }
+
+    #[test]
+    fn force_push_preview_requires_a_fetched_tracking_ref() {
+        let (root, work) = mirrored();
+        // Measured on Git 2.53: after the upstream ref is pruned,
+        // %(upstream) still prints with track [gone], so the plan survives
+        // and the lease has nothing to pin — the preview must say so.
+        git(
+            &root.path().join("origin.git"),
+            &["update-ref", "-d", "refs/heads/main"],
+        );
+        git(&work, &["fetch", "-q", "--prune", "origin"]);
+        let (state, sessions, version) = pull_env(&work);
+        let error = preview_force_push(&state, &sessions, version).unwrap_err();
+        assert_eq!(error.code, "forcepush_no_tracking");
+    }
+
+    #[test]
+    fn stale_version_and_pre_cancel_pushes_never_reach_git_but_still_refresh() {
+        let (_root, work) = mirrored();
+        let (state, sessions, version) = pull_env(&work);
+        let stale = run_push(&state, &sessions, version + 5, &mut |_| {}).unwrap();
+        assert_eq!(stale.outcome, Outcome::Rejected);
+        assert_eq!(stale.exit_code, None);
+        let version = stale.snapshot.expect("re-read").version;
+        let stale = run_publish(&state, &sessions, version + 5, "origin", &mut |_| {}).unwrap();
+        assert_eq!(stale.outcome, Outcome::Rejected);
+        assert_eq!(stale.exit_code, None);
+        let version = stale.snapshot.expect("re-read").version;
+
+        let holder = state.begin().unwrap();
+        state.cancel_flag().store(true, Ordering::SeqCst);
+        let cancelled = run_push(&state, &sessions, version, &mut |_| {}).unwrap();
+        state.finish();
+        let _ = holder;
+        assert_eq!(
+            cancelled.outcome,
+            Outcome::Cancelled,
+            "{}",
+            cancelled.message
+        );
+        assert_eq!(cancelled.exit_code, None);
+        assert_eq!(cancelled.operation_id, 0, "the wrapper stamps the id");
+        assert!(cancelled.message.contains("nothing was pushed"));
+    }
+
+    #[test]
+    fn push_kind_words_are_pinned_on_the_wire() {
+        for (kind, word) in [
+            (OperationKind::Push, "push"),
+            (OperationKind::Publish, "publish"),
+            (OperationKind::DeleteRemoteBranch, "deleteremotebranch"),
+            (OperationKind::ForcePush, "forcepush"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(word));
+        }
     }
 }

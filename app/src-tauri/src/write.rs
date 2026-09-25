@@ -29,9 +29,15 @@ pub enum PreviewKind {
     /// Removing a remote also drops its remote-tracking refs, so the
     /// deletion goes through the same one-time ticket flow; the ticket binds
     /// the name, the fetch URL observed at preview time and the tracking-ref
-    /// set. Force push (M5-04) reuses the oid/secondary slots for the target
-    /// and lease oids.
+    /// set.
     RemoveRemote,
+    /// Deleting a branch on the remote is an irreversible remote write, so
+    /// it rides the same one-time ticket: the name pair plus the tracking
+    /// oid observed at preview time must all still hold at confirm.
+    DeleteRemoteBranch,
+    /// Force push reuses the slots: `paths` is (remote, branch), `oid` the
+    /// local commit the preview computed its overwrite list from and
+    /// `secondary` the lease — the tracking oid `--force-with-lease` pins.
     ForcePush,
 }
 
@@ -207,6 +213,75 @@ impl WriteState {
         Some((ticket.work_root, name, ticket.oid?, tracking))
     }
 
+    /// Ticket for deleting a branch on a remote, bound to the remote name,
+    /// the branch name (which may contain slashes) and the tracking oid
+    /// observed at preview time; the delete refspec must match that oid.
+    pub(crate) fn stage_remote_branch_delete(
+        &self,
+        work_root: PathBuf,
+        remote: String,
+        branch: String,
+        oid: String,
+    ) -> String {
+        self.stage_preview(Preview {
+            work_root,
+            kind: PreviewKind::DeleteRemoteBranch,
+            paths: vec![remote.into_bytes(), branch.into_bytes()],
+            oid: Some(oid),
+            secondary: None,
+            force: false,
+        })
+    }
+
+    pub(crate) fn take_remote_branch_delete(
+        &self,
+        nonce: &str,
+    ) -> Option<(PathBuf, String, String, String)> {
+        let ticket = self.take_preview(nonce, PreviewKind::DeleteRemoteBranch)?;
+        let mut names = ticket.paths.into_iter();
+        let remote = String::from_utf8(names.next()?).ok()?;
+        let branch = String::from_utf8(names.next()?).ok()?;
+        Some((ticket.work_root, remote, branch, ticket.oid?))
+    }
+
+    /// Ticket for a force push: the (remote, branch) target, the local
+    /// commit the overwrite list was computed against, and the lease — the
+    /// tracking oid `--force-with-lease` will pin the remote to.
+    pub(crate) fn stage_force_push(
+        &self,
+        work_root: PathBuf,
+        remote: String,
+        branch: String,
+        local_oid: String,
+        lease_oid: String,
+    ) -> String {
+        self.stage_preview(Preview {
+            work_root,
+            kind: PreviewKind::ForcePush,
+            paths: vec![remote.into_bytes(), branch.into_bytes()],
+            oid: Some(local_oid),
+            secondary: Some(lease_oid),
+            force: false,
+        })
+    }
+
+    pub(crate) fn take_force_push(
+        &self,
+        nonce: &str,
+    ) -> Option<(PathBuf, String, String, String, String)> {
+        let ticket = self.take_preview(nonce, PreviewKind::ForcePush)?;
+        let mut names = ticket.paths.into_iter();
+        let remote = String::from_utf8(names.next()?).ok()?;
+        let branch = String::from_utf8(names.next()?).ok()?;
+        Some((
+            ticket.work_root,
+            remote,
+            branch,
+            ticket.oid?,
+            ticket.secondary?,
+        ))
+    }
+
     pub(crate) fn clear_previews(&self) {
         self.previews.lock().unwrap().clear();
     }
@@ -273,6 +348,10 @@ pub enum OperationKind {
     Fetch,
     SetUpstream,
     Pull,
+    Push,
+    Publish,
+    DeleteRemoteBranch,
+    ForcePush,
 }
 
 impl OperationKind {
@@ -315,6 +394,10 @@ impl OperationKind {
             OperationKind::Fetch => (&[], "Fetched"),
             OperationKind::SetUpstream => (&[], "Upstream set"),
             OperationKind::Pull => (&[], "Pulled"),
+            OperationKind::Push => (&[], "Pushed"),
+            OperationKind::Publish => (&[], "Published"),
+            OperationKind::DeleteRemoteBranch => (&[], "Deleted"),
+            OperationKind::ForcePush => (&[], "Force-pushed"),
         }
     }
 

@@ -1276,6 +1276,123 @@ async fn pull_default(app: tauri::AppHandle) -> Result<network::PullDefault, Pro
 }
 
 #[tauri::command]
+async fn push(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        network::push(
+            &state,
+            &sessions,
+            snapshot_version,
+            &mut |operation_id, line| {
+                let _ = app.emit(
+                    "sync-progress",
+                    serde_json::json!({ "operationId": operation_id, "line": line }),
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn publish(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    remote: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        network::publish(
+            &state,
+            &sessions,
+            snapshot_version,
+            remote,
+            &mut |operation_id, line| {
+                let _ = app.emit(
+                    "sync-progress",
+                    serde_json::json!({ "operationId": operation_id, "line": line }),
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn preview_delete_remote_branch(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    target: String,
+) -> Result<write::PreviewResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        network::preview_delete_remote_branch(&state, &sessions, snapshot_version, target)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn delete_remote_branch(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        network::delete_remote_branch(&state, &sessions, nonce, &mut |operation_id, line| {
+            let _ = app.emit(
+                "sync-progress",
+                serde_json::json!({ "operationId": operation_id, "line": line }),
+            );
+        })
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn preview_force_push(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+) -> Result<write::PreviewResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        network::preview_force_push(&state, &sessions, snapshot_version)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn force_push(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        network::force_push(&state, &sessions, nonce, &mut |operation_id, line| {
+            let _ = app.emit(
+                "sync-progress",
+                serde_json::json!({ "operationId": operation_id, "line": line }),
+            );
+        })
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
 async fn set_upstream(
     app: tauri::AppHandle,
     snapshot_version: u64,
@@ -1374,6 +1491,12 @@ fn main() {
             fetch,
             pull,
             pull_default,
+            push,
+            publish,
+            preview_delete_remote_branch,
+            delete_remote_branch,
+            preview_force_push,
+            force_push,
             set_upstream
         ])
         .run(tauri::generate_context!())

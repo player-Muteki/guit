@@ -117,7 +117,11 @@ type OperationResult = {
     | "removeremote"
     | "fetch"
     | "setupstream"
-    | "pull";
+    | "pull"
+    | "push"
+    | "publish"
+    | "deleteremotebranch"
+    | "forcepush";
   outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted";
   exitCode: number | null;
   message: string;
@@ -298,6 +302,10 @@ app.innerHTML = `
         <option value="rebase">Rebase</option>
       </select>
       <button id="remote-pull" disabled title="Fetch the current branch's upstream, then integrate it per the strategy">Pull</button>
+      <button id="remote-push" disabled title="Send the current branch to its upstream's remote (git push); never forces">Push</button>
+      <select id="publish-remote" aria-label="Publish target remote" disabled title="Remote to create the current branch on"></select>
+      <button id="remote-publish" disabled title="First push of the current branch: creates it on the chosen remote and sets it as the upstream (git push --set-upstream)">Publish</button>
+      <button id="remote-force-push" disabled hidden title="Preview what overwriting the upstream under --force-with-lease would erase on the remote">Preview force push…</button>
     </div>
     <div id="remote-list" class="refs" role="list" aria-label="Remotes">
       <div class="file-row placeholder">Open a repository to list its remotes.</div>
@@ -880,7 +888,7 @@ commitMessage.addEventListener("keydown", (event) => {
 // server nonce that the backend re-checks against a fresh Git read at
 // every step.
 
-type PreviewKindKey = "discard" | "clean" | "branch" | "tag" | "stashDrop" | "stashPop" | "resetHard" | "worktreeRemove" | "remoteRemove";
+type PreviewKindKey = "discard" | "clean" | "branch" | "tag" | "stashDrop" | "stashPop" | "resetHard" | "worktreeRemove" | "remoteRemove" | "remoteBranchDelete" | "forcePush";
 
 const previewCopy: Record<
   PreviewKindKey,
@@ -938,6 +946,18 @@ const previewCopy: Record<
       "Removing this remote deletes its configuration and every remote-tracking ref listed below. Nothing on the remote itself changes; a later fetch can bring the tracking refs back.",
     confirm: "Remove remote",
     cancel: "Keep remote",
+  },
+  remoteBranchDelete: {
+    warning:
+      "Deleting removes this branch on the remote for everyone who pulls from it. Its commits become unreachable on the remote once it garbage-collects; this cannot be undone from guit.",
+    confirm: "Delete remote branch",
+    cancel: "Keep remote branch",
+  },
+  forcePush: {
+    warning:
+      "The lines below are what a force push erases: the remote branch named first is overwritten by the local one, the listed remote-only commits become unreachable on the remote, and anyone who already fetched them must repair their clones. guit pushes under --force-with-lease, so a remote that moved since this preview refuses.",
+    confirm: "Force push",
+    cancel: "Keep remote history",
   },
 };
 
@@ -1036,6 +1056,32 @@ type PendingPreview =
       reset?: undefined;
       worktree?: undefined;
       remote: { name: string };
+    }
+  | {
+      kind: "remoteBranchDelete";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree?: undefined;
+      remote?: undefined;
+      remoteBranch: { target: string; targetOid: string | null };
+    }
+  | {
+      kind: "forcePush";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree?: undefined;
+      remote?: undefined;
+      remoteBranch?: undefined;
     };
 
 let pendingPreview: PendingPreview | null = null;
@@ -1068,7 +1114,9 @@ function renderPreviewPanel(): void {
           ? pending.stash.targetOid
           : pending.kind === "worktreeRemove"
             ? pending.worktree.targetOid
-            : null;
+            : pending.kind === "remoteBranchDelete"
+              ? pending.remoteBranch.targetOid
+              : null;
   previewCandidates.replaceChildren(
     ...pending.names.map((name) => {
       const item = document.createElement("li");
@@ -1155,6 +1203,9 @@ async function renewPreviewPanel(): Promise<void> {
   if (pending.kind === "remoteRemove") {
     request.name = pending.remote.name;
   }
+  if (pending.kind === "remoteBranchDelete") {
+    request.target = pending.remoteBranch.target;
+  }
   previewRenewing = true;
   try {
     const command =
@@ -1172,7 +1223,11 @@ async function renewPreviewPanel(): Promise<void> {
                   ? "preview_stash_pop"
                   : pending.kind === "worktreeRemove"
                     ? "preview_remove_worktree"
-                    : "preview_remove_remote";
+                    : pending.kind === "remoteBranchDelete"
+                      ? "preview_delete_remote_branch"
+                      : pending.kind === "forcePush"
+                        ? "preview_force_push"
+                        : "preview_remove_remote";
     const preview = await invoke<PreviewResult>(command, request);
     pendingPreview =
       pending.kind === "branch"
@@ -1207,7 +1262,18 @@ async function renewPreviewPanel(): Promise<void> {
                   nonce: preview.nonce,
                   worktree: { ...pending.worktree, targetOid: preview.targetOid },
                 }
-              : { ...pending, names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
+              : pending.kind === "remoteBranchDelete"
+                ? {
+                    ...pending,
+                    names: preview.candidates,
+                    dropped: preview.dropped,
+                    nonce: preview.nonce,
+                    remoteBranch: {
+                      ...pending.remoteBranch,
+                      targetOid: preview.targetOid,
+                    },
+                  }
+                : { ...pending, names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
     // The preview re-read Git and published a newer version; adopting it
     // would re-enter this function, which the flag above keeps suppressed.
     applySnapshot(preview.snapshot);
@@ -1252,7 +1318,19 @@ async function confirmPreview(): Promise<void> {
                   ? "Removing worktree…"
                   : kind === "remoteRemove"
                     ? "Removing remote…"
-                    : "Deleting tag…";
+                    : kind === "remoteBranchDelete"
+                      ? "Deleting remote branch…"
+                      : kind === "forcePush"
+                        ? "Force-pushing…"
+                        : "Deleting tag…";
+  // The two remote-writing confirms ride the same streamed push lane as
+  // fetch and pull; the local ones keep the static status text.
+  let unlisten: (() => void) | undefined;
+  if (kind === "remoteBranchDelete" || kind === "forcePush") {
+    unlisten = await listen<SyncProgress>("sync-progress", ({ payload }) => {
+      writeStatus.textContent = payload.line;
+    });
+  }
   try {
     const result = await invoke<OperationResult>(
       kind === "discard"
@@ -1271,7 +1349,11 @@ async function confirmPreview(): Promise<void> {
                     ? "remove_worktree"
                     : kind === "remoteRemove"
                       ? "remove_remote"
-                      : "delete_tag",
+                      : kind === "remoteBranchDelete"
+                        ? "delete_remote_branch"
+                        : kind === "forcePush"
+                          ? "force_push"
+                          : "delete_tag",
       { nonce },
     );
     // Consume the panel before applying the snapshot so the version guard
@@ -1292,10 +1374,16 @@ async function confirmPreview(): Promise<void> {
     ) {
       offerBranchForceDelete(branchName);
     }
+    // A completed force push leaves no pending danger behind: the entry
+    // appears again only after the next rejected push.
+    if (kind === "forcePush" && result.outcome === "success") {
+      forcePushPreviewButton.hidden = true;
+    }
   } catch (error) {
     showError(error);
     writeStatus.textContent = "The operation did not run.";
   } finally {
+    unlisten?.();
     writeRunning = false;
     syncCommitControls();
     renderFileRows();
@@ -2114,7 +2202,20 @@ function renderRefs(listing: RefListing): void {
   rows.push(heading(`Remote branches (${listing.remotes.length})`));
   for (const remote of listing.remotes) {
     const meta = remote.symref ? `symref → ${remote.symref}` : remote.oid.slice(0, 8);
-    rows.push(row("", remote.name, meta, remote.addressable));
+    const el = row("", remote.name, meta, remote.addressable);
+    // Deletable targets are real remote branches only: the symbolic
+    // default-branch marker and irreversibly named refs stay read-only.
+    if (remote.addressable && remote.symref === null) {
+      el.append(
+        refRowButton(
+          "Delete…",
+          `Delete ${remote.name} on its remote`,
+          () => void requestRemoteBranchDelete(remote.name),
+          true,
+        ),
+      );
+    }
+    rows.push(el);
   }
   rows.push(heading(`Tags (${listing.tags.length})`));
   for (const tag of listing.tags) {
@@ -3235,6 +3336,10 @@ const remoteAddButton = document.querySelector<HTMLButtonElement>("#remote-add")
 const remoteFetchAllButton = document.querySelector<HTMLButtonElement>("#remote-fetch-all")!;
 const pullStrategySelect = document.querySelector<HTMLSelectElement>("#pull-strategy")!;
 const remotePullButton = document.querySelector<HTMLButtonElement>("#remote-pull")!;
+const remotePushButton = document.querySelector<HTMLButtonElement>("#remote-push")!;
+const publishRemoteSelect = document.querySelector<HTMLSelectElement>("#publish-remote")!;
+const remotePublishButton = document.querySelector<HTMLButtonElement>("#remote-publish")!;
+const forcePushPreviewButton = document.querySelector<HTMLButtonElement>("#remote-force-push")!;
 const remoteListElement = document.querySelector<HTMLElement>("#remote-list")!;
 const remoteStatus = document.querySelector<HTMLElement>("#remote-status")!;
 
@@ -3249,6 +3354,8 @@ function remotePlaceholder(message: string): void {
   remoteStatus.textContent = "";
   pullStrategySelect.options[0].textContent = "Git default";
   pullStrategySelect.options[0].title = "";
+  renderPublishTargets([]);
+  forcePushPreviewButton.hidden = true;
   const row = document.createElement("div");
   row.className = "file-row placeholder";
   row.textContent = message;
@@ -3287,6 +3394,7 @@ async function loadRemotes(): Promise<void> {
 
 function renderRemotes(entries: RemoteView[]): void {
   remoteEntries = entries;
+  renderPublishTargets(entries);
   if (entries.length === 0) {
     const row = document.createElement("div");
     row.className = "file-row placeholder";
@@ -3488,6 +3596,124 @@ async function runPull(): Promise<void> {
   }
 }
 
+// Publish targets are exactly the losslessly addressable remotes; the
+// backend re-checks the name against its own `remote list` before Git runs.
+function renderPublishTargets(entries: RemoteView[]): void {
+  const previous = publishRemoteSelect.value;
+  const names = entries.filter((entry) => entry.addressable).map((entry) => entry.name);
+  publishRemoteSelect.replaceChildren(
+    ...names.map((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      return option;
+    }),
+  );
+  if (names.includes(previous)) publishRemoteSelect.value = previous;
+}
+
+// Push names nothing: the backend derives branch, remote and target from a
+// fresh listing, and never forces. The one-time force-push preview appears
+// only after Git itself refused an update, and any newer push (or a
+// session change) hides it again.
+async function runPush(): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  forcePushPreviewButton.hidden = true;
+  writeRunning = true;
+  syncCommitControls();
+  renderRemotes(remoteEntries);
+  remoteStatus.textContent = "Pushing…";
+  let unlisten: (() => void) | undefined;
+  try {
+    unlisten = await listen<SyncProgress>("sync-progress", ({ payload }) => {
+      remoteStatus.textContent = payload.line;
+    });
+    const result = await invoke<OperationResult>("push", {
+      snapshotVersion: currentSnapshot.version,
+    });
+    applySnapshot(result.snapshot);
+    remoteStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+    if (
+      result.outcome === "failed" &&
+      (result.details?.includes("[rejected]") ||
+        result.details?.includes("remote rejected"))
+    ) {
+      forcePushPreviewButton.hidden = false;
+    }
+  } catch (error) {
+    showError(error);
+    remoteStatus.textContent = "The push did not run.";
+  } finally {
+    unlisten?.();
+    writeRunning = false;
+    syncCommitControls();
+    renderRemotes(remoteEntries);
+  }
+}
+
+// Publish is the first push of a branch: it demands a remote picked from
+// the listing and a branch without an upstream, and the backend refuses
+// both mistakes instead of silently re-pointing a binding.
+async function runPublish(): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  const remote = publishRemoteSelect.value;
+  if (remote === "") {
+    remoteStatus.textContent = "Add an addressable remote before publishing.";
+    return;
+  }
+  writeRunning = true;
+  syncCommitControls();
+  renderRemotes(remoteEntries);
+  remoteStatus.textContent = `Publishing to ${remote}…`;
+  let unlisten: (() => void) | undefined;
+  try {
+    unlisten = await listen<SyncProgress>("sync-progress", ({ payload }) => {
+      remoteStatus.textContent = payload.line;
+    });
+    const result = await invoke<OperationResult>("publish", {
+      snapshotVersion: currentSnapshot.version,
+      remote,
+    });
+    applySnapshot(result.snapshot);
+    remoteStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+  } catch (error) {
+    showError(error);
+    remoteStatus.textContent = "The publish did not run.";
+  } finally {
+    unlisten?.();
+    writeRunning = false;
+    syncCommitControls();
+    renderRemotes(remoteEntries);
+  }
+}
+
+async function requestForcePushPreview(): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  remoteStatus.textContent = "Checking what a force push would erase on the remote…";
+  try {
+    const preview = await invoke<PreviewResult>("preview_force_push", {
+      snapshotVersion: currentSnapshot.version,
+    });
+    applySnapshot(preview.snapshot);
+    pendingPreview = {
+      kind: "forcePush",
+      names: preview.candidates,
+      dropped: preview.dropped,
+      nonce: preview.nonce,
+    };
+    renderPreviewPanel();
+    previewConfirmButton.focus();
+  } catch (error) {
+    showError(error);
+    remoteStatus.textContent =
+      "The force push was refused before anything changed.";
+  }
+}
+
 function runRemoteSetUrl(name: string, push: boolean): void {
   const url = remoteUrlInput.value.trim();
   if (url === "") {
@@ -3526,11 +3752,39 @@ async function requestRemoteRemove(name: string): Promise<void> {
   }
 }
 
+async function requestRemoteBranchDelete(target: string): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  refStatus.textContent = `Checking what deleting ${target} would remove on the remote…`;
+  try {
+    const preview = await invoke<PreviewResult>("preview_delete_remote_branch", {
+      snapshotVersion: currentSnapshot.version,
+      target,
+    });
+    applySnapshot(preview.snapshot);
+    pendingPreview = {
+      kind: "remoteBranchDelete",
+      names: preview.candidates,
+      dropped: preview.dropped,
+      nonce: preview.nonce,
+      remoteBranch: { target, targetOid: preview.targetOid },
+    };
+    renderPreviewPanel();
+    previewConfirmButton.focus();
+  } catch (error) {
+    showError(error);
+    refStatus.textContent =
+      "The remote branch deletion was refused before anything changed.";
+  }
+}
+
 remoteAddButton.addEventListener("click", addRemote);
 remoteFetchAllButton.addEventListener("click", () =>
   void runFetch("all", "Fetching every remote…"),
 );
 remotePullButton.addEventListener("click", () => void runPull());
+remotePushButton.addEventListener("click", () => void runPush());
+remotePublishButton.addEventListener("click", () => void runPublish());
+forcePushPreviewButton.addEventListener("click", () => void requestForcePushPreview());
 remoteUrlInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -3546,4 +3800,8 @@ function syncRemoteControls(): void {
   remoteFetchAllButton.disabled = locked;
   pullStrategySelect.disabled = locked;
   remotePullButton.disabled = locked;
+  remotePushButton.disabled = locked;
+  publishRemoteSelect.disabled = locked;
+  remotePublishButton.disabled = locked;
+  forcePushPreviewButton.disabled = locked;
 }
