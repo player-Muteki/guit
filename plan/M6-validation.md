@@ -332,6 +332,15 @@ Final-gate sequence executed 2026-09-25 against the committed M6-06 tree
 | `diagnostics-export-check.sh` on final deb | fail=0 (10 assertions incl. zh_CN save chooser) |
 | final rpm payload (`rpm2cpio`) | `usr/bin/guit`, `guit.desktop`, 128x128 icon present |
 | final AppImage smoke (isolated HOME) | empty-state landmark reached; `startup.restore_at 841.7 ms` |
+| final seeded-session smoke (dpkg-x binary, isolated HOME) | 5/5 visible over AT-SPI: Changes row, `Monitor:` line, history ready, branch listed, About-row export line; `startup.restore_at 330.4 ms` |
+
+Completion-audit addendum: the seeded-session smoke above covers the M5
+story spot-check leg (restore → all cards render against a real repository)
+in the read-only lane; write flows stay covered by the Rust suites and the
+documented typing-class manual gates. The forward-roll wording was
+completed to decision 9's full policy (a future newer guit upgrades the old
+file once and backs it up; older guit versions keep refusing and
+preserving) in README and known-limitations.
 
 Performance thresholds were frozen once, from the M6-03 post-fix medians,
 into `plan/07-quality-release.md` §发布性能阈值 with an environment-change

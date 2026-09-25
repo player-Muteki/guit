@@ -68,7 +68,9 @@ messages and file contents are excluded by construction.
 guit's own config files (session, window, recent list) migrate **forward
 only**: a guit that finds a newer `schema_version` than it understands
 refuses to read the file and leaves the bytes untouched, so installing an
-older guit can never rewrite newer state.
+older guit can never rewrite newer state. When a future version introduces
+a newer schema, that newer guit reads the old file, upgrades it once and
+backs the old file up; older versions keep refusing and preserving.
 
 ## Documentation
 

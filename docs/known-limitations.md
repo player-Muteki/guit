@@ -63,7 +63,8 @@ Linux**; "not verified" is stated explicitly where it applies.
 - Configuration files with a future `schema_version` are refused, not
   migrated (no data is ever rewritten by an older guit). Config migration
   is **forward-roll by policy**: only a newer guit ever writes a newer
-  schema; an older one leaves the bytes untouched and says so.
+  schema — upgrading an old file once and backing it up — while an older
+  one refuses to read newer state and leaves the bytes untouched.
 - Bare repositories open for inspection, but the status view is empty: Git
   itself refuses `status` in bare repositories, and guit reports that
   rather than inventing one.
