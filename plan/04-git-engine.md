@@ -54,6 +54,8 @@ Git `clean` 预览与执行之间并非事务。应针对确认的路径集合�
 
 克隆、抓取、拉取、推送的进度来自 Git 的流式输出，UI 显示阶段而非仅一个无法解释的百分比。取消尝试终止 Git 与可识别子进程，随后检查仓库是否留有未完成状态；不能承诺取消等于回滚。平台差异由集成测试覆盖。
 
+Git 2.53 实测（prompt.c `do_askpass`）：Git 把 `GIT_ASKPASS` 当作单程序 argv 直接 exec，形态为 `{GIT_ASKPASS, <prompt>}`，答案从子进程 stdout 读取并截断到首个换行；辅助程序非零退出则回落到 `GIT_TERMINAL_PROMPT` 检查。因此受控 `GIT_ASKPASS` 桥的实现为：`GIT_ASKPASS` 指向 guit 自身可执行文件，另注入 `GUIT_ASKPASS_ADDR`（一次性 unix socket，`$XDG_RUNTIME_DIR` 下 0700 目录、0600 socket）与 `GUIT_ASKPASS_TOKEN`（一次性 nonce）；仅此三变量，其余 `GIT_*` 清空约束不变。guit 启动时拦截两种形态：实测的两参 spawn 形态（需两 `GUIT_` 变量同时在场）与隐藏诊断子命令 `--guit-askpass <prompt>`（同走一条客户端代码，便于测试）。桥只应答引用 http(s) URL 的 `Username for …`/`Password for …`；SSH 私钥口令拒答，ssh-agent 仍是唯一受支持路径。凭据事件只携带类别化材料（kind、scheme+host、裸用户名），秘密仅存内存通道、每次提示 120s 超时、随操作终结即拆除。该桥是 Windows 端的已知缺口：unix socket 传输未实现，非 unix 平台 `Bridge::start` 直接拒绝。
+
 ## 外部工具
 
 文件交给系统关联程序或配置的编辑器；diff 和 merge 优先沿用用户 Git `difftool`/`mergetool` 配置。每种工具先检查配置与可执行性，分清启动失败、工具非零退出和工具成功退出但仓库仍有冲突。外部工具参数模板由结构化参数组成，不通过 shell 展开。返回、窗口获焦和手动刷新均可重新读取状态。

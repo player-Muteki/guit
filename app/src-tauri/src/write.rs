@@ -291,7 +291,7 @@ impl WriteState {
 /// system entropy per instance, so two finishes are 128 bits of unpredictable
 /// data — enough to bind a confirm click to the preview that produced it
 /// without pulling in a cryptography dependency.
-fn new_nonce() -> String {
+pub(crate) fn new_nonce() -> String {
     use std::hash::{BuildHasher, Hasher};
     let first = std::collections::hash_map::RandomState::new()
         .build_hasher()

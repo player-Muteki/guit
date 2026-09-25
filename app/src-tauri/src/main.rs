@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod askpass;
 mod branches;
 mod clone;
 mod extools;
@@ -1214,27 +1215,55 @@ async fn remove_remote(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+/// M5-06: the only interactive entry point for secrets. A bridge exists
+/// exactly as long as the queued operation whose command arrived with
+/// `interactive: true`; non-Unix platforms get the documented refusal
+/// from `askpass::Bridge::start`.
+fn start_askpass_bridge(
+    app: &tauri::AppHandle,
+    interactive: bool,
+) -> Result<Option<askpass::Bridge>, ProbeError> {
+    if !interactive {
+        return Ok(None);
+    }
+    let manager = app.state::<askpass::AskPassManager>();
+    let handle = app.clone();
+    askpass::Bridge::start(
+        &manager,
+        askpass::DEFAULT_TIMEOUT,
+        Box::new(move |payload| {
+            let _ = handle.emit("askpass-request", payload);
+        }),
+    )
+    .map(Some)
+}
+
 #[tauri::command]
 async fn fetch(
     app: tauri::AppHandle,
     snapshot_version: u64,
     target: network::FetchTarget,
+    interactive: bool,
 ) -> Result<write::OperationResult, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<write::WriteState>();
         let sessions = app.state::<session::SessionState>();
-        network::fetch(
+        let bridge = start_askpass_bridge(&app, interactive)?;
+        let result = network::fetch(
             &state,
             &sessions,
             snapshot_version,
             target,
+            bridge.as_ref(),
             &mut |operation_id, line| {
                 let _ = app.emit(
                     "sync-progress",
                     serde_json::json!({ "operationId": operation_id, "line": line }),
                 );
             },
-        )
+        );
+        drop(bridge);
+        result
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -1245,22 +1274,27 @@ async fn pull(
     app: tauri::AppHandle,
     snapshot_version: u64,
     strategy: network::PullStrategy,
+    interactive: bool,
 ) -> Result<write::OperationResult, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<write::WriteState>();
         let sessions = app.state::<session::SessionState>();
-        network::pull(
+        let bridge = start_askpass_bridge(&app, interactive)?;
+        let result = network::pull(
             &state,
             &sessions,
             snapshot_version,
             strategy,
+            bridge.as_ref(),
             &mut |operation_id, line| {
                 let _ = app.emit(
                     "sync-progress",
                     serde_json::json!({ "operationId": operation_id, "line": line }),
                 );
             },
-        )
+        );
+        drop(bridge);
+        result
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -1280,21 +1314,26 @@ async fn pull_default(app: tauri::AppHandle) -> Result<network::PullDefault, Pro
 async fn push(
     app: tauri::AppHandle,
     snapshot_version: u64,
+    interactive: bool,
 ) -> Result<write::OperationResult, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<write::WriteState>();
         let sessions = app.state::<session::SessionState>();
-        network::push(
+        let bridge = start_askpass_bridge(&app, interactive)?;
+        let result = network::push(
             &state,
             &sessions,
             snapshot_version,
+            bridge.as_ref(),
             &mut |operation_id, line| {
                 let _ = app.emit(
                     "sync-progress",
                     serde_json::json!({ "operationId": operation_id, "line": line }),
                 );
             },
-        )
+        );
+        drop(bridge);
+        result
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -1305,22 +1344,27 @@ async fn publish(
     app: tauri::AppHandle,
     snapshot_version: u64,
     remote: String,
+    interactive: bool,
 ) -> Result<write::OperationResult, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<write::WriteState>();
         let sessions = app.state::<session::SessionState>();
-        network::publish(
+        let bridge = start_askpass_bridge(&app, interactive)?;
+        let result = network::publish(
             &state,
             &sessions,
             snapshot_version,
             remote,
+            bridge.as_ref(),
             &mut |operation_id, line| {
                 let _ = app.emit(
                     "sync-progress",
                     serde_json::json!({ "operationId": operation_id, "line": line }),
                 );
             },
-        )
+        );
+        drop(bridge);
+        result
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -1345,16 +1389,26 @@ async fn preview_delete_remote_branch(
 async fn delete_remote_branch(
     app: tauri::AppHandle,
     nonce: String,
+    interactive: bool,
 ) -> Result<write::OperationResult, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<write::WriteState>();
         let sessions = app.state::<session::SessionState>();
-        network::delete_remote_branch(&state, &sessions, nonce, &mut |operation_id, line| {
-            let _ = app.emit(
-                "sync-progress",
-                serde_json::json!({ "operationId": operation_id, "line": line }),
-            );
-        })
+        let bridge = start_askpass_bridge(&app, interactive)?;
+        let result = network::delete_remote_branch(
+            &state,
+            &sessions,
+            nonce,
+            bridge.as_ref(),
+            &mut |operation_id, line| {
+                let _ = app.emit(
+                    "sync-progress",
+                    serde_json::json!({ "operationId": operation_id, "line": line }),
+                );
+            },
+        );
+        drop(bridge);
+        result
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -1378,16 +1432,26 @@ async fn preview_force_push(
 async fn force_push(
     app: tauri::AppHandle,
     nonce: String,
+    interactive: bool,
 ) -> Result<write::OperationResult, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<write::WriteState>();
         let sessions = app.state::<session::SessionState>();
-        network::force_push(&state, &sessions, nonce, &mut |operation_id, line| {
-            let _ = app.emit(
-                "sync-progress",
-                serde_json::json!({ "operationId": operation_id, "line": line }),
-            );
-        })
+        let bridge = start_askpass_bridge(&app, interactive)?;
+        let result = network::force_push(
+            &state,
+            &sessions,
+            nonce,
+            bridge.as_ref(),
+            &mut |operation_id, line| {
+                let _ = app.emit(
+                    "sync-progress",
+                    serde_json::json!({ "operationId": operation_id, "line": line }),
+                );
+            },
+        );
+        drop(bridge);
+        result
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -1409,7 +1473,47 @@ async fn set_upstream(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+/// Routes one askpass dialog answer into the blocked prompt. The secret
+/// ends its journey here: it is never echoed back, stored, or logged, and
+/// a spent prompt honestly reports "expired" rather than pretending.
+#[tauri::command]
+fn submit_askpass(
+    manager: State<'_, askpass::AskPassManager>,
+    operation_id: u64,
+    secret: String,
+) -> Result<(), ProbeError> {
+    if manager.submit(operation_id, secret) {
+        Ok(())
+    } else {
+        Err(ProbeError::new(
+            "askpass_expired",
+            "That credential prompt is no longer open; nothing was stored.",
+        ))
+    }
+}
+
+#[tauri::command]
+async fn credential_status(app: tauri::AppHandle) -> Result<askpass::CredentialView, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        askpass::credential_status(&sessions)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
+    // M5-06: Git spawns this executable as its askpass helper with the
+    // prompt as argv. The helper role must be recognised before any GUI
+    // machinery runs — a second real instance would only confuse the user.
+    #[cfg(unix)]
+    {
+        let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+        if let Some(prompt) = askpass::client_prompt_from_launch(&args, |key| std::env::var_os(key))
+        {
+            std::process::exit(askpass::run_client(&prompt));
+        }
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(ProbeState {
@@ -1421,6 +1525,7 @@ fn main() {
         .manage(clone::CloneState::default())
         .manage(write::WriteState::default())
         .manage(extools::ToolState::default())
+        .manage(askpass::AskPassManager::default())
         .invoke_handler(tauri::generate_handler![
             probe_git,
             probe_external_tools,
@@ -1498,7 +1603,9 @@ fn main() {
             delete_remote_branch,
             preview_force_push,
             force_push,
-            set_upstream
+            set_upstream,
+            submit_askpass,
+            credential_status
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

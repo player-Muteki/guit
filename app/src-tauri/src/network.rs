@@ -17,7 +17,9 @@ use crate::probe::ProbeError;
 use crate::repo;
 use crate::runner;
 use crate::write::{self, OperationKind, OperationResult, Outcome, PreviewResult, WriteState};
-use crate::{branches, history, netclassify, refs, remotes, sequencer, session, submodules};
+use crate::{
+    askpass, branches, history, netclassify, refs, remotes, sequencer, session, submodules,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,12 +46,21 @@ pub(crate) fn fetch(
     sessions: &session::SessionState,
     snapshot_version: u64,
     target: FetchTarget,
+    askpass_bridge: Option<&askpass::Bridge>,
     emit: &mut dyn FnMut(u64, &str),
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_fetch(state, sessions, snapshot_version, target, &mut |line| {
-        emit(operation_id, line)
-    });
+    if let Some(bridge) = askpass_bridge {
+        bridge.attach_operation(operation_id);
+    }
+    let result = run_fetch(
+        state,
+        sessions,
+        snapshot_version,
+        target,
+        askpass_bridge,
+        &mut |line| emit(operation_id, line),
+    );
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -127,6 +138,7 @@ fn sweep_fetch(
     state: &WriteState,
     work_root: &Path,
     names: &[String],
+    askpass_bridge: Option<&askpass::Bridge>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<Sweep, ProbeError> {
     let mut sweep = Sweep {
@@ -141,6 +153,9 @@ fn sweep_fetch(
             break;
         }
         let mut command = repo::user_git_command(work_root);
+        if let Some(bridge) = askpass_bridge {
+            bridge.apply_env(&mut command);
+        }
         command.args(["fetch", "--prune", "--progress", name]);
         let mut buffer: Vec<u8> = Vec::new();
         let mut collect = |_: bool, bytes: &[u8]| {
@@ -187,6 +202,7 @@ fn run_fetch(
     sessions: &session::SessionState,
     snapshot_version: u64,
     target: FetchTarget,
+    askpass_bridge: Option<&askpass::Bridge>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<OperationResult, ProbeError> {
     let broadcast = matches!(target, FetchTarget::All);
@@ -226,7 +242,7 @@ fn run_fetch(
         }
         Ok((work_root, plan)) => {
             let Plan { names, skipped } = plan;
-            let sweep = sweep_fetch(state, &work_root, &names, on_line)?;
+            let sweep = sweep_fetch(state, &work_root, &names, askpass_bridge, on_line)?;
             let skipped_note = if skipped > 0 {
                 format!(" {skipped} remote(s) could not be addressed and were skipped.")
             } else {
@@ -484,12 +500,21 @@ pub(crate) fn pull(
     sessions: &session::SessionState,
     snapshot_version: u64,
     strategy: PullStrategy,
+    askpass_bridge: Option<&askpass::Bridge>,
     emit: &mut dyn FnMut(u64, &str),
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_pull(state, sessions, snapshot_version, strategy, &mut |line| {
-        emit(operation_id, line)
-    });
+    if let Some(bridge) = askpass_bridge {
+        bridge.attach_operation(operation_id);
+    }
+    let result = run_pull(
+        state,
+        sessions,
+        snapshot_version,
+        strategy,
+        askpass_bridge,
+        &mut |line| emit(operation_id, line),
+    );
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -688,6 +713,7 @@ fn run_pull(
     sessions: &session::SessionState,
     snapshot_version: u64,
     strategy: PullStrategy,
+    askpass_bridge: Option<&askpass::Bridge>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<OperationResult, ProbeError> {
     let gates = match sessions.commit_context(snapshot_version) {
@@ -725,6 +751,7 @@ fn run_pull(
                 state,
                 &work_root,
                 std::slice::from_ref(&plan.remote),
+                askpass_bridge,
                 on_line,
             )?;
             if sweep.cancelled {
@@ -833,9 +860,13 @@ fn push_leg(
     state: &WriteState,
     work_root: &Path,
     args: &[&str],
+    askpass_bridge: Option<&askpass::Bridge>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<Leg, ProbeError> {
     let mut command = repo::user_git_command(work_root);
+    if let Some(bridge) = askpass_bridge {
+        bridge.apply_env(&mut command);
+    }
     command.arg("push");
     command.args(args);
     let mut buffer: Vec<u8> = Vec::new();
@@ -926,12 +957,20 @@ pub(crate) fn push(
     state: &WriteState,
     sessions: &session::SessionState,
     snapshot_version: u64,
+    askpass_bridge: Option<&askpass::Bridge>,
     emit: &mut dyn FnMut(u64, &str),
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_push(state, sessions, snapshot_version, &mut |line| {
-        emit(operation_id, line)
-    });
+    if let Some(bridge) = askpass_bridge {
+        bridge.attach_operation(operation_id);
+    }
+    let result = run_push(
+        state,
+        sessions,
+        snapshot_version,
+        askpass_bridge,
+        &mut |line| emit(operation_id, line),
+    );
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -947,6 +986,7 @@ fn run_push(
     state: &WriteState,
     sessions: &session::SessionState,
     snapshot_version: u64,
+    askpass_bridge: Option<&askpass::Bridge>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<OperationResult, ProbeError> {
     let gates = match sessions.commit_context(snapshot_version) {
@@ -987,6 +1027,7 @@ fn run_push(
         state,
         &work_root,
         &["--progress", &plan.remote, &plan.branch],
+        askpass_bridge,
         on_line,
     )?;
     let snapshot = session::refresh(sessions)?;
@@ -1027,12 +1068,21 @@ pub(crate) fn publish(
     sessions: &session::SessionState,
     snapshot_version: u64,
     remote: String,
+    askpass_bridge: Option<&askpass::Bridge>,
     emit: &mut dyn FnMut(u64, &str),
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_publish(state, sessions, snapshot_version, &remote, &mut |line| {
-        emit(operation_id, line)
-    });
+    if let Some(bridge) = askpass_bridge {
+        bridge.attach_operation(operation_id);
+    }
+    let result = run_publish(
+        state,
+        sessions,
+        snapshot_version,
+        &remote,
+        askpass_bridge,
+        &mut |line| emit(operation_id, line),
+    );
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -1105,6 +1155,7 @@ fn run_publish(
     sessions: &session::SessionState,
     snapshot_version: u64,
     remote: &str,
+    askpass_bridge: Option<&askpass::Bridge>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<OperationResult, ProbeError> {
     let gates = match sessions.commit_context(snapshot_version) {
@@ -1145,6 +1196,7 @@ fn run_publish(
         state,
         &work_root,
         &["--set-upstream", "--progress", remote, &branch],
+        askpass_bridge,
         on_line,
     )?;
     let snapshot = session::refresh(sessions)?;
@@ -1243,10 +1295,14 @@ pub(crate) fn delete_remote_branch(
     state: &WriteState,
     sessions: &session::SessionState,
     nonce: String,
+    askpass_bridge: Option<&askpass::Bridge>,
     emit: &mut dyn FnMut(u64, &str),
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_delete_remote_branch(state, sessions, &nonce, &mut |line| {
+    if let Some(bridge) = askpass_bridge {
+        bridge.attach_operation(operation_id);
+    }
+    let result = run_delete_remote_branch(state, sessions, &nonce, askpass_bridge, &mut |line| {
         emit(operation_id, line)
     });
     state.finish();
@@ -1264,6 +1320,7 @@ fn run_delete_remote_branch(
     state: &WriteState,
     sessions: &session::SessionState,
     nonce: &str,
+    askpass_bridge: Option<&askpass::Bridge>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<OperationResult, ProbeError> {
     let Some((dir, remote, branch, oid)) = state.take_remote_branch_delete(nonce) else {
@@ -1316,6 +1373,7 @@ fn run_delete_remote_branch(
         state,
         &dir,
         &["--progress", &remote, "--delete", &refspec],
+        askpass_bridge,
         on_line,
     )?;
     let snapshot = session::refresh(sessions)?;
@@ -1455,10 +1513,14 @@ pub(crate) fn force_push(
     state: &WriteState,
     sessions: &session::SessionState,
     nonce: String,
+    askpass_bridge: Option<&askpass::Bridge>,
     emit: &mut dyn FnMut(u64, &str),
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_force_push(state, sessions, &nonce, &mut |line| {
+    if let Some(bridge) = askpass_bridge {
+        bridge.attach_operation(operation_id);
+    }
+    let result = run_force_push(state, sessions, &nonce, askpass_bridge, &mut |line| {
         emit(operation_id, line)
     });
     state.finish();
@@ -1476,6 +1538,7 @@ fn run_force_push(
     state: &WriteState,
     sessions: &session::SessionState,
     nonce: &str,
+    askpass_bridge: Option<&askpass::Bridge>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<OperationResult, ProbeError> {
     let Some((dir, remote, branch, local_oid, lease)) = state.take_force_push(nonce) else {
@@ -1539,6 +1602,7 @@ fn run_force_push(
         state,
         &dir,
         &["--progress", &lease_arg, &remote, &branch],
+        askpass_bridge,
         on_line,
     )?;
     let snapshot = session::refresh(sessions)?;
@@ -1898,6 +1962,7 @@ mod tests {
             &sessions,
             view.version,
             FetchTarget::Remote("origin".into()),
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -1936,6 +2001,7 @@ mod tests {
             &sessions,
             view.version,
             FetchTarget::Remote("origin".into()),
+            None,
             &mut |line| lines.push(line.to_owned()),
         )
         .unwrap();
@@ -1966,7 +2032,7 @@ mod tests {
             (FetchTarget::Remote("-x".into()), "name"),
             (FetchTarget::Remote("or igin".into()), "name"),
         ] {
-            let result = run_fetch(&state, &sessions, version, target, &mut |_| {}).unwrap();
+            let result = run_fetch(&state, &sessions, version, target, None, &mut |_| {}).unwrap();
             assert_eq!(result.outcome, Outcome::Rejected, "msg: {}", result.message);
             assert!(result.message.contains(want), "msg: {}", result.message);
             assert_eq!(result.exit_code, None, "Git must not have been invoked");
@@ -2002,6 +2068,7 @@ mod tests {
             &sessions,
             view.version,
             FetchTarget::All,
+            None,
             &mut |_| {},
         )
         .unwrap();
@@ -2043,6 +2110,7 @@ mod tests {
             &sessions,
             view.version,
             FetchTarget::All,
+            None,
             &mut |_| {},
         )
         .unwrap();
@@ -2064,6 +2132,7 @@ mod tests {
             &sessions,
             view.version,
             FetchTarget::Remote("origin".into()),
+            None,
             &mut |_| {},
         )
         .unwrap();
@@ -2260,6 +2329,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2289,6 +2359,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2312,6 +2383,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Rebase,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2343,6 +2415,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::FfOnly,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2380,6 +2453,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2400,6 +2474,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2418,6 +2493,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2443,6 +2519,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2463,6 +2540,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2498,6 +2576,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2531,6 +2610,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2553,6 +2633,7 @@ mod tests {
             &sessions,
             version + 5,
             PullStrategy::Default,
+            None,
             &mut |_| {},
         )
         .unwrap();
@@ -2568,6 +2649,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_| {},
         )
         .unwrap();
@@ -2635,6 +2717,7 @@ mod tests {
             &sessions,
             version,
             PullStrategy::Default,
+            None,
             &mut |_| {},
         )
         .unwrap();
@@ -2695,7 +2778,7 @@ mod tests {
         let local_tip = branch_of(&work, "main").oid;
         let (state, sessions, version) = pull_env(&work);
         let mut lines: Vec<String> = Vec::new();
-        let result = push(&state, &sessions, version, &mut |_, line| {
+        let result = push(&state, &sessions, version, None, &mut |_, line| {
             lines.push(line.to_owned())
         })
         .unwrap();
@@ -2718,7 +2801,7 @@ mod tests {
         let (root, work) = mirrored();
         let (_local, bare_tip) = diverged(root.path(), &work);
         let (state, sessions, version) = pull_env(&work);
-        let result = push(&state, &sessions, version, &mut |_, _| {}).unwrap();
+        let result = push(&state, &sessions, version, None, &mut |_, _| {}).unwrap();
         assert_eq!(result.outcome, Outcome::Failed, "{}", result.message);
         assert!(result.exit_code.is_some(), "Git's refusal code survives");
         // Measured on Git 2.53: a stale tracking ref earns the "fetch
@@ -2765,7 +2848,7 @@ mod tests {
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         commit(&work, "will be declined");
         let (state, sessions, version) = pull_env(&work);
-        let result = push(&state, &sessions, version, &mut |_, _| {}).unwrap();
+        let result = push(&state, &sessions, version, None, &mut |_, _| {}).unwrap();
         assert_eq!(result.outcome, Outcome::Failed, "{}", result.message);
         let details = result.details.expect("the remote's line survives");
         assert!(details.contains("hook declined"), "details: {details}");
@@ -2834,6 +2917,7 @@ mod tests {
             &sessions,
             version,
             FetchTarget::Remote("origin".into()),
+            None,
             &mut |_, _| {},
         )
         .unwrap();
@@ -2867,6 +2951,7 @@ mod tests {
             &sessions,
             version,
             "origin".into(),
+            None,
             &mut |_, line| lines.push(line.to_owned()),
         )
         .unwrap();
@@ -2905,7 +2990,8 @@ mod tests {
         let (root, work) = mirrored();
         let (state, sessions, version) = pull_env(&work);
         let mut version = {
-            let result = run_publish(&state, &sessions, version, "origin", &mut |_| {}).unwrap();
+            let result =
+                run_publish(&state, &sessions, version, "origin", None, &mut |_| {}).unwrap();
             assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
             assert!(
                 result.message.contains("use Push"),
@@ -2917,7 +3003,7 @@ mod tests {
         };
         // No upstream, but the remote already visibly has this branch.
         git(&work, &["branch", "--unset-upstream"]);
-        let result = run_publish(&state, &sessions, version, "origin", &mut |_| {}).unwrap();
+        let result = run_publish(&state, &sessions, version, "origin", None, &mut |_| {}).unwrap();
         assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
         assert!(
             result
@@ -2928,7 +3014,7 @@ mod tests {
         );
         version = result.snapshot.expect("re-read").version;
         // A remote that is not configured never reaches the push.
-        let result = run_publish(&state, &sessions, version, "ghost", &mut |_| {}).unwrap();
+        let result = run_publish(&state, &sessions, version, "ghost", None, &mut |_| {}).unwrap();
         assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
         assert!(
             result.message.contains("No remote named"),
@@ -2938,7 +3024,7 @@ mod tests {
         version = result.snapshot.expect("re-read").version;
         // Detached HEAD: no branch to publish.
         git(&work, &["checkout", "-q", "--detach"]);
-        let result = run_publish(&state, &sessions, version, "origin", &mut |_| {}).unwrap();
+        let result = run_publish(&state, &sessions, version, "origin", None, &mut |_| {}).unwrap();
         assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
         assert!(
             result.message.contains("No branch is checked out"),
@@ -2968,7 +3054,8 @@ mod tests {
         let state = WriteState::default();
         let sessions = session::SessionState::default();
         let view = session::open(&sessions, &solo).unwrap();
-        let result = run_publish(&state, &sessions, view.version, "origin", &mut |_| {}).unwrap();
+        let result =
+            run_publish(&state, &sessions, view.version, "origin", None, &mut |_| {}).unwrap();
         assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
         assert!(
             result.message.contains("before the first commit"),
@@ -2989,7 +3076,7 @@ mod tests {
         assert_eq!(preview.candidates, vec!["origin/feature".to_string()]);
         assert_eq!(preview.target_oid.as_deref(), Some(tip.as_str()));
         let result =
-            run_delete_remote_branch(&state, &sessions, &preview.nonce, &mut |_| {}).unwrap();
+            run_delete_remote_branch(&state, &sessions, &preview.nonce, None, &mut |_| {}).unwrap();
         assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
         assert_eq!(result.kind, OperationKind::DeleteRemoteBranch);
         assert_eq!(result.message, "Deleted origin/feature from \"origin\".");
@@ -3064,7 +3151,7 @@ mod tests {
         git(&work, &["push", "-q", "origin", "feature"]);
         git(&work, &["checkout", "-q", "main"]);
         let drifted =
-            run_delete_remote_branch(&state, &sessions, &first.nonce, &mut |_| {}).unwrap();
+            run_delete_remote_branch(&state, &sessions, &first.nonce, None, &mut |_| {}).unwrap();
         assert_eq!(drifted.outcome, Outcome::Rejected, "{}", drifted.message);
         assert!(
             drifted.message.contains("changed after the preview"),
@@ -3081,10 +3168,11 @@ mod tests {
         let second =
             preview_delete_remote_branch(&state, &sessions, version, "origin/feature".into())
                 .unwrap();
-        let done = run_delete_remote_branch(&state, &sessions, &second.nonce, &mut |_| {}).unwrap();
+        let done =
+            run_delete_remote_branch(&state, &sessions, &second.nonce, None, &mut |_| {}).unwrap();
         assert_eq!(done.outcome, Outcome::Success, "{}", done.message);
         let replay =
-            run_delete_remote_branch(&state, &sessions, &second.nonce, &mut |_| {}).unwrap();
+            run_delete_remote_branch(&state, &sessions, &second.nonce, None, &mut |_| {}).unwrap();
         assert_eq!(replay.outcome, Outcome::Rejected, "{}", replay.message);
         assert!(
             replay.message.contains("has expired"),
@@ -3116,7 +3204,7 @@ mod tests {
             preview.candidates
         );
         assert_eq!(preview.target_oid.as_deref(), Some(bare_tip.as_str()));
-        let result = run_force_push(&state, &sessions, &preview.nonce, &mut |_| {}).unwrap();
+        let result = run_force_push(&state, &sessions, &preview.nonce, None, &mut |_| {}).unwrap();
         assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
         assert_eq!(result.kind, OperationKind::ForcePush);
         assert_eq!(
@@ -3143,7 +3231,7 @@ mod tests {
             "rows: {:?}",
             preview.candidates
         );
-        let result = run_force_push(&state, &sessions, &preview.nonce, &mut |_| {}).unwrap();
+        let result = run_force_push(&state, &sessions, &preview.nonce, None, &mut |_| {}).unwrap();
         assert_eq!(result.outcome, Outcome::Failed, "{}", result.message);
         // Measured on Git 2.53: the lease mismatch label is "stale info".
         let details = result.details.expect("git's verdict survives");
@@ -3172,7 +3260,7 @@ mod tests {
         let (state, sessions, version) = pull_env(&work);
         let first = preview_force_push(&state, &sessions, version).unwrap();
         commit(&work, "extra local work");
-        let drifted = run_force_push(&state, &sessions, &first.nonce, &mut |_| {}).unwrap();
+        let drifted = run_force_push(&state, &sessions, &first.nonce, None, &mut |_| {}).unwrap();
         assert_eq!(drifted.outcome, Outcome::Rejected, "{}", drifted.message);
         assert!(
             drifted.message.contains("changed after the preview"),
@@ -3187,13 +3275,13 @@ mod tests {
         // Re-preview against the newest state, then replay the used nonce.
         let version = drifted.snapshot.expect("re-read").version;
         let second = preview_force_push(&state, &sessions, version).unwrap();
-        let done = run_force_push(&state, &sessions, &second.nonce, &mut |_| {}).unwrap();
+        let done = run_force_push(&state, &sessions, &second.nonce, None, &mut |_| {}).unwrap();
         assert_eq!(done.outcome, Outcome::Success, "{}", done.message);
         assert_eq!(
             read(&root.path().join("origin.git"), &["rev-parse", "main"]),
             branch_of(&work, "main").oid
         );
-        let replay = run_force_push(&state, &sessions, &second.nonce, &mut |_| {}).unwrap();
+        let replay = run_force_push(&state, &sessions, &second.nonce, None, &mut |_| {}).unwrap();
         assert_eq!(replay.outcome, Outcome::Rejected, "{}", replay.message);
         assert!(
             replay.message.contains("has expired"),
@@ -3222,18 +3310,19 @@ mod tests {
     fn stale_version_and_pre_cancel_pushes_never_reach_git_but_still_refresh() {
         let (_root, work) = mirrored();
         let (state, sessions, version) = pull_env(&work);
-        let stale = run_push(&state, &sessions, version + 5, &mut |_| {}).unwrap();
+        let stale = run_push(&state, &sessions, version + 5, None, &mut |_| {}).unwrap();
         assert_eq!(stale.outcome, Outcome::Rejected);
         assert_eq!(stale.exit_code, None);
         let version = stale.snapshot.expect("re-read").version;
-        let stale = run_publish(&state, &sessions, version + 5, "origin", &mut |_| {}).unwrap();
+        let stale =
+            run_publish(&state, &sessions, version + 5, "origin", None, &mut |_| {}).unwrap();
         assert_eq!(stale.outcome, Outcome::Rejected);
         assert_eq!(stale.exit_code, None);
         let version = stale.snapshot.expect("re-read").version;
 
         let holder = state.begin().unwrap();
         state.cancel_flag().store(true, Ordering::SeqCst);
-        let cancelled = run_push(&state, &sessions, version, &mut |_| {}).unwrap();
+        let cancelled = run_push(&state, &sessions, version, None, &mut |_| {}).unwrap();
         state.finish();
         let _ = holder;
         assert_eq!(

@@ -322,9 +322,18 @@ app.innerHTML = `
       <select id="publish-remote" aria-label="Publish target remote" disabled title="Remote to create the current branch on"></select>
       <button id="remote-publish" disabled title="First push of the current branch: creates it on the chosen remote and sets it as the upstream (git push --set-upstream)">Publish</button>
       <button id="remote-force-push" disabled hidden title="Preview what overwriting the upstream under --force-with-lease would erase on the remote">Preview force push…</button>
+      <button id="remote-auth-retry" disabled hidden title="Retry this operation once, answering Git's credential prompts in this window">Retry with credentials</button>
     </div>
     <div id="remote-list" class="refs" role="list" aria-label="Remotes">
       <div class="file-row placeholder">Open a repository to list its remotes.</div>
+    </div>
+    <div id="askpass-dialog" class="askpass" hidden role="group" aria-labelledby="askpass-prompt">
+      <p id="askpass-prompt"></p>
+      <input id="askpass-secret" type="text" autocomplete="off" spellcheck="false" aria-label="Credential" />
+      <div class="actions">
+        <button id="askpass-submit">Submit</button>
+        <button id="askpass-cancel">Cancel</button>
+      </div>
     </div>
     <p id="remote-status" role="status"></p>
   </section>
@@ -1314,6 +1323,7 @@ async function confirmPreview(): Promise<void> {
   if (!pendingPreview || writeRunning) return;
   const { kind, nonce } = pendingPreview;
   const branchName = pendingPreview.kind === "branch" ? pendingPreview.branch.name : null;
+  clearCredentialRetry();
   writeRunning = true;
   syncCommitControls();
   renderFileRows();
@@ -1370,7 +1380,9 @@ async function confirmPreview(): Promise<void> {
                         : kind === "forcePush"
                           ? "force_push"
                           : "delete_tag",
-      { nonce },
+      // Every ticket-confirm runs non-interactively; the credential path
+      // exists for the four plain sync commands only.
+      { nonce, interactive: false },
     );
     // Consume the panel before applying the snapshot so the version guard
     // does not schedule a renew for an operation that already ran.
@@ -3363,6 +3375,41 @@ const remotePublishButton = document.querySelector<HTMLButtonElement>("#remote-p
 const forcePushPreviewButton = document.querySelector<HTMLButtonElement>("#remote-force-push")!;
 const remoteListElement = document.querySelector<HTMLElement>("#remote-list")!;
 const remoteStatus = document.querySelector<HTMLElement>("#remote-status")!;
+const authRetryButton = document.querySelector<HTMLButtonElement>("#remote-auth-retry")!;
+const askpassDialog = document.querySelector<HTMLElement>("#askpass-dialog")!;
+const askpassPrompt = document.querySelector<HTMLElement>("#askpass-prompt")!;
+const askpassSecret = document.querySelector<HTMLInputElement>("#askpass-secret")!;
+const askpassSubmitButton = document.querySelector<HTMLButtonElement>("#askpass-submit")!;
+const askpassCancelButton = document.querySelector<HTMLButtonElement>("#askpass-cancel")!;
+
+// The payload of one `askpass-request` event: categorised prompt material
+// only. The Rust side has already stripped everything else and can prove
+// the target survives URL redaction, so displaying it is safe.
+type AskPassRequest = {
+  operationId: number;
+  kind: "username" | "password";
+  target: string;
+  user: string | null;
+};
+
+let askpassPending: AskPassRequest | null = null;
+let authRetryAction: (() => void) | null = null;
+
+function clearCredentialRetry(): void {
+  authRetryAction = null;
+  authRetryButton.hidden = true;
+}
+
+// Git itself decided the failure is about credentials; that is the only
+// moment the explicit credential path appears, and one click spends it.
+function offerCredentialRetry(result: OperationResult, retry: () => void): void {
+  if (result.outcome === "failed" && result.category === "auth") {
+    authRetryAction = retry;
+    authRetryButton.hidden = false;
+  } else {
+    clearCredentialRetry();
+  }
+}
 
 let remoteEntries: RemoteView[] = [];
 let remoteRequestSeq = 0;
@@ -3377,6 +3424,8 @@ function remotePlaceholder(message: string): void {
   pullStrategySelect.options[0].title = "";
   renderPublishTargets([]);
   forcePushPreviewButton.hidden = true;
+  clearCredentialRetry();
+  closeAskpass();
   const row = document.createElement("div");
   row.className = "file-row placeholder";
   row.textContent = message;
@@ -3479,6 +3528,7 @@ async function runRemoteWrite(
   running: string,
 ): Promise<void> {
   if (!currentSnapshot || writeRunning || pendingPreview) return;
+  clearCredentialRetry();
   writeRunning = true;
   syncCommitControls();
   renderRemotes(remoteEntries);
@@ -3533,8 +3583,10 @@ function networkStatusLine(result: OperationResult): string {
 async function runFetch(
   target: "all" | { remote: string },
   running: string,
+  interactive = false,
 ): Promise<void> {
   if (!currentSnapshot || writeRunning || pendingPreview) return;
+  clearCredentialRetry();
   writeRunning = true;
   syncCommitControls();
   renderRemotes(remoteEntries);
@@ -3547,9 +3599,13 @@ async function runFetch(
     const result = await invoke<OperationResult>("fetch", {
       snapshotVersion: currentSnapshot.version,
       target,
+      interactive,
     });
     applySnapshot(result.snapshot);
     remoteStatus.textContent = networkStatusLine(result);
+    offerCredentialRetry(result, () =>
+      void runFetch(target, "Fetching with credentials…", true),
+    );
   } catch (error) {
     showError(error);
     remoteStatus.textContent = "The fetch did not run.";
@@ -3595,13 +3651,14 @@ async function loadPullDefault(): Promise<void> {
 // write while the fetch leg runs. Conflicts arrive as `conflicted` with
 // the banner already showing the sequencer state the snapshot re-read
 // found; the next step belongs to the banner, not to a dialog.
-async function runPull(): Promise<void> {
+async function runPull(interactive = false): Promise<void> {
   if (!currentSnapshot || writeRunning || pendingPreview) return;
   const strategy = pullStrategySelect.value as "default" | "ffonly" | "merge" | "rebase";
+  clearCredentialRetry();
   writeRunning = true;
   syncCommitControls();
   renderRemotes(remoteEntries);
-  remoteStatus.textContent = "Pulling…";
+  remoteStatus.textContent = interactive ? "Pulling with credentials…" : "Pulling…";
   let unlisten: (() => void) | undefined;
   try {
     unlisten = await listen<SyncProgress>("sync-progress", ({ payload }) => {
@@ -3610,9 +3667,11 @@ async function runPull(): Promise<void> {
     const result = await invoke<OperationResult>("pull", {
       snapshotVersion: currentSnapshot.version,
       strategy,
+      interactive,
     });
     applySnapshot(result.snapshot);
     remoteStatus.textContent = networkStatusLine(result);
+    offerCredentialRetry(result, () => void runPull(true));
   } catch (error) {
     showError(error);
     remoteStatus.textContent = "The pull did not run.";
@@ -3644,13 +3703,14 @@ function renderPublishTargets(entries: RemoteView[]): void {
 // fresh listing, and never forces. The one-time force-push preview appears
 // only after Git itself refused an update, and any newer push (or a
 // session change) hides it again.
-async function runPush(): Promise<void> {
+async function runPush(interactive = false): Promise<void> {
   if (!currentSnapshot || writeRunning || pendingPreview) return;
   forcePushPreviewButton.hidden = true;
+  clearCredentialRetry();
   writeRunning = true;
   syncCommitControls();
   renderRemotes(remoteEntries);
-  remoteStatus.textContent = "Pushing…";
+  remoteStatus.textContent = interactive ? "Pushing with credentials…" : "Pushing…";
   let unlisten: (() => void) | undefined;
   try {
     unlisten = await listen<SyncProgress>("sync-progress", ({ payload }) => {
@@ -3658,9 +3718,11 @@ async function runPush(): Promise<void> {
     });
     const result = await invoke<OperationResult>("push", {
       snapshotVersion: currentSnapshot.version,
+      interactive,
     });
     applySnapshot(result.snapshot);
     remoteStatus.textContent = networkStatusLine(result);
+    offerCredentialRetry(result, () => void runPush(true));
     if (
       result.outcome === "failed" &&
       (result.details?.includes("[rejected]") ||
@@ -3682,17 +3744,20 @@ async function runPush(): Promise<void> {
 // Publish is the first push of a branch: it demands a remote picked from
 // the listing and a branch without an upstream, and the backend refuses
 // both mistakes instead of silently re-pointing a binding.
-async function runPublish(): Promise<void> {
+async function runPublish(interactive = false): Promise<void> {
   if (!currentSnapshot || writeRunning || pendingPreview) return;
   const remote = publishRemoteSelect.value;
   if (remote === "") {
     remoteStatus.textContent = "Add an addressable remote before publishing.";
     return;
   }
+  clearCredentialRetry();
   writeRunning = true;
   syncCommitControls();
   renderRemotes(remoteEntries);
-  remoteStatus.textContent = `Publishing to ${remote}…`;
+  remoteStatus.textContent = interactive
+    ? `Publishing to ${remote} with credentials…`
+    : `Publishing to ${remote}…`;
   let unlisten: (() => void) | undefined;
   try {
     unlisten = await listen<SyncProgress>("sync-progress", ({ payload }) => {
@@ -3701,9 +3766,11 @@ async function runPublish(): Promise<void> {
     const result = await invoke<OperationResult>("publish", {
       snapshotVersion: currentSnapshot.version,
       remote,
+      interactive,
     });
     applySnapshot(result.snapshot);
     remoteStatus.textContent = networkStatusLine(result);
+    offerCredentialRetry(result, () => void runPublish(true));
   } catch (error) {
     showError(error);
     remoteStatus.textContent = "The publish did not run.";
@@ -3815,6 +3882,50 @@ remoteUrlInput.addEventListener("keydown", (event) => {
     addRemote();
   }
 });
+authRetryButton.addEventListener("click", () => {
+  const action = authRetryAction;
+  clearCredentialRetry();
+  action?.();
+});
+
+// The askpass dialog is the whole credential UI: Git's categorised prompt
+// arrived as {operationId, kind, target, user}, the answer goes straight
+// into submit_askpass and lives nowhere else. Cancel just closes it — the
+// blocked prompt then expires on the Rust side and Git fails on its own.
+function closeAskpass(): void {
+  askpassDialog.hidden = true;
+  askpassSecret.value = "";
+  askpassPending = null;
+}
+
+void listen<AskPassRequest>("askpass-request", ({ payload }) => {
+  askpassPending = payload;
+  askpassSecret.type = payload.kind === "password" ? "password" : "text";
+  askpassSecret.value = "";
+  askpassPrompt.textContent =
+    payload.kind === "password" && payload.user !== null
+      ? `Password for ${payload.target} as ${payload.user}:`
+      : `${payload.kind === "password" ? "Password" : "Username"} for ${payload.target}:`;
+  askpassDialog.hidden = false;
+  askpassSecret.focus();
+});
+askpassSubmitButton.addEventListener("click", () => {
+  const pending = askpassPending;
+  const secret = askpassSecret.value;
+  closeAskpass();
+  if (!pending || secret === "") return;
+  void invoke("submit_askpass", { operationId: pending.operationId, secret }).catch((error) => {
+    showError(error);
+    remoteStatus.textContent = "That credential prompt is no longer open.";
+  });
+});
+askpassCancelButton.addEventListener("click", closeAskpass);
+askpassSecret.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    askpassSubmitButton.click();
+  }
+});
 
 function syncRemoteControls(): void {
   const locked = !sessionActive || writeRunning;
@@ -3827,5 +3938,6 @@ function syncRemoteControls(): void {
   remotePushButton.disabled = locked;
   publishRemoteSelect.disabled = locked;
   remotePublishButton.disabled = locked;
+  authRetryButton.disabled = locked;
   forcePushPreviewButton.disabled = locked;
 }
