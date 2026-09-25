@@ -122,4 +122,47 @@ bash tools/bench/phase2_measures.sh app/src-tauri/target/release/guit   # hist10
 cat /tmp/guit-m6-deeppage.txt /tmp/guit-m6-burst.txt                    # raw curve and burst counts
 ```
 
+## M6-03 hotspot fixes, before/after
 
+Five fixes, each on its own commit, each with the measurement that motivated it in the commit message: `f563080` runner event-driven completion, `e66b428` access events no longer refresh, `e157323` single-spawn repo probe, `4f68a9c` append-only history rows, `0fa3015` status never takes the index lock. Before-data is the frozen M6-01/M6-02 reduction (`/tmp/guit-m6-before-table.txt`, 220 lines, same harness/binary pipeline as after); after-data is `tools/bench/after_m6_03.sh` run end-to-end against the final rebuilt bundle binary, five repeats per matrix cell.
+
+### Root causes found (two of them self-triggering loops)
+
+1. **Runner floor.** Every command paid a ~21 ms wait before stdout-EOF was noticed (`git.stash`/`git.remote`/`git.config` med 21.4–21.6 ms across all cells). Fixed by reaping the child eventfully instead of polling-sleeping; `process_reap_failed` retired with the old path.
+2. **Filesystem *access* events re-triggered the watcher** (`IN_ACCESS` in the notify mask): every Git read of `.git` produced new watch events → new refresh → new reads. Fixed by ignoring `EventKind::Access` (`refresh_worthy`).
+3. **`git status` created+removed `.git/index.lock` on tmpfs on *every* non-bare run**, even when the index content never changed. Combined with (2), one real change made guit refresh forever at ~3.5–4/s with 7 spawns each; the M6-02 claim that "index rewrites settle after 1–2 runs" is **corrected here as falsified**. Fixed by passing top-level `--no-optional-locks` before the `status` subcommand (the flag placed post-subcommand in the older bare-mode code is rejected by Git as an unknown option — latent bug, also fixed); regression test watches `.git` for any `index.lock` event across two status calls and asserts none.
+4. **Detect cost**: per-refresh multi-spawn probes (`detect.total` med 25.6–87.0 ms) collapsed to one `git rev-parse` with a 5-line/4-line shape gate and per-flag fallback.
+5. **History rendering**: full `replaceChildren()` rebuild per page/selection → append-only rows keyed by OID (M6-02's located frontend hotspot).
+
+### Before → after (same fixtures, same harness)
+
+| measure | before | after |
+| --- | --- | --- |
+| idle CPU, warmed cells (cores) | 0.075–0.112 | 0.008–0.009 (hist200 0.034 with harness clicks) |
+| refresh spawns per 31 s cell (`watch.refresh` n, 100-warmed) | 399 | 8 |
+| refresh spawns (10k-warmed / tiny-warmed) | 389 / 400-ish config+stash+remote n | 8 / 8 |
+| per-spawn floor `git.stash` med (ms) | 21.5–21.7 | 1.7–2.2 |
+| `detect.total` med (ms) | 25.6–87.0 | 1.5 (hist200-warmed; per-flag fallback elsewhere) |
+| `startup.restore_total` med (ms) | 28.3–89.6 | 3.3–11.7 |
+| L1 first frame med, warmed cells (s) | 0.974–1.038 (min 0.437) | 0.756–1.047 (min 0.490) |
+| quiescent 12 s window `watch.refresh` / `git.status` | never cleanly measurable (any single prior change kept the loop running) | 0 / 1 |
+| churn repro: refreshes in ~20 s after one tracked-file touch | 77 (≈3.5–4/s, never settled) | 2 (one per real event) |
+| burst 6×10 files on t10k-u10k `watch.refresh` / `git.status` | 24 / 25 | 6 / 7 |
+| idle tree RSS med (KB) | 469–473 k | 462–466 k |
+| hist10k 60-click 20-bucket avgs (ms) | 229.4 / 846.8 / 1521.3 (max 1897.6) | 313.5 / 792.2 / 1251.8 (max 1581.8) |
+| hist200 page load med (s) | 0.108 / 0.122 | 0.108 / 0.122 (unchanged, already fast) |
+| dirty→visible med (s) | 0.326–0.410 | 0.318–0.410 (unchanged by design) |
+
+The dominant wins are (a) the spawn floor ≈10× lower and (b) steady-state refresh counts collapsing ~50× because both feedback loops are gone — before-numbers were inflated by the loops, so per-refresh latency medians moved less than spawn counts did. The hist10k deep-paging buckets improved ~18% at the tail; the remaining growth is the spawn floor-free but O(skip) linear `git log` itself (raw curve 4→27 ms) plus the AT-tree-walk observation cost the harness pays over 3000 loaded rows — the honest attribution split promised in M6-02: append-only rendering fixed the *rebuild*, the harness-polling share did not shrink because it is measurement, not product work.
+
+Decision-6③ closed by benchmark instead of assumption: `fileModel.buildRows` over 10,000 files med **0.31 ms** (min 0.122, max 1.93; `tools/bench/file-model-bench.mjs`, 25 iterations, system Node v22) ≪ the 3 ms memoization trigger → **no memoization added**.
+
+Verification for the five code fixes: `cargo test --locked` 276+5 pass (new: index-lock regression, access-event filter), `npm run test:fixture` 9 pass, `npm run build`, `cargo fmt --check`, clippy at the 12 pre-existing warnings. Flake note recorded honestly: one full-suite run showed 275+1 failed with the failing test name lost to output truncation while the GUI reproduction instance was still running; five consecutive later runs were fully green — timing-budget contention suspected, root-cause not proven.
+
+### M6-03 reproduction
+
+```sh
+bash tools/bench/after_m6_03.sh app/src-tauri/target/release/guit   # quiescent + burst + matrix + hist10k + paging
+/usr/bin/python3 tools/bench/reduce_baseline.py /tmp/guit-m6-after-baseline.jsonl /tmp/guit-m6-after-paging.jsonl
+node tools/bench/file-model-bench.mjs
+```
