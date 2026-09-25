@@ -8,6 +8,7 @@ mod inflight;
 mod model;
 mod probe;
 mod refs;
+mod remotes;
 mod repo;
 mod reset;
 mod runner;
@@ -1139,6 +1140,78 @@ async fn submodule_init_update(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn list_remotes(app: tauri::AppHandle) -> Result<Vec<remotes::RemoteView>, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        remotes::list_view(&sessions)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn add_remote(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    name: String,
+    url: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        remotes::remote_add(&state, &sessions, snapshot_version, name, url)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn set_remote_url(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    name: String,
+    url: String,
+    push: bool,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        remotes::remote_set_url(&state, &sessions, snapshot_version, name, url, push)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn preview_remove_remote(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    name: String,
+) -> Result<write::PreviewResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        remotes::preview_remove_remote(&state, &sessions, snapshot_version, name)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn remove_remote(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        remotes::remove_remote(&state, &sessions, nonce)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1213,7 +1286,12 @@ fn main() {
             remove_worktree,
             prune_worktrees,
             submodule_status,
-            submodule_init_update
+            submodule_init_update,
+            list_remotes,
+            add_remote,
+            set_remote_url,
+            preview_remove_remote,
+            remove_remote
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

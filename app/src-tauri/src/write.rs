@@ -26,6 +26,13 @@ pub enum PreviewKind {
     PopStash,
     ResetHard,
     RemoveWorktree,
+    /// Removing a remote also drops its remote-tracking refs, so the
+    /// deletion goes through the same one-time ticket flow; the ticket binds
+    /// the name, the fetch URL observed at preview time and the tracking-ref
+    /// set. Force push (M5-04) reuses the oid/secondary slots for the target
+    /// and lease oids.
+    RemoveRemote,
+    ForcePush,
 }
 
 #[derive(Debug)]
@@ -164,6 +171,42 @@ impl WriteState {
         ))
     }
 
+    /// Ticket for removing a remote, bound to the name, the fetch URL and
+    /// the remote-tracking ref set observed at preview time. The URL lives
+    /// only inside the backend ticket; the frontend ever sees the redacted
+    /// display form from the preview itself.
+    pub(crate) fn stage_remote_remove(
+        &self,
+        work_root: PathBuf,
+        name: String,
+        fetch_url: String,
+        tracking: Vec<String>,
+    ) -> String {
+        self.stage_preview(Preview {
+            work_root,
+            kind: PreviewKind::RemoveRemote,
+            paths: vec![name.into_bytes()],
+            oid: Some(fetch_url),
+            secondary: Some(tracking.join("\n")),
+            force: false,
+        })
+    }
+
+    pub(crate) fn take_remote_remove(
+        &self,
+        nonce: &str,
+    ) -> Option<(PathBuf, String, String, Vec<String>)> {
+        let ticket = self.take_preview(nonce, PreviewKind::RemoveRemote)?;
+        let name = String::from_utf8(ticket.paths.first()?.clone()).ok()?;
+        let tracking = ticket.secondary?;
+        let tracking = if tracking.is_empty() {
+            Vec::new()
+        } else {
+            tracking.split('\n').map(str::to_owned).collect()
+        };
+        Some((ticket.work_root, name, ticket.oid?, tracking))
+    }
+
     pub(crate) fn clear_previews(&self) {
         self.previews.lock().unwrap().clear();
     }
@@ -224,6 +267,9 @@ pub enum OperationKind {
     WorktreeRemove,
     WorktreePrune,
     SubmoduleUpdate,
+    RemoteAdd,
+    RemoteSetUrl,
+    RemoteRemove,
 }
 
 impl OperationKind {
@@ -260,6 +306,9 @@ impl OperationKind {
             OperationKind::WorktreeRemove => (&[], "Removed"),
             OperationKind::WorktreePrune => (&[], "Pruned"),
             OperationKind::SubmoduleUpdate => (&[], "Updated"),
+            OperationKind::RemoteAdd => (&[], "Added"),
+            OperationKind::RemoteSetUrl => (&[], "Updated"),
+            OperationKind::RemoteRemove => (&[], "Removed"),
         }
     }
 

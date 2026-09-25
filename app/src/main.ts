@@ -279,6 +279,18 @@ app.innerHTML = `
     <p id="submodule-status" role="status"></p>
   </section>
   <section class="card">
+    <h2>Remotes</h2>
+    <div class="actions">
+      <input id="remote-name" type="text" placeholder="Remote name" aria-label="New remote name" disabled />
+      <input id="remote-url" type="text" placeholder="Remote URL or local path" aria-label="New remote URL" disabled />
+      <button id="remote-add" disabled title="Register a new remote (git remote add)">Add remote</button>
+    </div>
+    <div id="remote-list" class="refs" role="list" aria-label="Remotes">
+      <div class="file-row placeholder">Open a repository to list its remotes.</div>
+    </div>
+    <p id="remote-status" role="status"></p>
+  </section>
+  <section class="card">
     <h1>Environment check</h1>
     <p>M0 probes kept for regression checking; repository work happens in the card above.</p>
     <dl>
@@ -410,6 +422,7 @@ function renderSnapshot(snapshot: SnapshotView | null): void {
   syncStashWithSnapshot();
   syncWorktreesWithSnapshot();
   syncSubmodulesWithSnapshot();
+  syncRemotesWithSnapshot();
   renderOperationBanner(snapshot);
   closeRepoButton.disabled = !sessionActive;
   refreshRepoButton.disabled = !sessionActive;
@@ -694,6 +707,7 @@ function syncCommitControls(): void {
   syncStashControls();
   syncWorktreeControls();
   syncSubmoduleControls();
+  syncRemoteControls();
   syncOperationControls();
 }
 
@@ -847,7 +861,7 @@ commitMessage.addEventListener("keydown", (event) => {
 // server nonce that the backend re-checks against a fresh Git read at
 // every step.
 
-type PreviewKindKey = "discard" | "clean" | "branch" | "tag" | "stashDrop" | "stashPop" | "resetHard" | "worktreeRemove";
+type PreviewKindKey = "discard" | "clean" | "branch" | "tag" | "stashDrop" | "stashPop" | "resetHard" | "worktreeRemove" | "remoteRemove";
 
 const previewCopy: Record<
   PreviewKindKey,
@@ -900,6 +914,12 @@ const previewCopy: Record<
     confirm: "Remove worktree",
     cancel: "Keep worktree",
   },
+  remoteRemove: {
+    warning:
+      "Removing this remote deletes its configuration and every remote-tracking ref listed below. Nothing on the remote itself changes; a later fetch can bring the tracking refs back.",
+    confirm: "Remove remote",
+    cancel: "Keep remote",
+  },
 };
 
 const branchForceCopy: {
@@ -924,6 +944,7 @@ type PendingPreview =
       stash?: undefined;
       reset?: undefined;
       worktree?: undefined;
+      remote?: undefined;
     }
   | {
       kind: "branch";
@@ -935,6 +956,7 @@ type PendingPreview =
       stash?: undefined;
       reset?: undefined;
       worktree?: undefined;
+      remote?: undefined;
     }
   | {
       kind: "tag";
@@ -946,6 +968,7 @@ type PendingPreview =
       stash?: undefined;
       reset?: undefined;
       worktree?: undefined;
+      remote?: undefined;
     }
   | {
       kind: "stashDrop" | "stashPop";
@@ -957,6 +980,7 @@ type PendingPreview =
       stash: { index: number; targetOid: string | null };
       reset?: undefined;
       worktree?: undefined;
+      remote?: undefined;
     }
   | {
       kind: "resetHard";
@@ -968,6 +992,7 @@ type PendingPreview =
       stash?: undefined;
       reset: { targetOid: string | null };
       worktree?: undefined;
+      remote?: undefined;
     }
   | {
       kind: "worktreeRemove";
@@ -979,6 +1004,19 @@ type PendingPreview =
       stash?: undefined;
       reset?: undefined;
       worktree: { index: number; targetOid: string | null };
+      remote?: undefined;
+    }
+  | {
+      kind: "remoteRemove";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree?: undefined;
+      remote: { name: string };
     };
 
 let pendingPreview: PendingPreview | null = null;
@@ -1095,6 +1133,9 @@ async function renewPreviewPanel(): Promise<void> {
   if (pending.kind === "worktreeRemove") {
     request.index = pending.worktree.index;
   }
+  if (pending.kind === "remoteRemove") {
+    request.name = pending.remote.name;
+  }
   previewRenewing = true;
   try {
     const command =
@@ -1110,7 +1151,9 @@ async function renewPreviewPanel(): Promise<void> {
                 ? "preview_stash_drop"
                 : pending.kind === "stashPop"
                   ? "preview_stash_pop"
-                  : "preview_remove_worktree";
+                  : pending.kind === "worktreeRemove"
+                    ? "preview_remove_worktree"
+                    : "preview_remove_remote";
     const preview = await invoke<PreviewResult>(command, request);
     pendingPreview =
       pending.kind === "branch"
@@ -1188,7 +1231,9 @@ async function confirmPreview(): Promise<void> {
                 ? "Hard resetting…"
                 : kind === "worktreeRemove"
                   ? "Removing worktree…"
-                  : "Deleting tag…";
+                  : kind === "remoteRemove"
+                    ? "Removing remote…"
+                    : "Deleting tag…";
   try {
     const result = await invoke<OperationResult>(
       kind === "discard"
@@ -1205,7 +1250,9 @@ async function confirmPreview(): Promise<void> {
                   ? "reset_hard"
                   : kind === "worktreeRemove"
                     ? "remove_worktree"
-                    : "delete_tag",
+                    : kind === "remoteRemove"
+                      ? "remove_remote"
+                      : "delete_tag",
       { nonce },
     );
     // Consume the panel before applying the snapshot so the version guard
@@ -3061,3 +3108,218 @@ void (async () => {
   }
   await refresh();
 })();
+
+// --- Remotes (M5-01): list / add / set-url / remove -------------------------
+// The backend reads `git remote` + `get-url` itself and hands over only
+// redacted URLs — a URL can embed a credentials token, so the raw form
+// never travels to this file. Removal is destructive (it takes the
+// remote-tracking refs with it) and runs through the shared one-time
+// ticket panel; adding and re-pointing URLs are ordinary queued writes.
+
+type RemoteView = {
+  name: string;
+  fetchUrl: string | null;
+  pushUrl: string | null;
+  addressable: boolean;
+};
+
+const remoteNameInput = document.querySelector<HTMLInputElement>("#remote-name")!;
+const remoteUrlInput = document.querySelector<HTMLInputElement>("#remote-url")!;
+const remoteAddButton = document.querySelector<HTMLButtonElement>("#remote-add")!;
+const remoteListElement = document.querySelector<HTMLElement>("#remote-list")!;
+const remoteStatus = document.querySelector<HTMLElement>("#remote-status")!;
+
+let remoteEntries: RemoteView[] = [];
+let remoteRequestSeq = 0;
+let remoteSnapshotVersion = -1;
+
+function remotePlaceholder(message: string): void {
+  remoteSnapshotVersion = -1;
+  remoteEntries = [];
+  remoteStatus.textContent = "";
+  const row = document.createElement("div");
+  row.className = "file-row placeholder";
+  row.textContent = message;
+  remoteListElement.replaceChildren(row);
+}
+
+function syncRemotesWithSnapshot(): void {
+  if (!currentSnapshot) {
+    if (remoteSnapshotVersion !== -1)
+      remotePlaceholder("Open a repository to list its remotes.");
+    return;
+  }
+  if (currentSnapshot.version === remoteSnapshotVersion) return;
+  remoteSnapshotVersion = currentSnapshot.version;
+  void loadRemotes();
+}
+
+async function loadRemotes(): Promise<void> {
+  const seq = ++remoteRequestSeq;
+  remoteStatus.textContent = "Loading remotes…";
+  try {
+    const entries = await invoke<RemoteView[]>("list_remotes");
+    if (seq !== remoteRequestSeq) return; // a newer request took over
+    renderRemotes(entries);
+    remoteStatus.textContent =
+      entries.length === 0
+        ? "No remotes configured."
+        : `${entries.length} remote${entries.length === 1 ? "" : "s"} configured.`;
+  } catch (error) {
+    if (seq !== remoteRequestSeq) return;
+    showError(error);
+    remoteStatus.textContent = "The remote list could not be loaded.";
+  }
+}
+
+function renderRemotes(entries: RemoteView[]): void {
+  remoteEntries = entries;
+  if (entries.length === 0) {
+    const row = document.createElement("div");
+    row.className = "file-row placeholder";
+    row.textContent = "No remotes configured.";
+    remoteListElement.replaceChildren(row);
+    return;
+  }
+  const rows = entries.map((entry) => {
+    const el = document.createElement("div");
+    el.className = "file-row ref-row";
+    el.setAttribute("role", "listitem");
+    const badge = document.createElement("span");
+    badge.className = "file-status";
+    badge.textContent = "⇅";
+    const label = document.createElement("span");
+    label.className = "ref-name";
+    label.textContent = entry.name;
+    label.title = entry.fetchUrl ?? entry.name;
+    const meta = document.createElement("span");
+    meta.className = "ref-meta";
+    const urls = [entry.fetchUrl ?? "(no URL)"];
+    if (entry.pushUrl) urls.push(`push: ${entry.pushUrl}`);
+    meta.textContent = urls.join(" · ");
+    meta.title = meta.textContent;
+    el.append(badge, label, meta);
+    // The URL input doubles as the new-value field for Set URL; removal
+    // needs a losslessly addressable name and goes through the ticket.
+    if (entry.addressable) {
+      el.append(
+        refRowButton("Set URL", `Set fetch URL of remote ${entry.name}`, () =>
+          void runRemoteSetUrl(entry.name, false),
+        ),
+      );
+      if (entry.pushUrl !== null) {
+        el.append(
+          refRowButton("Set push URL", `Set push URL of remote ${entry.name}`, () =>
+            void runRemoteSetUrl(entry.name, true),
+          ),
+        );
+      }
+      el.append(
+        refRowButton(
+          "Remove…",
+          `Remove remote ${entry.name}`,
+          () => void requestRemoteRemove(entry.name),
+          true,
+        ),
+      );
+    }
+    return el;
+  });
+  remoteListElement.replaceChildren(...rows);
+}
+
+async function runRemoteWrite(
+  command: "add_remote" | "set_remote_url",
+  args: Record<string, unknown>,
+  running: string,
+): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  writeRunning = true;
+  syncCommitControls();
+  renderRemotes(remoteEntries);
+  remoteStatus.textContent = running;
+  try {
+    const result = await invoke<OperationResult>(command, {
+      snapshotVersion: currentSnapshot.version,
+      ...args,
+    });
+    applySnapshot(result.snapshot);
+    remoteStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+    if (result.outcome === "success" && command === "add_remote") {
+      remoteNameInput.value = "";
+      remoteUrlInput.value = "";
+    }
+  } catch (error) {
+    showError(error);
+    remoteStatus.textContent = "The remote operation did not run.";
+  } finally {
+    writeRunning = false;
+    syncCommitControls();
+    renderRemotes(remoteEntries);
+  }
+}
+
+function addRemote(): void {
+  const name = remoteNameInput.value.trim();
+  const url = remoteUrlInput.value.trim();
+  if (name === "" || url === "") {
+    remoteStatus.textContent = "Enter both a remote name and a URL or local path.";
+    return;
+  }
+  void runRemoteWrite("add_remote", { name, url }, "Adding the remote…");
+}
+
+function runRemoteSetUrl(name: string, push: boolean): void {
+  const url = remoteUrlInput.value.trim();
+  if (url === "") {
+    remoteStatus.textContent = "Type the new URL in the URL field first.";
+    return;
+  }
+  void runRemoteWrite(
+    "set_remote_url",
+    { name, url, push },
+    push ? `Re-pointing the push URL of ${name}…` : `Re-pointing the URL of ${name}…`,
+  );
+}
+
+async function requestRemoteRemove(name: string): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  remoteStatus.textContent = `Checking what removing ${name} would delete…`;
+  try {
+    const preview = await invoke<PreviewResult>("preview_remove_remote", {
+      snapshotVersion: currentSnapshot.version,
+      name,
+    });
+    applySnapshot(preview.snapshot);
+    pendingPreview = {
+      kind: "remoteRemove",
+      names: preview.candidates,
+      dropped: preview.dropped,
+      nonce: preview.nonce,
+      remote: { name },
+    };
+    renderPreviewPanel();
+    previewConfirmButton.focus();
+  } catch (error) {
+    showError(error);
+    remoteStatus.textContent =
+      "The remote removal was refused before anything changed.";
+  }
+}
+
+remoteAddButton.addEventListener("click", addRemote);
+remoteUrlInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    addRemote();
+  }
+});
+
+function syncRemoteControls(): void {
+  const locked = !sessionActive || writeRunning;
+  remoteNameInput.disabled = locked;
+  remoteUrlInput.disabled = locked;
+  remoteAddButton.disabled = locked;
+}
