@@ -314,3 +314,80 @@ npm run tauri build -- --bundles deb          # in app/
 bash tools/bench/diagnostics-export-check.sh \
   app/src-tauri/target/release/bundle/deb/guit_0.1.0_amd64.deb
 ```
+
+## M6-07 release gates, frozen thresholds and blocker ledger
+
+Final-gate sequence executed 2026-09-25 against the committed M6-06 tree
+(every artifact below is from that final code):
+
+| gate | result |
+| --- | --- |
+| `cargo test --locked` | 292 unit + 5 integration pass (repeat runs green) |
+| `npm run test:fixture` | 9 pass / 0 fail |
+| `npm run build` | clean (tsc + vite) |
+| `cargo fmt --check` / `git diff --check` | clean |
+| `cargo clippy --locked --all-targets` | exactly the 12 pre-existing locations; zero from M6 code |
+| `npm run tauri build -- --bundles deb,rpm,appimage` | exit 0 — deb 4,268,734 B, rpm 4,269,639 B, AppImage 85,531,128 B |
+| `recovery-checks.sh` on final deb | fail=0 (19 assertions, four stages) |
+| `diagnostics-export-check.sh` on final deb | fail=0 (10 assertions incl. zh_CN save chooser) |
+| final rpm payload (`rpm2cpio`) | `usr/bin/guit`, `guit.desktop`, 128x128 icon present |
+| final AppImage smoke (isolated HOME) | empty-state landmark reached; `startup.restore_at 841.7 ms` |
+
+Performance thresholds were frozen once, from the M6-03 post-fix medians,
+into `plan/07-quality-release.md` §发布性能阈值 with an environment-change
+re-baseline clause (decision 13).
+
+### Blocker ledger at M6 close
+
+- **AppImage** — RESOLVED on this host: produced and launched in both the
+  M6-04 trial and the final 0.1.0 bundle. Not a blocker; distribution
+  acceptance on other distros remains open as a non-blocking item.
+- **Windows / macOS** — Pending, permanently honest until someone runs
+  them: build configuration + schema validation only, zero runtime claims.
+  Listed in README and known-limitations, so it cannot be mistaken for
+  support.
+- **Real-provider credential flows** (GitHub/GitLab/Gitea) — remaining
+  documented manual gate; local 401-server and `git ls-remote` integration
+  evidence exists, the attended pass does not.
+- **M6-05 manual gates** — interactive fetch killed mid-flight against a
+  real remote, the human path through the ticket-resurrection dialog, and
+  multi-display window clamping (this host is single-display; `fit_window`
+  is unit-verified only).
+- **Typing-class click-throughs** — GNOME Wayland drops synthetic keys for
+  unfocused XWayland windows; typed-input flows are Rust-side tested but
+  not end-to-end driven (documented in known-limitations).
+- **Single alert slot (multi-failure presentation)** — CLOSED as documented
+  behavior, not UI redesign: last-error-wins on screen, every failure also
+  lands in the diagnostics ring, stated in known-limitations.
+- **CI** — prepared (`m0.yml` per-platform bundles, Node 26), **never
+  executed: there is no git remote**. No CI pass may be claimed.
+- **Suite flake** — two one-off non-reproducible full-suite failures across
+  M6 (M6-03: name lost to truncation; M6-06: bridge-sweep socket test),
+  each followed by ≥3 fully-green full runs. Suspected timing contention;
+  root cause not proven; recorded rather than hidden.
+- **rpm dependency view** — `rpm -qp --requires` unavailable (rpm not
+  installed); dependency claims rest on the bundler log only.
+- **Homepage metadata** — deliberately absent (user has none); stage-1
+  note, not a failure.
+
+No open item meets the 07 §发布资料 blocker bar (confirmed data loss, wrong
+target force-push/delete, secret leakage, common-path wrong operations,
+platform unable to start): none of those exist in the verified Linux lane.
+The lane that *is* unverified (Win/mac, real providers, CI) is enumerated
+above and in user docs. This release is **Linux-verified only** — that
+claim is stated in every document.
+
+### M6-07 reproduction
+
+```sh
+cd app
+cargo test --locked && cargo fmt --check && cargo clippy --locked --all-targets
+npm run test:fixture && npm run build
+npm run tauri build -- --bundles deb,rpm,appimage
+cd ..
+bash tools/bench/recovery-checks.sh app/src-tauri/target/release/bundle/deb/guit_0.1.0_amd64.deb
+bash tools/bench/diagnostics-export-check.sh app/src-tauri/target/release/bundle/deb/guit_0.1.0_amd64.deb
+rpm2cpio app/src-tauri/target/release/bundle/rpm/guit-0.1.0-1.x86_64.rpm | cpio -tv | grep guit
+APPIMAGE_EXTRACT_AND_RUN=1 HOME=<isolated> GUIT_PERF=1 \
+  app/src-tauri/target/release/bundle/appimage/guit_0.1.0_amd64.AppImage
+```
