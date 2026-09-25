@@ -1534,6 +1534,25 @@ fn main() {
         .manage(write::WriteState::default())
         .manage(extools::ToolState::default())
         .manage(askpass::AskPassManager::default())
+        .setup(|app| {
+            // M6-05: reclaim what a kill -9 left behind — orphaned askpass
+            // bridge directories and abandoned atomic-write siblings. The
+            // counts are reported but startup never fails over them.
+            #[cfg(unix)]
+            let bridges = askpass::sweep_stale_bridges();
+            #[cfg(not(unix))]
+            let bridges = 0usize;
+            let temps = match app_config_dir(app.handle()) {
+                Ok(dir) => askpass::sweep_stale_config_temps(&dir),
+                Err(_) => 0,
+            };
+            if bridges + temps > 0 {
+                eprintln!(
+                    "guit startup swept {bridges} stale askpass bridge(s) and {temps} stale config temp file(s)"
+                );
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             probe_git,
             probe_external_tools,
@@ -1662,6 +1681,23 @@ mod tests {
             write_window_settings(&path, &settings).unwrap_err().code,
             "settings_invalid"
         );
+    }
+
+    // Decision 9: a future window.json version is refused fail-closed, the
+    // bytes survive untouched, and the restore path reports no settings, so
+    // the frontend keeps the shipped 720x560 default instead of guessing.
+    #[test]
+    fn future_window_version_is_refused_and_left_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("window.json");
+        let bytes =
+            br#"{"schemaVersion":2,"width":1234,"height":777,"x":10,"y":20,"alwaysOnTop":false}"#;
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            read_window_settings(&path).unwrap_err().code,
+            "settings_invalid"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 
     #[test]

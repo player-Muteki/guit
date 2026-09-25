@@ -111,7 +111,32 @@ pub fn run_with_limit(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| ProbeError::new("process_start_failed", error.to_string()))?;
+        .map_err(|error| {
+            // An unresolvable executable is the "not installed / not on
+            // PATH" failure the user can actually act on, so it must not
+            // hide behind the generic start failure (plan decision 10).
+            // Git is named honestly; any other program is reported under
+            // its own name so a missing external tool is not blamed on Git.
+            if error.kind() == std::io::ErrorKind::NotFound {
+                let program = std::path::Path::new(command.get_program())
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| command.get_program().to_string_lossy().into_owned());
+                if program.starts_with("git") {
+                    ProbeError::new(
+                        "git_not_found",
+                        "Git executable not found; install Git or fix your PATH.",
+                    )
+                } else {
+                    ProbeError::new(
+                        "tool_not_found",
+                        format!("Executable '{program}' was not found; check PATH and tool configuration."),
+                    )
+                }
+            } else {
+                ProbeError::new("process_start_failed", error.to_string())
+            }
+        })?;
     let pid = child.id();
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("piped stdout");
@@ -214,4 +239,45 @@ fn command_label(command: &Command) -> String {
         .map(word)
         .unwrap_or_default();
     format!("{program}.{subcommand}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn missing(program: &str) -> ProbeError {
+        let mut command = Command::new(program);
+        command.current_dir(std::env::temp_dir());
+        match run_with_limit(
+            command,
+            &AtomicBool::new(false),
+            Duration::from_millis(50),
+            Duration::from_secs(2),
+            DEFAULT_OUTPUT_LIMIT,
+            |_, _| {},
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a missing executable cannot start"),
+        }
+    }
+
+    #[test]
+    fn missing_executable_reports_as_git_not_found() {
+        assert_eq!(missing("git-not-on-path-7e2b").code, "git_not_found");
+    }
+
+    #[test]
+    fn a_missing_external_tool_is_not_blamed_on_git() {
+        let error = missing("guit-definitely-not-on-path-9f3a");
+        assert_eq!(error.code, "tool_not_found");
+        assert!(error.message.contains("guit-definitely-not-on-path-9f3a"));
+        assert!(!error.message.to_lowercase().contains("git executable"));
+    }
+
+    #[test]
+    fn labels_keep_only_program_and_subcommand_words() {
+        let mut command = Command::new("/usr/bin/git");
+        command.args(["--git-dir=/secret/path", "status", "-uall"]);
+        assert_eq!(command_label(&command), "git.status");
+    }
 }

@@ -191,3 +191,69 @@ bash tools/bench/clean-install-trial.sh \
   app/src-tauri/target/release/bundle/rpm/guit-0.1.0-1.x86_64.rpm /tmp/guit-m6-bench/1k
 APPIMAGE_EXTRACT_AND_RUN=1 <bundle/appimage/guit_0.1.0_amd64.AppImage>   # isolated HOME
 ```
+
+## M6-05 config refusal, stale-bridge sweep, missing-executable errors and kill -9 recovery
+
+All four mechanisms are pinned by unit tests first (`cargo test --locked`
+**287+5 pass**, fixtures 9 pass, fmt clean, clippy at the 12 pre-existing
+warnings) and then measured against the real packaged binary.
+
+**Refusal pinning (decision 9).** New tests refuse a future `schema_version`
+in `session.json` (`session_invalid`), `recent.json` (`recent_invalid`) and
+`window.json` (`settings_invalid`, camelCase field confirmed on the wire),
+each asserting the bytes survive untouched; the write path refuses future
+versions too (`write_window_settings` → `settings_invalid`).
+
+**Startup sweeps (decision 10).** `askpass::sweep_stale_bridges()` probes
+every `guit-askpass-*` directory under XDG_RUNTIME_DIR and the temp dir:
+a socket that refuses connection (or is absent) has no live listener and the
+private directory is removed; a connectable socket is left alone — race-safe
+without a single-instance lock. `sweep_stale_config_temps()` removes only
+tempfile-shaped siblings (`<owned>.tmp<6 alnum>`, mtime > 1 h) of the three
+config files. Both run in a new `.setup()` hook and report counts to stderr
+without ever failing startup. Tests: dual-arm bridge sweep (live listener
+survives; dead socket file, pipe-less dir and non-`guit-askpass-*` names
+handled correctly), four-arm config sweep (fresh kept, foreign name and
+wrong suffix kept, only old owned removed), missing directory → 0.
+
+**Missing executables.** `runner::run` maps spawn `NotFound` honestly and by
+program: `git*` → `git_not_found` ("install Git or fix your PATH"), anything
+else → `tool_not_found` naming the actual program — a missing external tool
+is never blamed on Git (both shapes pinned by tests).
+
+**`tools/bench/recovery-checks.sh`, four stages, fail=0 on the final run
+(2026-09-25)**, launching the deb payload binary under a pristine HOME so
+the in-app setup hook is what is measured: **A** two orphan bridge shapes
+swept, count reported, unrelated dir untouched; **B** future-schema session/
+recent refused with the alert shown, empty state intact, files byte-identical,
+stale `.tmp` swept while an in-flight-shaped sibling survives; **C** a corrupt
+`.git/index` surfaces `fatal: .git/index…` as an alert and is never presented
+as "Working copy is clean."; **D** an empty leftover `.git/index.lock` (the
+kill-while-holding shape) is read through by `--no-optional-locks` status and
+guit never deletes or writes it. Three findings shaped the trial:
+1. **Frontend gap found and fixed**: when `restore_repository` rejected, the
+   boot path never called `renderSnapshot`, so a refused config showed a
+   half-rendered shell instead of the empty state — the boot sequence now
+   renders the empty state and the recent list independently of refusal.
+2. **Git stderr follows the user's locale** (host is zh_CN: 索引文件比预期的小).
+   guit passes it through redacted-verbatim by design; assertions match the
+   locale-stable `fatal: …/.git/index` fragment instead of English prose.
+3. **The single `#error` alert element is last-error-wins**, so one stage's
+   refusal can mask another's; the script isolates the config dir per stage.
+   Whether the alert should queue multiple failures is an M6-06 UI question.
+
+**Manual gates left open (honest status):** the playbook tail records three
+human checks — kill -9 during an interactive fetch prompt (needs a real
+credential remote), ticket resurrection through a live dialog (unit-pinned:
+`tickets_never_resurrect_across_a_process_restart`), and the multi-display
+window clamp (this host is single-display; `fit_window` is unit-tested only).
+Windows/macOS sweeps are wired behind `#[cfg(unix)]` for bridges; the config
+temp sweep is platform-neutral and untested there.
+
+### M6-05 reproduction
+
+```sh
+npm run tauri build -- --bundles deb          # in app/
+bash tools/bench/recovery-checks.sh \
+  app/src-tauri/target/release/bundle/deb/guit_0.1.0_amd64.deb
+```

@@ -864,4 +864,30 @@ mod tests {
             "recent_path_invalid"
         );
     }
+
+    // Decision 9: forward refusal is fail-closed — a future schema_version is
+    // rejected outright, the bytes are left untouched for a later release,
+    // and no code path rewrites a file it refused to read.
+    #[test]
+    fn future_session_version_is_refused_and_left_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let path = session_path(root.path());
+        let bytes = br#"{"schema_version":2,"path":"/somewhere"}"#;
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            read_session(root.path()).unwrap_err().code,
+            "session_invalid"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn future_recent_version_is_refused_and_left_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let path = recent_path(root.path());
+        let bytes = br#"{"schema_version":2,"paths":["/a","/b"]}"#;
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(read_recent(root.path()).unwrap_err().code, "recent_invalid");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
 }

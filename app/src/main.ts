@@ -3314,9 +3314,18 @@ void (async () => {
     const restored = await invoke<SnapshotView | null>("restore_repository");
     currentSnapshot = restored;
     renderSnapshot(restored);
+  } catch (error) {
+    // A refused session (future schema, unreadable file) must still leave
+    // the full empty-state interface on screen, not a half-rendered shell.
+    showError(error);
+    currentSnapshot = null;
+    renderSnapshot(null);
+  }
+  try {
     renderRecent(await invoke<string[]>("list_recent_repositories"));
   } catch (error) {
     showError(error);
+    renderRecent([]);
   }
   try {
     const settings = await invoke<WindowSettings | null>("restore_window_settings");

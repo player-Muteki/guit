@@ -329,6 +329,90 @@ fn socket_dir() -> Result<PathBuf, ProbeError> {
     Ok(dir)
 }
 
+/// Bridge directories are removed by `Bridge::drop`, but a kill -9 leaves
+/// them behind. At startup, probe every `guit-askpass-*` directory: a socket
+/// that refuses connection (or is gone) has no live listener and the whole
+/// private directory is deleted; a socket that accepts belongs to a running
+/// instance and is left alone. The connect probe is race-safe without a
+/// single-instance lock — deleting a directory whose owner just died is
+/// harmless, never deleting a live one is the requirement.
+#[cfg(unix)]
+pub(crate) fn sweep_stale_bridges() -> usize {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        bases.push(runtime);
+    }
+    bases.push(std::env::temp_dir());
+    sweep_stale_bridges_in(&bases)
+}
+
+#[cfg(unix)]
+fn sweep_stale_bridges_in(bases: &[PathBuf]) -> usize {
+    let mut removed = 0;
+    for base in bases {
+        let Ok(entries) = std::fs::read_dir(base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if !name.to_string_lossy().starts_with("guit-askpass-") {
+                continue;
+            }
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let socket = dir.join("pipe");
+            let stale = std::os::unix::net::UnixStream::connect(&socket).is_err();
+            if stale && std::fs::remove_dir_all(&dir).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// Atomic config writes land through `tempfile` siblings named
+/// `<name>.tmpXXXXXX`. A kill mid-write leaves such a sibling behind; it is
+/// never read back, and after an hour no in-flight write can still own it.
+/// The suffix shape (exactly six alphanumerics) keeps unrelated user files
+/// that merely end in `.tmp` out of reach. Returns the number removed.
+pub(crate) fn sweep_stale_config_temps(config_dir: &Path) -> usize {
+    const OWNED: [&str; 3] = ["recent.json", "session.json", "window.json"];
+    let Ok(entries) = std::fs::read_dir(config_dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((base, suffix)) = name.split_once(".tmp") else {
+            continue;
+        };
+        if !OWNED.contains(&base)
+            || suffix.len() != 6
+            || !suffix.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let older_than_an_hour = meta
+            .modified()
+            .ok()
+            .and_then(|when| when.elapsed().ok())
+            .is_some_and(|age| age > std::time::Duration::from_secs(3600));
+        if older_than_an_hour && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(unix)]
 #[allow(clippy::type_complexity)]
 fn accept_loop(
@@ -1047,5 +1131,78 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o700);
         std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    fn stale_dir(base: &std::path::Path, tag: &str) -> PathBuf {
+        let dir = base.join(format!("guit-askpass-{tag}"));
+        std::fs::create_dir(&dir).expect("directory");
+        dir
+    }
+
+    #[test]
+    fn the_bridge_sweep_keeps_live_listeners_and_drops_the_rest() {
+        let base = tempfile::tempdir().expect("temp base");
+        let live = stale_dir(base.path(), "live");
+        let dead = stale_dir(base.path(), "dead");
+        let empty = stale_dir(base.path(), "empty");
+        let listener = std::os::unix::net::UnixListener::bind(live.join("pipe")).expect("bind");
+        std::fs::write(dead.join("pipe"), b"not a socket").expect("file");
+        let foreign = base.path().join("guit-not-a-bridge");
+        std::fs::create_dir(&foreign).expect("foreign directory");
+        let removed = sweep_stale_bridges_in(&[base.path().to_path_buf()]);
+        assert_eq!(removed, 2, "dead socket and pipeless directory go");
+        assert!(live.exists() && listener.local_addr().is_ok(), "live stays");
+        assert!(!dead.exists() && !empty.exists(), "stale directories go");
+        assert!(foreign.exists(), "the sweep only touches its own shape");
+    }
+
+    #[test]
+    fn the_bridge_sweep_removes_a_socket_file_left_by_a_dead_listener() {
+        let base = tempfile::tempdir().expect("temp base");
+        let dir = stale_dir(base.path(), "dropped");
+        drop(std::os::unix::net::UnixListener::bind(dir.join("pipe")).expect("bind then drop"));
+        assert!(dir.join("pipe").exists(), "std leaves the socket file");
+        assert_eq!(sweep_stale_bridges_in(&[base.path().to_path_buf()]), 1);
+        assert!(!dir.exists(), "a refused connect is a dead bridge");
+    }
+
+    #[test]
+    fn the_config_sweep_removes_only_old_tempfile_siblings_of_owned_names() {
+        let dir = tempfile::tempdir().expect("config dir");
+        std::fs::write(dir.path().join("session.json.tmpAb1cD2"), b"x").expect("fresh owned");
+        std::fs::write(dir.path().join("notes.tmp"), b"x").expect("foreign suffix");
+        std::fs::write(dir.path().join("session.json.tmpZZ"), b"x").expect("short suffix");
+        std::fs::write(dir.path().join("window.json.tmp123456"), b"x").expect("old owned");
+        std::fs::write(dir.path().join("recent.json.tmpABC123"), b"x").expect("old owned");
+        let old_output = std::process::Command::new("touch")
+            .args(["-d", "3 hours ago"])
+            .arg(dir.path().join("window.json.tmp123456"))
+            .arg(dir.path().join("recent.json.tmpABC123"))
+            .status()
+            .expect("touch runs");
+        assert!(old_output.success());
+        assert_eq!(sweep_stale_config_temps(dir.path()), 2);
+        assert!(dir.path().join("session.json.tmpAb1cD2").exists(), "fresh");
+        assert!(dir.path().join("notes.tmp").exists(), "foreign name");
+        assert!(
+            dir.path().join("session.json.tmpZZ").exists(),
+            "suffix shape"
+        );
+        assert!(
+            !dir.path().join("window.json.tmp123456").exists(),
+            "old owned"
+        );
+        assert!(
+            !dir.path().join("recent.json.tmpABC123").exists(),
+            "old owned"
+        );
+    }
+
+    #[test]
+    fn the_config_sweep_survives_a_missing_directory() {
+        assert_eq!(
+            sweep_stale_config_temps(std::path::Path::new("/nonexistent/guit-x")),
+            0
+        );
     }
 }

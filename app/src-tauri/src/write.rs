@@ -1162,6 +1162,40 @@ mod tests {
     }
 
     #[test]
+    fn tickets_never_resurrect_across_a_process_restart() {
+        // A ticket staged before a kill -9 must be worthless afterwards:
+        // WriteState lives in memory only, so the new process refuses the
+        // old nonce and the destructive command cannot run without a fresh
+        // preview.
+        let staged = WriteState::default().stage_ref_delete(
+            PreviewKind::DeleteBranch,
+            PathBuf::from("/repository"),
+            "topic".to_owned(),
+            "0".repeat(40),
+            false,
+        );
+        let after_restart = WriteState::default();
+        assert!(after_restart
+            .take_ref_delete(&staged, PreviewKind::DeleteBranch)
+            .is_none());
+        // The same nonce is single-use within one process too.
+        let state = WriteState::default();
+        let nonce = state.stage_ref_delete(
+            PreviewKind::DeleteBranch,
+            PathBuf::from("/repository"),
+            "topic".to_owned(),
+            "0".repeat(40),
+            false,
+        );
+        assert!(state
+            .take_ref_delete(&nonce, PreviewKind::DeleteBranch)
+            .is_some());
+        assert!(state
+            .take_ref_delete(&nonce, PreviewKind::DeleteBranch)
+            .is_none());
+    }
+
+    #[test]
     fn stage_success_returns_fresher_snapshot_and_operation_id() {
         let repository = init_repo();
         std::fs::write(repository.path().join("a.txt"), "one\n").unwrap();
