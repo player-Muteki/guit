@@ -270,6 +270,8 @@ pub enum OperationKind {
     RemoteAdd,
     RemoteSetUrl,
     RemoteRemove,
+    Fetch,
+    SetUpstream,
 }
 
 impl OperationKind {
@@ -309,6 +311,8 @@ impl OperationKind {
             OperationKind::RemoteAdd => (&[], "Added"),
             OperationKind::RemoteSetUrl => (&[], "Updated"),
             OperationKind::RemoteRemove => (&[], "Removed"),
+            OperationKind::Fetch => (&[], "Fetched"),
+            OperationKind::SetUpstream => (&[], "Upstream set"),
         }
     }
 

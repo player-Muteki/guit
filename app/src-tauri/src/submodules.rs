@@ -408,8 +408,13 @@ pub(crate) fn list_view(
 }
 
 /// Streams complete redacted lines out of the interleaved byte chunks the
-/// runner reports, mirroring the clone progress lane.
-fn take_progress_bytes(buffer: &mut Vec<u8>, bytes: &[u8], on_line: &mut dyn FnMut(&str)) {
+/// runner reports, mirroring the clone progress lane. Shared with the
+/// network module's fetch streaming.
+pub(crate) fn take_progress_bytes(
+    buffer: &mut Vec<u8>,
+    bytes: &[u8],
+    on_line: &mut dyn FnMut(&str),
+) {
     buffer.extend_from_slice(bytes);
     while let Some(position) = buffer
         .iter()
@@ -420,7 +425,7 @@ fn take_progress_bytes(buffer: &mut Vec<u8>, bytes: &[u8], on_line: &mut dyn FnM
     }
 }
 
-fn emit_line(raw: &[u8], on_line: &mut dyn FnMut(&str)) {
+pub(crate) fn emit_line(raw: &[u8], on_line: &mut dyn FnMut(&str)) {
     let text = String::from_utf8_lossy(raw);
     let line = text.trim_end_matches(['\r', '\n']).trim();
     if !line.is_empty() {

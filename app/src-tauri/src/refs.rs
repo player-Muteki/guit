@@ -42,6 +42,9 @@ pub struct RemoteRef {
     pub oid: String,
     /// Display target when the ref is symbolic (e.g. `origin/HEAD`).
     pub symref: Option<String>,
+    /// True when the raw ref name is byte-exact UTF-8; only such refs can
+    /// be handed back as upstream targets or deleted.
+    pub addressable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -150,6 +153,7 @@ pub fn parse_listing(bytes: &[u8]) -> Result<RefListing, ProbeError> {
                 name: short_display(refname, "refs/remotes/"),
                 oid: oid.to_owned(),
                 symref: (!symref.is_empty()).then(|| short_display(symref, "refs/")),
+                addressable: addressable(refname),
             });
         } else {
             // The patterns asked for exactly the three namespaces above.

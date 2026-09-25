@@ -33,6 +33,8 @@ button.recent-entry { padding: .35rem .6rem; background: transparent; border-col
 .file-row > .file-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .row-action { flex: 0 0 auto; font-size: .72rem; padding: .1rem .5rem; opacity: 0; }
 .file-row:hover .row-action, .file-row:focus-within .row-action, .file-row.selected .row-action, .file-row.renaming .row-action { opacity: 1; }
+.upstream-picker .row-action { opacity: 1; }
+.upstream-picker { flex-wrap: wrap; }
 .group-heading .row-action { margin-left: auto; opacity: 1; }
 .group-heading .row-action + .row-action { margin-left: 0; }
 .row-action.danger, #preview-confirm { background: #6d2f33; border-color: #a65858; }

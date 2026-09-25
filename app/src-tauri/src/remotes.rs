@@ -61,7 +61,7 @@ fn bare_or_work_dir(identity: &RepoIdentity) -> Result<PathBuf, ProbeError> {
 /// guit's own name gate. Git itself rejects spaces and `.` but accepts
 /// leading dashes only because they then parse as switches — validation
 /// must never depend on Git's argument parser to stay safe.
-fn validate_remote_name(name: &str) -> Result<(), ProbeError> {
+pub(crate) fn validate_remote_name(name: &str) -> Result<(), ProbeError> {
     let rejected = name.is_empty()
         || name.len() > MAX_NAME_LEN
         || name.starts_with('-')
@@ -132,7 +132,7 @@ fn parse_names(stdout: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-fn raw_names(dir: &Path) -> Result<Vec<Vec<u8>>, ProbeError> {
+pub(crate) fn raw_names(dir: &Path) -> Result<Vec<Vec<u8>>, ProbeError> {
     let output = branches::run_git(dir, &["remote"], &NO_CANCEL)?;
     if output.truncated {
         return Err(ProbeError::new(
@@ -749,7 +749,7 @@ mod tests {
         git(root, &["update-ref", "refs/remotes/origin/y", "HEAD"]);
         let drift = remove_remote(&state, &sessions, preview.nonce).unwrap();
         assert_eq!(drift.outcome, Outcome::Rejected, "msg: {}", drift.message);
-        let version = drift.snapshot.expect("re-read").version;
+        drift.snapshot.expect("re-read");
 
         // The refusal consumed the ticket; replaying it gives the expired
         // answer rather than a second drift check.

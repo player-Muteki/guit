@@ -6,6 +6,7 @@ mod extools;
 mod history;
 mod inflight;
 mod model;
+mod network;
 mod probe;
 mod refs;
 mod remotes;
@@ -1212,6 +1213,48 @@ async fn remove_remote(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn fetch(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    target: network::FetchTarget,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        network::fetch(
+            &state,
+            &sessions,
+            snapshot_version,
+            target,
+            &mut |operation_id, line| {
+                let _ = app.emit(
+                    "sync-progress",
+                    serde_json::json!({ "operationId": operation_id, "line": line }),
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
+async fn set_upstream(
+    app: tauri::AppHandle,
+    snapshot_version: u64,
+    branch: String,
+    upstream: Option<String>,
+) -> Result<write::OperationResult, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<write::WriteState>();
+        let sessions = app.state::<session::SessionState>();
+        network::set_upstream(&state, &sessions, snapshot_version, branch, upstream)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1291,7 +1334,9 @@ fn main() {
             add_remote,
             set_remote_url,
             preview_remove_remote,
-            remove_remote
+            remove_remote,
+            fetch,
+            set_upstream
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

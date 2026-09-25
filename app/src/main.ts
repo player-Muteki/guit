@@ -284,6 +284,7 @@ app.innerHTML = `
       <input id="remote-name" type="text" placeholder="Remote name" aria-label="New remote name" disabled />
       <input id="remote-url" type="text" placeholder="Remote URL or local path" aria-label="New remote URL" disabled />
       <button id="remote-add" disabled title="Register a new remote (git remote add)">Add remote</button>
+      <button id="remote-fetch-all" disabled title="Fetch every configured remote (git fetch --prune)">Fetch all</button>
     </div>
     <div id="remote-list" class="refs" role="list" aria-label="Remotes">
       <div class="file-row placeholder">Open a repository to list its remotes.</div>
@@ -412,7 +413,12 @@ function describeBranch(branch: BranchView | null): string {
   const name = branch.name ?? "unknown";
   if (branch.headState === "unborn") return `${name} (no commits yet)`;
   if (!branch.upstream) return name;
-  return `${name} · ${branch.upstream} ↑${branch.ahead} ↓${branch.behind}`;
+  const counts: string[] = [];
+  if (branch.ahead !== null) counts.push(`↑${branch.ahead}`);
+  if (branch.behind !== null) counts.push(`↓${branch.behind}`);
+  return counts.length
+    ? `${name} · ${branch.upstream} ${counts.join(" ")}`
+    : `${name} · ${branch.upstream}`;
 }
 
 function renderSnapshot(snapshot: SnapshotView | null): void {
@@ -1513,7 +1519,12 @@ type BranchRef = {
   addressable: boolean;
 };
 
-type RemoteRef = { name: string; oid: string; symref: string | null };
+type RemoteRef = {
+  name: string;
+  oid: string;
+  symref: string | null;
+  addressable: boolean;
+};
 
 type TagRef = {
   name: string;
@@ -1549,6 +1560,8 @@ let refsRequestSeq = 0;
 let refsSnapshotVersion = -1;
 let lastRefs: RefListing | null = null;
 let renamingBranch: string | null = null;
+// M5-02: the branch whose "Set upstream…" picker is open, if any.
+let upstreamPickerFor: string | null = null;
 let branchStartOid: string | null = null;
 let branchForceTarget: string | null = null;
 let tagStartOid: string | null = null;
@@ -1564,6 +1577,7 @@ function refPlaceholder(message: string): void {
   refsSnapshotVersion = -1;
   lastRefs = null;
   renamingBranch = null;
+  upstreamPickerFor = null;
   branchStartOid = null;
   tagStartOid = null;
   hideBranchForce();
@@ -1613,7 +1627,8 @@ async function runBranch(
     | "rename_branch"
     | "create_tag"
     | "merge_start"
-    | "rebase_start",
+    | "rebase_start"
+    | "set_upstream",
   args: Record<string, unknown>,
   running: string,
 ): Promise<OperationResult | null> {
@@ -2071,13 +2086,22 @@ function renderRefs(listing: RefListing): void {
           ),
         );
       }
+      // Upstream binding is a plain config write, but its candidates come
+      // from the freshly listed remote-tracking refs, never from typing.
+      el.append(
+        refRowButton("Set upstream…", `Set the upstream of ${branch.name}`, () => {
+          upstreamPickerFor = upstreamPickerFor === branch.name ? null : branch.name;
+          if (lastRefs) renderRefs(lastRefs);
+        }),
+      );
     }
     rows.push(el);
+    if (upstreamPickerFor === branch.name) rows.push(buildUpstreamPicker(branch));
   }
   rows.push(heading(`Remote branches (${listing.remotes.length})`));
   for (const remote of listing.remotes) {
     const meta = remote.symref ? `symref → ${remote.symref}` : remote.oid.slice(0, 8);
-    rows.push(row("", remote.name, meta, true));
+    rows.push(row("", remote.name, meta, remote.addressable));
   }
   rows.push(heading(`Tags (${listing.tags.length})`));
   for (const tag of listing.tags) {
@@ -2105,6 +2129,60 @@ function renderRefs(listing: RefListing): void {
     rows.push(el);
   }
   refList.replaceChildren(...rows);
+}
+
+// M5-02: the picker lists only addressable, non-symbolic remote-tracking
+// refs from the last read listing; the backend re-verifies both sides of
+// the binding against its own fresh listing before Git runs.
+function buildUpstreamPicker(branch: BranchRef): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "file-row ref-row upstream-picker";
+  el.setAttribute("role", "group");
+  el.setAttribute("aria-label", `Choose upstream for ${branch.name}`);
+  const label = document.createElement("span");
+  label.className = "ref-name";
+  label.textContent = `Upstream for ${branch.name}:`;
+  el.append(label);
+  const candidates = (lastRefs?.remotes ?? []).filter(
+    (remote) => remote.addressable && remote.symref === null,
+  );
+  if (candidates.length === 0) {
+    const note = document.createElement("span");
+    note.className = "ref-meta";
+    note.textContent = "no fetched remote branches — run a fetch first";
+    el.append(note);
+  }
+  for (const remote of candidates) {
+    el.append(
+      refRowButton(remote.name, `Track ${remote.name} from ${branch.name}`, () =>
+        void runSetUpstream(branch.name, remote.name),
+      ),
+    );
+  }
+  if (branch.upstream) {
+    el.append(
+      refRowButton("No upstream", `Clear the upstream of ${branch.name}`, () =>
+        void runSetUpstream(branch.name, null),
+      ),
+    );
+  }
+  el.append(
+    refRowButton("Cancel", `Cancel choosing the upstream of ${branch.name}`, () => {
+      upstreamPickerFor = null;
+      if (lastRefs) renderRefs(lastRefs);
+    }),
+  );
+  return el;
+}
+
+async function runSetUpstream(branch: string, upstream: string | null): Promise<void> {
+  const result = await runBranch(
+    "set_upstream",
+    { branch, upstream },
+    upstream ? `Setting upstream of ${branch}…` : `Clearing upstream of ${branch}…`,
+  );
+  if (result) upstreamPickerFor = null;
+  if (lastRefs) renderRefs(lastRefs);
 }
 
 // --- Stash (M4-01): save / apply / pop / drop ------------------------------
@@ -3109,12 +3187,15 @@ void (async () => {
   await refresh();
 })();
 
-// --- Remotes (M5-01): list / add / set-url / remove -------------------------
+// --- Remotes (M5-01/02): list / add / set-url / remove / fetch --------------
 // The backend reads `git remote` + `get-url` itself and hands over only
 // redacted URLs — a URL can embed a credentials token, so the raw form
 // never travels to this file. Removal is destructive (it takes the
 // remote-tracking refs with it) and runs through the shared one-time
 // ticket panel; adding and re-pointing URLs are ordinary queued writes.
+// Fetch rides the same lane with the 3600 s network budget: progress lines
+// arrive redacted over "sync-progress" and the mandatory re-read refreshes
+// the ↑n ↓m badges in the branch header and References rows.
 
 type RemoteView = {
   name: string;
@@ -3123,9 +3204,12 @@ type RemoteView = {
   addressable: boolean;
 };
 
+type SyncProgress = { operationId: number; line: string };
+
 const remoteNameInput = document.querySelector<HTMLInputElement>("#remote-name")!;
 const remoteUrlInput = document.querySelector<HTMLInputElement>("#remote-url")!;
 const remoteAddButton = document.querySelector<HTMLButtonElement>("#remote-add")!;
+const remoteFetchAllButton = document.querySelector<HTMLButtonElement>("#remote-fetch-all")!;
 const remoteListElement = document.querySelector<HTMLElement>("#remote-list")!;
 const remoteStatus = document.querySelector<HTMLElement>("#remote-status")!;
 
@@ -3203,6 +3287,9 @@ function renderRemotes(entries: RemoteView[]): void {
     // needs a losslessly addressable name and goes through the ticket.
     if (entry.addressable) {
       el.append(
+        refRowButton("Fetch", `Fetch from remote ${entry.name}`, () =>
+          void runFetch({ remote: entry.name }, `Fetching ${entry.name}…`),
+        ),
         refRowButton("Set URL", `Set fetch URL of remote ${entry.name}`, () =>
           void runRemoteSetUrl(entry.name, false),
         ),
@@ -3271,6 +3358,42 @@ function addRemote(): void {
   void runRemoteWrite("add_remote", { name, url }, "Adding the remote…");
 }
 
+// The fetch target is the wire-shape the backend enum defines: "all" is
+// the broadcast sweep, { remote } names exactly one entry — even one
+// literally called "all".
+async function runFetch(
+  target: "all" | { remote: string },
+  running: string,
+): Promise<void> {
+  if (!currentSnapshot || writeRunning || pendingPreview) return;
+  writeRunning = true;
+  syncCommitControls();
+  renderRemotes(remoteEntries);
+  remoteStatus.textContent = running;
+  let unlisten: (() => void) | undefined;
+  try {
+    unlisten = await listen<SyncProgress>("sync-progress", ({ payload }) => {
+      remoteStatus.textContent = payload.line;
+    });
+    const result = await invoke<OperationResult>("fetch", {
+      snapshotVersion: currentSnapshot.version,
+      target,
+    });
+    applySnapshot(result.snapshot);
+    remoteStatus.textContent = result.details
+      ? `${result.message} ${result.details}`
+      : result.message;
+  } catch (error) {
+    showError(error);
+    remoteStatus.textContent = "The fetch did not run.";
+  } finally {
+    unlisten?.();
+    writeRunning = false;
+    syncCommitControls();
+    renderRemotes(remoteEntries);
+  }
+}
+
 function runRemoteSetUrl(name: string, push: boolean): void {
   const url = remoteUrlInput.value.trim();
   if (url === "") {
@@ -3310,6 +3433,9 @@ async function requestRemoteRemove(name: string): Promise<void> {
 }
 
 remoteAddButton.addEventListener("click", addRemote);
+remoteFetchAllButton.addEventListener("click", () =>
+  void runFetch("all", "Fetching every remote…"),
+);
 remoteUrlInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -3322,4 +3448,5 @@ function syncRemoteControls(): void {
   remoteNameInput.disabled = locked;
   remoteUrlInput.disabled = locked;
   remoteAddButton.disabled = locked;
+  remoteFetchAllButton.disabled = locked;
 }
