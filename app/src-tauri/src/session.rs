@@ -1,5 +1,6 @@
 use crate::inflight;
 use crate::model::{BranchView, FileId, FileView, PathTable};
+use crate::perf;
 use crate::probe::ProbeError;
 use crate::repo::{self, RepoIdentity};
 use crate::status;
@@ -9,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const RECENT_LIMIT: usize = 10;
 const RECENT_SCHEMA_VERSION: u32 = 1;
@@ -194,18 +195,29 @@ struct Capture {
 }
 
 fn capture(identity: &RepoIdentity) -> Result<Capture, ProbeError> {
+    let started = Instant::now();
+    let result = capture_inner(identity);
+    perf::mark("capture.total", started.elapsed());
+    result
+}
+
+fn capture_inner(identity: &RepoIdentity) -> Result<Capture, ProbeError> {
     let (paths, branch, files, operation) = if identity.is_bare {
         // Git refuses `status` in bare repositories; report no snapshot.
         (PathTable::default(), None, Vec::new(), None)
     } else {
         let raw = repo::status_output(identity, true)?;
+        let parsed_start = Instant::now();
         let parsed = status::parse(&raw)?;
+        perf::mark("capture.parse", parsed_start.elapsed());
         let (paths, files) = PathTable::from_status(&parsed);
         let has_conflicts = parsed
             .entries
             .iter()
             .any(|entry| matches!(entry, status::StatusEntry::Unmerged { .. }));
+        let inflight_start = Instant::now();
         let operation = inflight::detect(&identity.git_dir, has_conflicts)?;
+        perf::mark("capture.inflight", inflight_start.elapsed());
         (
             paths,
             Some(BranchView::from_parsed(&parsed)),
@@ -300,6 +312,17 @@ fn refresh_with<F: Fn(&RepoIdentity) -> Result<Capture, ProbeError>>(
     }
     gate.leader = true;
     drop(gate);
+    let started = Instant::now();
+    let outcome = refresh_leader(state, &identity, cap);
+    perf::mark("refresh.leader", started.elapsed());
+    outcome
+}
+
+fn refresh_leader<F: Fn(&RepoIdentity) -> Result<Capture, ProbeError>>(
+    state: &SessionState,
+    identity: &RepoIdentity,
+    cap: &F,
+) -> Result<Option<SnapshotView>, ProbeError> {
     let finish = |state: &SessionState| {
         let mut gate = state.gate.lock().unwrap();
         gate.leader = false;
@@ -307,8 +330,8 @@ fn refresh_with<F: Fn(&RepoIdentity) -> Result<Capture, ProbeError>>(
         state.gate_cv.notify_all();
     };
     loop {
-        let published = match cap(&identity) {
-            Ok(snapshot) => publish(state, &identity, snapshot, true),
+        let published = match cap(identity) {
+            Ok(snapshot) => publish(state, identity, snapshot, true),
             Err(error) => {
                 finish(state);
                 return Err(error);

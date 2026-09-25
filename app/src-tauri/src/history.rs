@@ -1,9 +1,10 @@
+use crate::perf;
 use crate::probe::{redact, ProbeError};
 use crate::{repo, runner};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Field separator inside one log record (ASCII unit separator).
 const FIELD_SEP: u8 = 0x1f;
@@ -167,7 +168,9 @@ pub fn page(
         let first_line = detail.lines().next().unwrap_or("").to_owned();
         return Err(ProbeError::new("history_page_failed", first_line));
     }
+    let parse_start = Instant::now();
     let mut commits = parse(&output.stdout)?;
+    perf::mark("history.parse", parse_start.elapsed());
     let has_more = commits.len() as u64 > limit;
     if has_more {
         commits.truncate(limit as usize);

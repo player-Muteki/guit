@@ -1,10 +1,11 @@
 use crate::model::display_name;
+use crate::perf;
 use crate::probe::{redact, ProbeError};
 use crate::{history, repo, runner};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Field separator inside one ref record. Git forbids ASCII control
 /// characters (< 0x20) in reference names, so neither the 0x1f separator
@@ -217,7 +218,10 @@ pub fn list(directory: &Path) -> Result<RefListing, ProbeError> {
         let first_line = detail.lines().next().unwrap_or("").to_owned();
         return Err(ProbeError::new("refs_list_failed", first_line));
     }
-    parse_listing(&output.stdout)
+    let parse_start = Instant::now();
+    let listing = parse_listing(&output.stdout);
+    perf::mark("refs.parse", parse_start.elapsed());
+    listing
 }
 
 #[cfg(test)]

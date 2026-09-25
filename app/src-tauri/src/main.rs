@@ -9,6 +9,7 @@ mod inflight;
 mod model;
 mod netclassify;
 mod network;
+mod perf;
 mod probe;
 mod refs;
 mod remotes;
@@ -30,6 +31,7 @@ use probe::{GitProbe, ProbeError, ToolProbe};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 
 struct ProbeState {
@@ -42,7 +44,8 @@ async fn open_repository(
     app: tauri::AppHandle,
     path: String,
 ) -> Result<session::SnapshotView, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let started = Instant::now();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<session::SessionState>();
         let snapshot = session::open(&state, std::path::Path::new(&path))?;
         // Recent/session bookkeeping must not undo a successful open.
@@ -60,15 +63,17 @@ async fn open_repository(
         watch::restart(&app);
         Ok(snapshot)
     })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+    .await;
+    perf::mark("open.total", started.elapsed());
+    outcome.map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
 #[tauri::command]
 async fn restore_repository(
     app: tauri::AppHandle,
 ) -> Result<Option<session::SnapshotView>, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let started = Instant::now();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<session::SessionState>();
         if state.current_identity().is_some() {
             let restored = session::restore(&state)?;
@@ -99,8 +104,10 @@ async fn restore_repository(
             Err(error) => Err(error),
         }
     })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+    .await;
+    perf::mark("startup.restore_total", started.elapsed());
+    perf::mark_since_start("startup.restore_at");
+    outcome.map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
 #[tauri::command]
@@ -1503,6 +1510,7 @@ async fn credential_status(app: tauri::AppHandle) -> Result<askpass::CredentialV
 }
 
 fn main() {
+    perf::init();
     // M5-06: Git spawns this executable as its askpass helper with the
     // prompt as argv. The helper role must be recognised before any GUI
     // machinery runs — a second real instance would only confuse the user.

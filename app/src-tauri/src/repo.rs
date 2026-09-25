@@ -71,6 +71,13 @@ fn as_path(raw: &str) -> PathBuf {
 }
 
 pub fn detect(candidate: &Path) -> Result<RepoIdentity, ProbeError> {
+    let started = std::time::Instant::now();
+    let outcome = detect_inner(candidate);
+    crate::perf::mark("detect.total", started.elapsed());
+    outcome
+}
+
+fn detect_inner(candidate: &Path) -> Result<RepoIdentity, ProbeError> {
     if !candidate.is_dir() {
         return Err(ProbeError::new(
             "repo_path_missing",

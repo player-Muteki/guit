@@ -1,3 +1,4 @@
+use crate::perf;
 use crate::repo::RepoIdentity;
 use crate::session::{self, SessionState};
 use notify::Watcher;
@@ -171,15 +172,20 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
         DEBOUNCE,
         POLL_INTERVAL,
         HEARTBEAT,
-        &mut || match session::refresh(&emitter.state::<SessionState>()) {
-            Ok(Some(snapshot)) => {
-                let _ = emitter.emit("repo-refreshed", snapshot);
-                true
-            }
-            Ok(None) => false,
-            Err(error) => {
-                eprintln!("guit [{}]: watcher refresh failed", error.code);
-                true
+        &mut || {
+            let started = Instant::now();
+            let outcome = session::refresh(&emitter.state::<SessionState>());
+            perf::mark("watch.refresh", started.elapsed());
+            match outcome {
+                Ok(Some(snapshot)) => {
+                    let _ = emitter.emit("repo-refreshed", snapshot);
+                    true
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    eprintln!("guit [{}]: watcher refresh failed", error.code);
+                    true
+                }
             }
         },
     );

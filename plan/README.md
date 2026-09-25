@@ -20,6 +20,7 @@
 | [M3-validation.md](M3-validation.md) | M3 历史、引用与分支操作的测试矩阵与运行时验证 | 真实验证记录 |
 | [M4-validation.md](M4-validation.md) | M4 stash、序列器、reset、worktree、子模块的验证记录 | 真实验证记录 |
 | [M5-validation.md](M5-validation.md) | M5 远端同步（fetch/pull/push/删除/强推/askpass）的验证记录 | 真实验证记录 |
+| [M6-validation.md](M6-validation.md) | M6 性能基线、打包试装、恢复、文档与发布门槛的验证记录 | 真实验证记录 |
 | [M0-platform-setup.md](M0-platform-setup.md) | 三平台环境准备与运行验收步骤 | 可复现的 M0 检查表 |
 
 ## 全局原则

@@ -1,4 +1,6 @@
+use crate::perf;
 use crate::probe::ProbeError;
+use std::ffi::OsStr;
 use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,6 +95,7 @@ pub fn run_with_limit(
     output_limit: usize,
     mut progress: impl FnMut(bool, &[u8]),
 ) -> Result<CapturedOutput, ProbeError> {
+    let label = command_label(&command);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -103,6 +106,7 @@ pub fn run_with_limit(
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000200);
     }
+    let launched = Instant::now();
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -171,6 +175,7 @@ pub fn run_with_limit(
     drop(receiver);
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
+    perf::mark(&label, launched.elapsed());
     cleanup?;
     result?;
     Ok(CapturedOutput {
@@ -179,4 +184,28 @@ pub fn run_with_limit(
         stderr,
         truncated,
     })
+}
+
+/// Perf label for one process launch: program file name plus the leading
+/// non-flag argument (the Git subcommand word). Never paths, flag values,
+/// arguments beyond the subcommand, URLs or output.
+fn command_label(command: &Command) -> String {
+    fn word(value: &OsStr) -> String {
+        value
+            .to_string_lossy()
+            .chars()
+            .take(32)
+            .filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            .collect()
+    }
+    let program = std::path::Path::new(command.get_program())
+        .file_name()
+        .map(word)
+        .unwrap_or_else(|| "?".to_string());
+    let subcommand = command
+        .get_args()
+        .find(|arg| !arg.is_empty() && arg.as_encoded_bytes()[0] != b'-')
+        .map(word)
+        .unwrap_or_default();
+    format!("{program}.{subcommand}")
 }
