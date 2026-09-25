@@ -160,6 +160,18 @@ pub struct WatchState {
     current: Mutex<Option<Arc<AtomicBool>>>,
 }
 
+/// 0 = no supervisor has announced a mode, 1 = watch, 2 = poll. Read by the
+/// diagnostics exporter, which has no access to emitted events.
+static LAST_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn last_mode() -> &'static str {
+    match LAST_MODE.load(Ordering::Relaxed) {
+        1 => "watch",
+        2 => "poll",
+        _ => "none",
+    }
+}
+
 fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<AtomicBool>) {
     let (tx, rx) = mpsc::channel();
     // Keeps the trigger channel open even when no watcher was created, so
@@ -174,6 +186,13 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
         }
     };
     let _ = app.emit("watch-status", WatchStatus { mode: mode.label() });
+    LAST_MODE.store(
+        match mode {
+            Mode::Watch => 1,
+            Mode::Poll => 2,
+        },
+        Ordering::Relaxed,
+    );
     let emitter = app.clone();
     run_loop(
         &rx,
@@ -225,6 +244,7 @@ pub fn restart(app: &tauri::AppHandle) {
 
 /// Stops the supervisor and tells the frontend to clear its status line.
 pub fn stop(app: &tauri::AppHandle) {
+    LAST_MODE.store(0, Ordering::Relaxed);
     let state = app.state::<WatchState>();
     if let Some(previous) = state.current.lock().unwrap().take() {
         previous.store(true, Ordering::SeqCst);

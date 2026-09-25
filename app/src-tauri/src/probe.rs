@@ -15,6 +15,7 @@ impl ProbeError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         let message = redact(&message.into());
         eprintln!("guit [{code}]: {message}");
+        crate::diagnostics::error(code, &message);
         Self { code, message }
     }
 }

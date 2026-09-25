@@ -32,8 +32,10 @@ pub fn init() {
     enabled();
 }
 
-/// Writes one `[perf]` line when enabled.
+/// Mirrors one `[perf]` line to stderr when enabled. The diagnostics ring
+/// always receives the mark; `GUIT_PERF` only gates the mirror (decision 11).
 pub fn mark(phase: &str, elapsed: Duration) {
+    crate::diagnostics::perf_mark(phase, elapsed);
     if enabled() {
         eprintln!(
             "[perf] phase={phase} ms={:.1}",

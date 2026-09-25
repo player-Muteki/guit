@@ -3,6 +3,7 @@
 mod askpass;
 mod branches;
 mod clone;
+mod diagnostics;
 mod extools;
 mod history;
 mod inflight;
@@ -1509,6 +1510,90 @@ async fn credential_status(app: tauri::AppHandle) -> Result<askpass::CredentialV
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+/// M6-06: writes the fixed diagnostics snapshot to the path the user chose
+/// in the save dialog (the content manifest was confirmed in the UI before
+/// this is ever invoked). The frontend sends only a path; every fact comes
+/// from the backend's own redacted views.
+#[tauri::command]
+async fn export_diagnostics(app: tauri::AppHandle, path: String) -> Result<String, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let git = probe::git().ok();
+        let sessions = app.state::<session::SessionState>();
+        let credential = askpass::credential_status(&sessions).ok();
+        let remotes: Vec<(String, Option<String>, Option<String>)> = remotes::list_view(&sessions)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|view| (view.name, view.fetch_url, view.push_url))
+            .collect();
+        let schemes: Vec<(String, Vec<String>)> = credential
+            .as_ref()
+            .map(|view| {
+                view.schemes
+                    .iter()
+                    .map(|group| (group.scheme.clone(), group.remotes.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let helpers: Vec<String> = credential
+            .as_ref()
+            .map(|view| view.helpers.clone())
+            .unwrap_or_default();
+        let mut config_files = Vec::new();
+        if let Ok(directory) = app_config_dir(&app) {
+            if let Ok(entries) = std::fs::read_dir(directory) {
+                for entry in entries.flatten() {
+                    let Ok(meta) = entry.metadata() else { continue };
+                    if !meta.is_file() {
+                        continue;
+                    }
+                    let schema_version = std::fs::read_to_string(entry.path())
+                        .ok()
+                        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                        .and_then(|value| {
+                            value
+                                .get("schema_version")
+                                .or_else(|| value.get("schemaVersion"))
+                                .and_then(serde_json::Value::as_u64)
+                        });
+                    config_files.push(diagnostics::ConfigFile {
+                        name: entry.file_name().to_string_lossy().into_owned(),
+                        size: meta.len(),
+                        schema_version,
+                    });
+                }
+            }
+        }
+        let facts = diagnostics::Facts {
+            app_version: env!("CARGO_PKG_VERSION"),
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            git_available: git.as_ref().is_some_and(|probe| probe.available),
+            git_version: git.as_ref().and_then(|probe| probe.version.as_deref()),
+            git_executable: git.as_ref().and_then(|probe| probe.executable.as_deref()),
+            credential_policy: credential.as_ref().map(|view| view.policy.as_str()),
+            credential_helpers: &helpers,
+            ssh_agent: credential.as_ref().is_some_and(|view| view.ssh_agent),
+            remote_schemes: &schemes,
+            remotes: &remotes,
+            watch_mode: watch::last_mode(),
+            config_files,
+            entries: diagnostics::snapshot(),
+        };
+        std::fs::write(&path, diagnostics::export_text(&facts)).map_err(|error| {
+            ProbeError::new(
+                "diagnostics_write_failed",
+                format!("guit could not write the diagnostics file: {error}"),
+            )
+        })?;
+        Ok(std::path::Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_owned()))
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     perf::init();
     // M5-06: Git spawns this executable as its askpass helper with the
@@ -1632,7 +1717,8 @@ fn main() {
             force_push,
             set_upstream,
             submit_askpass,
-            credential_status
+            credential_status,
+            export_diagnostics
         ])
         .run(tauri::generate_context!())
         .expect("failed to start guit");

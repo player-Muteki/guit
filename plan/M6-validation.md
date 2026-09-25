@@ -257,3 +257,60 @@ npm run tauri build -- --bundles deb          # in app/
 bash tools/bench/recovery-checks.sh \
   app/src-tauri/target/release/bundle/deb/guit_0.1.0_amd64.deb
 ```
+
+## M6-06 diagnostics export and user documentation
+
+The diagnostics ring lives in `app/src-tauri/src/diagnostics.rs`: 256 entries
+of ≤120-byte summaries behind a `OnceLock<Mutex<VecDeque>>`, fed from exactly
+two points — `ProbeError::new` (messages already URL-redacted by construction)
+and `perf::mark` (always recorded; `GUIT_PERF` only gates the stderr mirror).
+The exporter is a fixed-key-order serializer over a `Facts` struct whose type
+is the contract: no field can carry a ticket, secret, prompt, commit message,
+file content or repository path. HOME/USERPROFILE prefixes fold to `~`, and
+`truncate_bytes` never splits a UTF-8 character (a fresh test expectation was
+wrong on exactly this and was corrected — 7 bytes fit two 3-byte `断`, not
+three).
+
+The `export_diagnostics` command assembles facts from the backend's own views
+(git probe, credential status, redacted remote list, config-directory
+metadata, watch mode, ring snapshot) and writes the file at the user-chosen
+path; `dialog:allow-save` was added to the capability. The UI flow in the
+Environment check card is button → content-manifest `role=alertdialog` →
+native save chooser (`guit-diagnostics.txt` default) → status line.
+
+**Click-through verified over AT-SPI on the packaged deb**
+(`tools/bench/diagnostics-export-check.sh`, fail=0, 10 assertions): the whole
+chain including the zh_CN GTK chooser (accept button matched by `保存`/`Save`
+shape) is drivable — no manual gate needed here. Two honest findings: the
+first run wrote the file into the app's working directory (the GTK chooser
+defaults to the process cwd, not `$HOME`), so the script launches guit from a
+dedicated folder; and one full `cargo test` run failed
+`the_bridge_sweep_removes_a_socket_file_left_by_a_dead_listener` while three
+subsequent full runs and both targeted reruns were green — the same
+unreproducible single-failure profile noted under M6-03, root cause not
+proven.
+
+Verification: `cargo test --locked` 292+5 pass, `npm run build` clean,
+`cargo fmt --check` clean, clippy at the 12 pre-existing locations (zero
+warnings in diagnostics.rs). Sample export on a session-less first run:
+header, `app_version 0.1.0`, `platform linux x86_64`, git line, `watch_mode
+none`, `no repository session (posture not probed)`, config-file metadata,
+four ring entries newest-last, exclusion footer.
+
+Docs set landed (decision 12): root `README.md` (AppImage produced+launched
+wording, Node 22+/built-with-26, diagnostics export paragraph, forward-roll
+config policy paragraph), `LICENSE` (MIT), `CHANGELOG.md` 0.1.0 (AppImage gap
+updated), `docs/credentials.md` (never-stores + unix-only askpass refusal
+policy), `docs/external-tools.md`, `docs/known-limitations.md` (AppImage
+status, forward-roll naming, output bounds, Wayland typing gap), and
+`app/README.md` rewritten from stale M0 probe text to a development guide
+pointer. Windows/macOS remain configuration-only claims everywhere.
+
+### M6-06 reproduction
+
+```sh
+cd app && cargo test --locked && npm run build && cd ..
+npm run tauri build -- --bundles deb          # in app/
+bash tools/bench/diagnostics-export-check.sh \
+  app/src-tauri/target/release/bundle/deb/guit_0.1.0_amd64.deb
+```

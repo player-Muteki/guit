@@ -1,12 +1,21 @@
-# guit M0 desktop probe
+# guit development guide
 
-This is the first runnable milestone. It checks the installed Git CLI, configured diff/merge tools, Tauri window behavior, and a cancellable Git child process. Repository browsing and write operations begin in M1 and M2.
+This directory holds the guit client: a Tauri 2 + Rust backend exposing
+semantic Git operations, and a TypeScript + native HTML/CSS frontend that
+never builds Git commands itself. The M0 probe these instructions grew out
+of is long gone; the app now covers the full workflow described in the
+root [README.md](../README.md).
 
-## Development prerequisites
+## Prerequisites
 
-- Node.js 22, npm 10, and a recent Rust toolchain.
-- Git installed and available on `PATH`.
-- Tauri 2 system dependencies for the target OS. On Ubuntu, install `libwebkit2gtk-4.1-dev`, `build-essential`, `curl`, `wget`, `file`, `libxdo-dev`, `libssl-dev`, `librsvg2-dev`, and `libayatana-appindicator3-dev`. Windows needs WebView2 and C++ build tools; macOS needs Xcode command-line tools.
+- Node.js 22+ (the 0.1.0 cycle built with Node 26) and a recent Rust
+  toolchain (1.96+).
+- Git installed and on `PATH` (verified against Git 2.53).
+- Tauri 2 system dependencies for the target OS. On Ubuntu, install
+  `libwebkit2gtk-4.1-dev`, `build-essential`, `curl`, `wget`, `file`,
+  `libxdo-dev`, `libssl-dev`, `librsvg2-dev`, and
+  `libayatana-appindicator3-dev`. Windows needs WebView2 and C++ build
+  tools; macOS needs Xcode command-line tools.
 
 ## Commands
 
@@ -14,15 +23,29 @@ From `app/`:
 
 ```sh
 npm ci
-npm run tauri dev
-npm run build
-npm run test:fixture
-cargo test --manifest-path src-tauri/Cargo.toml
-npm run tauri build
+npm run tauri dev                                # development iteration
+npm run build                                    # frontend type-check + bundle
+npm run test:fixture                             # frontend fixture tests
+cargo test --manifest-path src-tauri/Cargo.toml  # Rust unit + temp-repo integration tests
+npm run tauri build -- --bundles deb,rpm,appimage  # packaged artifacts
 ```
 
-The probe uses an isolated temporary Git repository for its status capability check. The process probe starts `git hash-object --stdin`, keeps stdin open briefly, and can terminate and reap that child. It does not modify any user repository. The window stores its size, position, and always-on-top preference in the application config directory.
+> Always package through `npm run tauri build` — a bare
+> `cargo build --release` binary tries to load the dev server and is not a
+> runnable app.
 
-## Current limits
+## Where the rules live
 
-The UI does not yet open repositories. The external-tool panel reports Git's configured tool names and the system opener type; it does not launch user tools yet. Child-process cancellation is a single-process probe, not proof that a future hook, SSH, or credential-helper process tree can be terminated on every OS. See `../plan/M0-validation.md` for recorded platform results.
+- Root `AGENTS.md` — repository boundaries and implementation rules.
+- `../TECHNICAL_DESIGN.md` — product and technical constraints.
+- `../plan/` — milestones, the task backlog with per-item verification
+  evidence, and `plan/M6-validation.md` for the current release record.
+- `../tools/bench/` — performance harness and AT-SPI drive scripts (not
+  packaged). Run them from the repository root.
+
+## Tests that touch your machine
+
+Rust integration tests create isolated temporary repositories with their own
+Git configuration; they never touch your global config or the repository
+they live in. `tools/bench/clean-install-trial.sh` can install and purge the
+deb under a polkit prompt — run it deliberately.

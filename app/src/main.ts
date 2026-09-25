@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import {
   buildRows,
@@ -353,6 +353,25 @@ app.innerHTML = `
       <button id="restore-window" disabled>Restore window size</button>
       <label><input id="on-top" type="checkbox" /> Always on top</label>
     </div>
+    <div id="diagnostics-confirm" class="preview" role="alertdialog" aria-label="Confirm diagnostics export" hidden>
+      <p class="preview-warning">guit will write a plain-text diagnostics report to a file you choose. It contains:</p>
+      <ul class="preview-list">
+        <li>App, OS and Git versions, and the Git executable location (home folder shown as ~)</li>
+        <li>Credential posture: policy, helper names, SSH-agent presence, URL schemes in use</li>
+        <li>Remote names and their URLs with any embedded credentials redacted</li>
+        <li>Config file names, sizes and schema versions — never their contents</li>
+        <li>The 256 most recent event summaries: phase timings, error codes and messages</li>
+      </ul>
+      <p class="preview-note">Never included: passwords, tokens, prompts, commit messages, file contents or repository paths.</p>
+      <div class="actions">
+        <button id="diagnostics-confirm-yes">Export…</button>
+        <button id="diagnostics-confirm-no">Cancel</button>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="export-diagnostics">Export diagnostics…</button>
+    </div>
+    <p id="diagnostics-status" role="status"></p>
   </section>
   <section class="card">
     <h2>Process probe</h2>
@@ -3260,6 +3279,29 @@ onTop.addEventListener("change", async () => {
     scheduleWindowSave();
   } catch (error) {
     onTop.checked = !onTop.checked;
+    showError(error);
+  }
+});
+
+// M6-06: the manifest above is the confirmation; the backend serializes
+// only its own redacted views, so cancelling here is the only way to opt out.
+const diagnosticsConfirm = document.querySelector<HTMLElement>("#diagnostics-confirm")!;
+const diagnosticsStatus = document.querySelector<HTMLElement>("#diagnostics-status")!;
+document.querySelector<HTMLButtonElement>("#export-diagnostics")!.addEventListener("click", () => {
+  diagnosticsStatus.textContent = "";
+  diagnosticsConfirm.hidden = false;
+});
+document.querySelector<HTMLButtonElement>("#diagnostics-confirm-no")!.addEventListener("click", () => {
+  diagnosticsConfirm.hidden = true;
+});
+document.querySelector<HTMLButtonElement>("#diagnostics-confirm-yes")!.addEventListener("click", async () => {
+  diagnosticsConfirm.hidden = true;
+  try {
+    const selected = await save({ defaultPath: "guit-diagnostics.txt" });
+    if (typeof selected !== "string") return; // dialog cancelled
+    const fileName = await invoke<string>("export_diagnostics", { path: selected });
+    diagnosticsStatus.textContent = `Diagnostics written to ${fileName}.`;
+  } catch (error) {
     showError(error);
   }
 });
