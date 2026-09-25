@@ -119,6 +119,14 @@ fn watch_targets(identity: &RepoIdentity) -> Vec<PathBuf> {
     targets
 }
 
+/// notify's inotify mask includes IN_ACCESS, and every Git read guit performs
+/// (HEAD, config, refs, objects) touches files. Treating accesses as changes
+/// makes the refresh loop feed itself forever; an access never changes any
+/// Git state, so it is dropped. All other kinds still trigger a refresh.
+fn refresh_worthy(event: &notify::Event) -> bool {
+    !matches!(event.kind, notify::EventKind::Access(_))
+}
+
 fn start_watcher(
     targets: &[PathBuf],
     tx: Sender<()>,
@@ -126,8 +134,10 @@ fn start_watcher(
     let events_tx = tx;
     let mut watcher =
         notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
-            if result.is_ok() {
-                let _ = events_tx.send(());
+            if let Ok(event) = result {
+                if refresh_worthy(&event) {
+                    let _ = events_tx.send(());
+                }
             }
         })?;
     for target in targets {
@@ -332,6 +342,21 @@ mod tests {
         );
         assert_eq!(exit, LoopExit::Shutdown);
         assert_eq!(fired.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn access_events_do_not_trigger_a_refresh() {
+        let access = notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Read))
+            .add_path(PathBuf::from("/repo/.git/HEAD"));
+        assert!(!refresh_worthy(&access));
+        let modify = notify::Event::new(notify::EventKind::Modify(
+            notify::event::ModifyKind::Data(notify::event::DataChange::Content),
+        ))
+        .add_path(PathBuf::from("/repo/.git/index"));
+        assert!(refresh_worthy(&modify));
+        let remove = notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::File))
+            .add_path(PathBuf::from("/repo/notes.txt"));
+        assert!(refresh_worthy(&remove));
     }
 
     #[test]
