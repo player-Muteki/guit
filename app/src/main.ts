@@ -1465,9 +1465,18 @@ let historyLoading = false;
 // bare repo); a string = the HEAD oid the loaded pages belong to.
 let historyRepoKey: string | null | undefined;
 let selectedCommit: CommitView | null = null;
+// DOM rows form a prefix of historyCommits and are only ever appended:
+// deep-paging measured a full-list rebuild of already-loaded pages as an
+// O(loaded) cost per click (129 ms at 500 rows → 1664 ms at 3000).
+let historyRows: HTMLElement[] = [];
+const historyRowByOid = new Map<string, HTMLElement>();
+let historySelectedRow: HTMLElement | null = null;
 
 function historyPlaceholder(message: string): void {
   historyCommits = [];
+  historyRows = [];
+  historyRowByOid.clear();
+  historySelectedRow = null;
   historyHasMore = false;
   historyMoreButton.disabled = true;
   historyStatus.textContent = "";
@@ -1518,9 +1527,10 @@ async function loadHistory(reset: boolean): Promise<void> {
 }
 
 function renderHistoryRows(): void {
-  const rows = historyCommits.map((commit) => {
+  for (let i = historyRows.length; i < historyCommits.length; i += 1) {
+    const commit = historyCommits[i];
     const row = document.createElement("div");
-    row.className = "file-row" + (selectedCommit?.oid === commit.oid ? " selected" : "");
+    row.className = "file-row";
     row.setAttribute("role", "listitem");
     const button = document.createElement("button");
     button.className = "history-select";
@@ -1539,9 +1549,18 @@ function renderHistoryRows(): void {
     when.className = "history-date";
     when.textContent = commit.authorDate.slice(0, 10);
     row.append(when);
-    return row;
-  });
-  historyList.replaceChildren(...rows);
+    historyList.append(row);
+    historyRows.push(row);
+    historyRowByOid.set(commit.oid, row);
+  }
+  const wanted = selectedCommit
+    ? historyRowByOid.get(selectedCommit.oid) ?? null
+    : null;
+  if (wanted !== historySelectedRow) {
+    historySelectedRow?.classList.remove("selected");
+    historySelectedRow = wanted;
+    historySelectedRow?.classList.add("selected");
+  }
 }
 
 function detailFileNote(message: string): HTMLElement {
