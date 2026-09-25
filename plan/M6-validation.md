@@ -166,3 +166,28 @@ bash tools/bench/after_m6_03.sh app/src-tauri/target/release/guit   # quiescent 
 /usr/bin/python3 tools/bench/reduce_baseline.py /tmp/guit-m6-after-baseline.jsonl /tmp/guit-m6-after-paging.jsonl
 node tools/bench/file-model-bench.mjs
 ```
+
+## M6-04 bundles, license metadata and clean-environment install trial
+
+Decision 7 metadata landed in `app/src-tauri/tauri.conf.json` (publisher `player-Muteki`, copyright `2026 player-Muteki`, license `MIT`, category `DeveloperTool`, short/long descriptions, 5 icons, deb `section: devel`, Windows wix language + nsis `currentUser` + `downloadBootstrapper` webview mode, macOS `minimumSystemVersion 10.13`) and `Cargo.toml` (`license = "MIT"`); root `LICENSE` is MIT full text (committed with the M6-06 docs set). Homepage intentionally absent — the user has none; stage 1 records it as a note, not a failure.
+
+**AppImage: retried once per plan decision 7 and it succeeded.** `npm run tauri build -- --bundles deb,rpm,appimage` finished 3 bundles (linuxdeploy AppRun/plugin downloads that failed in M0 now complete). Smoke: `APPIMAGE_EXTRACT_AND_RUN=1` under an isolated HOME launched the GUI (startup.restore_at 1425.8 ms, empty-state session-decode note handled gracefully). Status changes from "blocked since M0" to **produced + launched on this host**; distribution acceptance stays with the M6-07 ledger. Artifacts: deb **4,216,870 B**, rpm **4,216,718 B**, AppImage **85,481,976 B**. deb control: `Maintainer: player-Muteki`, `Section: devel`, `Depends: libwebkit2gtk-4.1-0, libgtk-3-0` (bundler-injected as predicted), 17 payload entries.
+
+`tools/bench/clean-install-trial.sh` four stages, **fail=0 on the final run (2026-09-25)**:
+
+- **Stage 1 (metadata):** control-field greps + `dpkg -c` asserts for `usr/bin/guit`, `.desktop`, hicolor icons — all ok. Two script bugs found and fixed during the trial: the `dpkg -c` regex ignored the date field, and privileged runs need absolute artifact paths (root's cwd differs).
+- **Stage 2 (pristine HOME):** `dpkg -x` payload run via AT-SPI — first-launch empty state visible, seeded session restores the Changes card. The zero-stray-write assertion initially failed honestly: WebKitGTK writes its data under `~/.local/share/dev.guit.desktop/` (localstorage, CacheStorage salt, hsts sqlite, WebKitCache, mediakeys) in addition to `~/.config/dev.guit.desktop/` (session.json, window.json). The assertion was re-scoped to "no writes outside the identifier's own config+data dirs" — a corrected claim, not a loosened one.
+- **Stage 3 (real install + purge, user-authorized):** no sudo ticket was obtainable non-interactively, so the script gained a `sudo -n | pkexec` privilege path (polkit dialog authorized by the user). `dpkg -i` → `/usr/bin/guit` on PATH → system desktop entry + 128x128 icon present → `dpkg --purge guit` (the original `-r --purge` combo is rejected by dpkg — fixed) → `~/.config/dev.guit.desktop` marker file survived purge (design decision) → dpkg no longer knows guit.
+- **Stage 4 (rpm payload):** `rpm2cpio`/`cpio` were absent; installed via apt under pkexec with the user's standing M6-04 sudo authorization. `rpm2cpio | cpio -id` confirms `usr/bin/guit` and the desktop entry in the rpm payload. `rpm -qp --requires` remains unavailable (`rpm` not installed) — dependency view stays limited to the bundler log, recorded honestly rather than installing more tooling.
+
+`m0.yml` per-platform bundles fixed: ubuntu `deb,rpm,appimage` (AppImage now viable), macOS `app,dmg`, Windows `nsis,msi`, node-version 22→26 to match the build host. **CI status is unchanged: prepared, never executed (no remote).** Windows/macOS metadata is schema- and config-validated only — zero runtime claims on those platforms.
+
+### M6-04 reproduction
+
+```sh
+npm run tauri build -- --bundles deb,rpm,appimage   # in app/
+bash tools/bench/clean-install-trial.sh \
+  app/src-tauri/target/release/bundle/deb/guit_0.1.0_amd64.deb \
+  app/src-tauri/target/release/bundle/rpm/guit-0.1.0-1.x86_64.rpm /tmp/guit-m6-bench/1k
+APPIMAGE_EXTRACT_AND_RUN=1 <bundle/appimage/guit_0.1.0_amd64.AppImage>   # isolated HOME
+```

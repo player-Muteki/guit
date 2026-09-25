@@ -12,5 +12,28 @@
   "app": {
     "windows": [{ "title": "guit", "width": 720, "height": 560, "minWidth": 340, "minHeight": 400 }]
   },
-  "bundle": { "active": true, "targets": "all" }
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "player-Muteki",
+    "copyright": "2026 player-Muteki",
+    "license": "MIT",
+    "category": "DeveloperTool",
+    "shortDescription": "Low-resource desktop Git client",
+    "longDescription": "guit is a low-resource desktop Git client inspired by the VS Code source control sidebar. It drives the Git installed on your system, respects your Git configuration, hooks, signing setup and credential helpers, and never stores credentials itself.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "wix": { "language": "en-US" },
+      "nsis": { "installMode": "currentUser" },
+      "webviewInstallMode": { "type": "downloadBootstrapper" }
+    },
+    "macOS": { "minimumSystemVersion": "10.13" },
+    "linux": { "deb": { "section": "devel" } }
+  }
 }
