@@ -7,3 +7,5 @@
 /app/src-tauri/icons/ios/
 /.DS_Store
 /Thumbs.db
+
+__pycache__/
