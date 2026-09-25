@@ -3347,4 +3347,342 @@ mod tests {
             assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(word));
         }
     }
+
+    /// M5-07 closing reconciliation: local head, its remote-tracking ref
+    /// and the bare's branch must be the same commit, and both object
+    /// stores must still pass Git's own integrity check.
+    fn agree(work: &Path, bare: &Path, branch: &str) {
+        let head = read(work, &["rev-parse", branch]);
+        assert_eq!(
+            read(
+                work,
+                &["rev-parse", &format!("refs/remotes/origin/{branch}")]
+            ),
+            head,
+            "the tracking ref must match the local head after a synced push"
+        );
+        assert_eq!(
+            read(bare, &["rev-parse", branch]),
+            head,
+            "the bare must hold exactly the commit guit reported"
+        );
+        let _ = head;
+    }
+
+    fn fsck_clean(dir: &Path) {
+        let output =
+            branches::run_git(dir, &["fsck", "--no-progress"], &AtomicBool::new(false)).unwrap();
+        assert!(
+            output.status.success(),
+            "fsck failed in {}: {}",
+            dir.display(),
+            crate::probe::redact(&String::from_utf8_lossy(&output.stderr))
+        );
+    }
+
+    #[test]
+    fn m5_matrix_a_full_round_trip_keeps_head_tracking_and_bare_in_agreement() {
+        let (root, work) = mirrored();
+        let bare = root.path().join("origin.git");
+        advance_via_peer(root.path(), "peer first");
+        let (state, sessions, version) = pull_env(&work);
+        let fetched = fetch(
+            &state,
+            &sessions,
+            version,
+            FetchTarget::Remote("origin".into()),
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(fetched.outcome, Outcome::Success, "{}", fetched.message);
+        let snapshot = fetched.snapshot.clone().unwrap();
+        assert_eq!(
+            (
+                snapshot.branch.as_ref().unwrap().ahead,
+                snapshot.branch.as_ref().unwrap().behind
+            ),
+            (Some(0), Some(1)),
+            "the fetch direction is visible before anything is integrated"
+        );
+        let pulled = pull(
+            &state,
+            &sessions,
+            snapshot.version,
+            PullStrategy::FfOnly,
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(pulled.outcome, Outcome::Success, "{}", pulled.message);
+        agree(&work, &bare, "main");
+        // The other direction: local work pushed back through guit.
+        commit(&work, "local next");
+        let pushed = push(
+            &state,
+            &sessions,
+            pulled.snapshot.unwrap().version,
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(pushed.outcome, Outcome::Success, "{}", pushed.message);
+        agree(&work, &bare, "main");
+        let final_snapshot = pushed.snapshot.unwrap();
+        let main = final_snapshot.branch.as_ref().unwrap();
+        assert_eq!(
+            (main.ahead.clone(), main.behind.clone()),
+            (Some(0), Some(0)),
+            "a synced repository reports zeros explicitly"
+        );
+        fsck_clean(&work);
+        fsck_clean(&bare);
+    }
+
+    #[test]
+    fn m5_matrix_divergence_refuses_a_plain_push_then_rebase_lands_linear() {
+        let (root, work) = mirrored();
+        let bare = root.path().join("origin.git");
+        let (local_tip, bare_tip) = diverged(root.path(), &work);
+        let (state, sessions, version) = pull_env(&work);
+        let rejected = push(&state, &sessions, version, None, &mut |_, _| {}).unwrap();
+        assert_eq!(rejected.outcome, Outcome::Failed, "{}", rejected.message);
+        assert_eq!(
+            rejected.category,
+            Some(netclassify::NetCategory::NonFastForward)
+        );
+        assert_eq!(
+            read(&bare, &["rev-parse", "main"]),
+            bare_tip,
+            "the refusal held the bare"
+        );
+        assert_eq!(
+            read(&work, &["rev-parse", "main"]),
+            local_tip,
+            "and the local head"
+        );
+        let rebased = pull(
+            &state,
+            &sessions,
+            rejected.snapshot.unwrap().version,
+            PullStrategy::Rebase,
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(rebased.outcome, Outcome::Success, "{}", rebased.message);
+        // Rebased means linear: the single local commit now sits directly
+        // on the peer's tip, which is exactly what the bare must receive.
+        assert_eq!(read(&work, &["rev-parse", "main^"]), bare_tip);
+        assert!(
+            !second_parent_exists(&work),
+            "a rebase leaves no merge commit"
+        );
+        let pushed = push(
+            &state,
+            &sessions,
+            rebased.snapshot.unwrap().version,
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(pushed.outcome, Outcome::Success, "{}", pushed.message);
+        agree(&work, &bare, "main");
+        fsck_clean(&work);
+        fsck_clean(&bare);
+    }
+
+    #[test]
+    fn m5_matrix_cancellation_reports_a_repository_exactly_as_it_was() {
+        let (root, work) = mirrored();
+        let bare = root.path().join("origin.git");
+        advance_via_peer(root.path(), "peer moves on");
+        let head_before = read(&work, &["rev-parse", "main"]);
+        let tracking_before = read(&work, &["rev-parse", "refs/remotes/origin/main"]);
+        let bare_tip = read(&bare, &["rev-parse", "main"]);
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, &work).unwrap();
+        let state = WriteState::default();
+        let holder = state.begin().unwrap();
+        state.cancel_flag().store(true, Ordering::SeqCst);
+        let result = run_fetch(
+            &state,
+            &sessions,
+            view.version,
+            FetchTarget::Remote("origin".into()),
+            None,
+            &mut |_| {},
+        )
+        .unwrap();
+        state.finish();
+        let _ = holder;
+        assert_eq!(result.outcome, Outcome::Cancelled);
+        assert_eq!(result.exit_code, None, "Git never ran");
+        // The honest report: cancelled, and the re-read shows the
+        // repository exactly as it stood — the peer's commit is not in
+        // this object store yet and no fetch happened, so nothing may
+        // claim to be behind. Cancelled must never fabricate movement.
+        let snapshot = result.snapshot.unwrap();
+        assert!(
+            snapshot.version > view.version,
+            "cancellation still forces the re-read"
+        );
+        assert_eq!(
+            (
+                snapshot.branch.as_ref().unwrap().ahead,
+                snapshot.branch.as_ref().unwrap().behind
+            ),
+            (Some(0), Some(0))
+        );
+        assert_eq!(read(&work, &["rev-parse", "main"]), head_before);
+        assert_eq!(
+            read(&work, &["rev-parse", "refs/remotes/origin/main"]),
+            tracking_before,
+            "a cancelled fetch must not move the tracking ref"
+        );
+        assert_eq!(
+            read(&bare, &["rev-parse", "main"]),
+            bare_tip,
+            "the bare is untouched"
+        );
+        fsck_clean(&work);
+        fsck_clean(&bare);
+    }
+
+    #[test]
+    fn m5_matrix_a_pull_conflict_resolves_continues_and_pushes_as_one_chain() {
+        let (root, work) = mirrored();
+        let bare = root.path().join("origin.git");
+        commit_paths(&work, &[("a.txt", "local\n")], "local change");
+        peer_commits(root.path(), &[("a.txt", "remote\n")], "peer change");
+        let (state, sessions, version) = pull_env(&work);
+        let conflicted = pull(
+            &state,
+            &sessions,
+            version,
+            PullStrategy::Default,
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            conflicted.outcome,
+            Outcome::Conflicted,
+            "{}",
+            conflicted.message
+        );
+        let snapshot = conflicted.snapshot.unwrap();
+        assert!(
+            snapshot.operation.is_some(),
+            "the banner state survives the pull"
+        );
+        // Resolution arrives from outside guit (an editor/merge tool in
+        // real life): fix the file, stage it, and the banner lane closes.
+        std::fs::write(work.join("a.txt"), "resolved by hand\n").unwrap();
+        git(&work, &["add", "--", "a.txt"]);
+        let continued = sequencer::operation_continue(&state, &sessions, snapshot.version).unwrap();
+        assert_eq!(continued.outcome, Outcome::Success, "{}", continued.message);
+        let after = continued.snapshot.clone().unwrap();
+        assert!(
+            after.operation.is_none(),
+            "the merge finished, the banner is gone"
+        );
+        assert!(
+            second_parent_exists(&work),
+            "default rule integrated by merge"
+        );
+        assert_eq!(read(&work, &["show", "main:a.txt"]), "resolved by hand");
+        let pushed = push(&state, &sessions, after.version, None, &mut |_, _| {}).unwrap();
+        assert_eq!(pushed.outcome, Outcome::Success, "{}", pushed.message);
+        assert_eq!(read(&bare, &["show", "main:a.txt"]), "resolved by hand");
+        agree(&work, &bare, "main");
+        fsck_clean(&work);
+        fsck_clean(&bare);
+    }
+
+    #[test]
+    fn m5_matrix_a_published_branch_survives_a_remote_delete_and_republish() {
+        let (root, work) = mirrored();
+        let bare = root.path().join("origin.git");
+        git(&work, &["checkout", "-q", "-b", "topic"]);
+        commit(&work, "topic work");
+        let tip = branch_of(&work, "topic").oid;
+        let (state, sessions, version) = pull_env(&work);
+        let published = publish(
+            &state,
+            &sessions,
+            version,
+            "origin".into(),
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(published.outcome, Outcome::Success, "{}", published.message);
+        assert_eq!(read(&bare, &["rev-parse", "topic"]), tip);
+        assert_eq!(
+            branch_of(&work, "topic").upstream.as_deref(),
+            Some("origin/topic")
+        );
+        // Deleting it on the remote through the ticket pair…
+        let snapshot = published.snapshot.clone().unwrap();
+        let preview = preview_delete_remote_branch(
+            &state,
+            &sessions,
+            snapshot.version,
+            "origin/topic".into(),
+        )
+        .unwrap();
+        let deleted =
+            run_delete_remote_branch(&state, &sessions, &preview.nonce, None, &mut |_| {}).unwrap();
+        assert_eq!(deleted.outcome, Outcome::Success, "{}", deleted.message);
+        assert!(!ref_exists(&bare, "refs/heads/topic"), "gone from the bare");
+        assert!(
+            ref_exists(&work, "refs/heads/topic"),
+            "the local branch survives"
+        );
+        // …with the honest consequence: publishing again refuses because
+        // the binding still exists, and plain push is what recreates it.
+        let snapshot = deleted.snapshot.unwrap();
+        let refused = publish(
+            &state,
+            &sessions,
+            snapshot.version,
+            "origin".into(),
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(refused.outcome, Outcome::Rejected, "{}", refused.message);
+        assert!(
+            refused.message.contains("already tracks origin/topic"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(refused.exit_code, None, "the refusal never reached Git");
+        assert!(
+            !ref_exists(&bare, "refs/heads/topic"),
+            "the refusal touched nothing"
+        );
+        let pushed = push(
+            &state,
+            &sessions,
+            refused.snapshot.unwrap().version,
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(pushed.outcome, Outcome::Success, "{}", pushed.message);
+        assert_eq!(read(&bare, &["rev-parse", "topic"]), tip);
+        // Counts come from the status view (refs::list omits a clean
+        // track), which reports the synced branch explicitly at zero.
+        let topic = pushed
+            .snapshot
+            .unwrap()
+            .branch
+            .expect("topic is checked out");
+        assert_eq!((topic.ahead, topic.behind), (Some(0), Some(0)));
+        assert_eq!(topic.upstream.as_deref(), Some("origin/topic"));
+        fsck_clean(&work);
+        fsck_clean(&bare);
+    }
 }

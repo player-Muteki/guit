@@ -16,6 +16,10 @@
 | [08-task-backlog.md](08-task-backlog.md) | 按阶段编号的实施任务、依赖与证据 | 可直接跟踪的开发待办 |
 | [M0-validation.md](M0-validation.md) | M0 本机环境、已执行检查与平台缺口 | 真实验证记录 |
 | [M1-validation.md](M1-validation.md) | M1 本机环境、自动化测试与 AT-SPI 运行时验证、键盘注入限制 | 真实验证记录 |
+| [M2-validation.md](M2-validation.md) | M2 写入路径（暂存/提交/丢弃/clean）、外部工具通道与运行时验证 | 真实验证记录 |
+| [M3-validation.md](M3-validation.md) | M3 历史、引用与分支操作的测试矩阵与运行时验证 | 真实验证记录 |
+| [M4-validation.md](M4-validation.md) | M4 stash、序列器、reset、worktree、子模块的验证记录 | 真实验证记录 |
+| [M5-validation.md](M5-validation.md) | M5 远端同步（fetch/pull/push/删除/强推/askpass）的验证记录 | 真实验证记录 |
 | [M0-platform-setup.md](M0-platform-setup.md) | 三平台环境准备与运行验收步骤 | 可复现的 M0 检查表 |
 
 ## 全局原则
