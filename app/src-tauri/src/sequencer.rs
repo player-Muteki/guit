@@ -293,6 +293,8 @@ pub(crate) fn start_in_slot(
                                 Start::Revert => format!("Reverted {target}."),
                             };
                             return Ok(OperationResult {
+                                category: None,
+                                suggestion: None,
                                 operation_id: 0,
                                 kind,
                                 outcome,
@@ -313,6 +315,8 @@ pub(crate) fn start_in_slot(
                             details = Some(write::first_stderr_line(&output.stderr));
                         }
                         return Ok(OperationResult {
+                            category: None,
+                            suggestion: None,
                             operation_id: 0,
                             kind,
                             outcome,
@@ -333,6 +337,8 @@ pub(crate) fn start_in_slot(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind,
         outcome,
@@ -469,6 +475,8 @@ fn run_step_inner(
                                 let snapshot = session::refresh(sessions)?;
                                 if output.status.success() && !output.truncated {
                                     return Ok(OperationResult {
+                                        category: None,
+                                        suggestion: None,
                                         operation_id: 0,
                                         kind,
                                         outcome,
@@ -498,6 +506,8 @@ fn run_step_inner(
                                     )
                                 };
                                 return Ok(OperationResult {
+                                    category: None,
+                                    suggestion: None,
                                     operation_id: 0,
                                     kind,
                                     outcome,
@@ -520,6 +530,8 @@ fn run_step_inner(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind,
         outcome,

@@ -73,11 +73,25 @@ type SnapshotView = {
   operation: OperationView | null;
 };
 
+// Heuristic cause of a failed network operation, decided in Rust; the
+// frontend only displays it, never re-derives it from text.
+type NetCategory =
+  | "auth"
+  | "network"
+  | "nonfastforward"
+  | "protectedbranch"
+  | "remotehookrejected"
+  | "stalelease"
+  | "notfound"
+  | "other";
+
 type CloneResult = {
   target: string;
   success: boolean;
   cancelled: boolean;
   message: string;
+  category: NetCategory | null;
+  suggestion: string | null;
   residue: string | null;
 };
 
@@ -126,6 +140,8 @@ type OperationResult = {
   exitCode: number | null;
   message: string;
   details: string | null;
+  category: NetCategory | null;
+  suggestion: string | null;
   snapshot: SnapshotView | null;
 };
 
@@ -1361,9 +1377,12 @@ async function confirmPreview(): Promise<void> {
     pendingPreview = null;
     renderPreviewPanel();
     applySnapshot(result.snapshot);
-    writeStatus.textContent = result.details
-      ? `${result.message} ${result.details}`
-      : result.message;
+    writeStatus.textContent =
+      kind === "remoteBranchDelete" || kind === "forcePush"
+        ? networkStatusLine(result)
+        : result.details
+          ? `${result.message} ${result.details}`
+          : result.message;
     // Git refused an unmerged branch with -d: force is a *separate*
     // confirmation with a stronger warning, never an automatic retry.
     if (
@@ -3068,7 +3087,9 @@ cloneStart.addEventListener("click", async () => {
       cloneStatus.textContent = `${result.message} Opening ${result.target}…`;
       await openRepository(result.target);
     } else {
-      cloneStatus.textContent = result.message;
+      cloneStatus.textContent = result.suggestion
+        ? `${result.message} ${result.suggestion}`
+        : result.message;
       if (result.residue) {
         // guit never deletes anything: the user decides what to do with it.
         showError(
@@ -3495,6 +3516,17 @@ function addRemote(): void {
   void runRemoteWrite("add_remote", { name, url }, "Adding the remote…");
 }
 
+// The status line for a network result: Git's message, its redacted
+// verdict and, when the backend classified a failure, the fixed advice.
+// The category and suggestion are decided in Rust; the frontend only
+// displays them.
+function networkStatusLine(result: OperationResult): string {
+  const base = result.details
+    ? `${result.message} ${result.details}`
+    : result.message;
+  return result.suggestion ? `${base} ${result.suggestion}` : base;
+}
+
 // The fetch target is the wire-shape the backend enum defines: "all" is
 // the broadcast sweep, { remote } names exactly one entry — even one
 // literally called "all".
@@ -3517,9 +3549,7 @@ async function runFetch(
       target,
     });
     applySnapshot(result.snapshot);
-    remoteStatus.textContent = result.details
-      ? `${result.message} ${result.details}`
-      : result.message;
+    remoteStatus.textContent = networkStatusLine(result);
   } catch (error) {
     showError(error);
     remoteStatus.textContent = "The fetch did not run.";
@@ -3582,9 +3612,7 @@ async function runPull(): Promise<void> {
       strategy,
     });
     applySnapshot(result.snapshot);
-    remoteStatus.textContent = result.details
-      ? `${result.message} ${result.details}`
-      : result.message;
+    remoteStatus.textContent = networkStatusLine(result);
   } catch (error) {
     showError(error);
     remoteStatus.textContent = "The pull did not run.";
@@ -3632,9 +3660,7 @@ async function runPush(): Promise<void> {
       snapshotVersion: currentSnapshot.version,
     });
     applySnapshot(result.snapshot);
-    remoteStatus.textContent = result.details
-      ? `${result.message} ${result.details}`
-      : result.message;
+    remoteStatus.textContent = networkStatusLine(result);
     if (
       result.outcome === "failed" &&
       (result.details?.includes("[rejected]") ||
@@ -3677,9 +3703,7 @@ async function runPublish(): Promise<void> {
       remote,
     });
     applySnapshot(result.snapshot);
-    remoteStatus.textContent = result.details
-      ? `${result.message} ${result.details}`
-      : result.message;
+    remoteStatus.textContent = networkStatusLine(result);
   } catch (error) {
     showError(error);
     remoteStatus.textContent = "The publish did not run.";

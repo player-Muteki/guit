@@ -6,6 +6,7 @@ mod extools;
 mod history;
 mod inflight;
 mod model;
+mod netclassify;
 mod network;
 mod probe;
 mod refs;

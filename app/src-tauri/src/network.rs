@@ -17,7 +17,7 @@ use crate::probe::ProbeError;
 use crate::repo;
 use crate::runner;
 use crate::write::{self, OperationKind, OperationResult, Outcome, PreviewResult, WriteState};
-use crate::{branches, history, refs, remotes, sequencer, session, submodules};
+use crate::{branches, history, netclassify, refs, remotes, sequencer, session, submodules};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -113,8 +113,9 @@ fn plan_remotes(work_root: &Path, target: &FetchTarget) -> Result<Plan, ProbeErr
 struct Sweep {
     fetched: Vec<String>,
     failed: Vec<String>,
-    /// (exit code, first redacted stderr line) of the first failure.
-    first_failure: Option<(i32, String)>,
+    /// (exit code, raw stderr) of the first failure; the raw bytes feed
+    /// the M5-05 classifier while `details` keeps only the redacted line.
+    first_failure: Option<(i32, Vec<u8>)>,
     cancelled: bool,
 }
 
@@ -153,7 +154,7 @@ fn sweep_fetch(
             FETCH_OUTPUT_LIMIT,
             &mut collect,
         ) {
-            Ok(output) => {
+            Ok(mut output) => {
                 if !buffer.is_empty() {
                     let remainder = std::mem::take(&mut buffer);
                     submodules::emit_line(&remainder, on_line);
@@ -163,10 +164,8 @@ fn sweep_fetch(
                 } else {
                     sweep.failed.push(name.clone());
                     if sweep.first_failure.is_none() {
-                        sweep.first_failure = Some((
-                            output.status.code().unwrap_or(-1),
-                            write::first_stderr_line(&output.stderr),
-                        ));
+                        let raw = std::mem::take(&mut output.stderr);
+                        sweep.first_failure = Some((output.status.code().unwrap_or(-1), raw));
                     }
                 }
             }
@@ -199,6 +198,8 @@ fn run_fetch(
                 if state.cancel_flag().load(Ordering::SeqCst) {
                     let snapshot = session::refresh(sessions)?;
                     return Ok(OperationResult {
+                        category: None,
+                        suggestion: None,
                         operation_id: 0,
                         kind: OperationKind::Fetch,
                         outcome: Outcome::Cancelled,
@@ -216,6 +217,7 @@ fn run_fetch(
     let exit_code;
     let message;
     let mut details = None;
+    let mut category: Option<netclassify::NetCategory> = None;
     match gates {
         Err(refusal) => {
             outcome = Outcome::Rejected;
@@ -230,7 +232,10 @@ fn run_fetch(
             } else {
                 String::new()
             };
-            details = sweep.first_failure.as_ref().map(|(_, line)| line.clone());
+            details = sweep
+                .first_failure
+                .as_ref()
+                .map(|(_, raw)| write::first_stderr_line(raw));
             exit_code = sweep.first_failure.as_ref().map(|(code, _)| *code);
             if sweep.cancelled {
                 outcome = Outcome::Cancelled;
@@ -256,6 +261,9 @@ fn run_fetch(
                 };
             } else {
                 outcome = Outcome::Failed;
+                if let Some((_, raw)) = &sweep.first_failure {
+                    category = Some(netclassify::classify(raw));
+                }
                 message = if broadcast {
                     format!(
                         "Fetched {} of {} remotes; {} reported a failure.{} What did arrive is \
@@ -279,6 +287,8 @@ fn run_fetch(
         exit_code,
         message,
         details,
+        suggestion: category.map(|category| category.suggestion().to_owned()),
+        category,
         snapshot,
     })
 }
@@ -495,6 +505,8 @@ fn pull_result(
     snapshot: Option<session::SnapshotView>,
 ) -> OperationResult {
     OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::Pull,
         outcome,
@@ -633,7 +645,7 @@ fn integrate_ff_only(
         Ok(output) => {
             let exit_code = output.status.code();
             let snapshot = session::refresh(sessions)?;
-            Ok(if output.status.success() && !output.truncated {
+            let mut result = if output.status.success() && !output.truncated {
                 pull_result(
                     Outcome::Success,
                     exit_code,
@@ -649,7 +661,11 @@ fn integrate_ff_only(
                     Some(write::first_stderr_line(&output.stderr)),
                     snapshot,
                 )
-            })
+            };
+            // A refused ff-only is (nearly always) a divergence; the
+            // classifier says so only when Git's words actually do.
+            annotate(&mut result, &output.stderr);
+            Ok(result)
         }
         Err(error) if error.code == "process_cancelled" => {
             let snapshot = session::refresh(sessions)?;
@@ -726,16 +742,23 @@ fn run_pull(
             }
             if !sweep.failed.is_empty() {
                 let snapshot = session::refresh(sessions)?;
-                return Ok(pull_result(
+                let mut result = pull_result(
                     Outcome::Failed,
                     sweep.first_failure.as_ref().map(|(code, _)| *code),
                     format!(
                         "git fetch from \"{}\" reported a failure; nothing was integrated.",
                         plan.remote
                     ),
-                    sweep.first_failure.map(|(_, line)| line),
+                    sweep
+                        .first_failure
+                        .as_ref()
+                        .map(|(_, raw)| write::first_stderr_line(raw)),
                     snapshot,
-                ));
+                );
+                if let Some((_, raw)) = &sweep.first_failure {
+                    annotate(&mut result, raw);
+                }
+                return Ok(result);
             }
             let target = match resolve_upstream_oid(&work_root, &plan.upstream) {
                 Err(error) => {
@@ -875,6 +898,8 @@ fn op_result(
     snapshot: Option<session::SnapshotView>,
 ) -> OperationResult {
     OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind,
         outcome,
@@ -882,6 +907,18 @@ fn op_result(
         message,
         details,
         snapshot,
+    }
+}
+
+/// Attaches the M5-05 heuristic verdict to a *failed* network result from
+/// the leg's raw stderr (the classifier redacts per line before matching).
+/// Successes, cancellations and gate refusals never get a category, and
+/// the redacted `details` stay exactly Git's own words.
+fn annotate(result: &mut OperationResult, raw_stderr: &[u8]) {
+    if result.outcome == Outcome::Failed {
+        let category = netclassify::classify(raw_stderr);
+        result.category = Some(category);
+        result.suggestion = Some(category.suggestion().to_owned());
     }
 }
 
@@ -953,7 +990,7 @@ fn run_push(
         on_line,
     )?;
     let snapshot = session::refresh(sessions)?;
-    Ok(if leg.cancelled {
+    let mut result = if leg.cancelled {
         op_result(
             OperationKind::Push,
             Outcome::Cancelled,
@@ -980,7 +1017,9 @@ fn run_push(
             Some(push_failure_line(&leg.stderr)),
             snapshot,
         )
-    })
+    };
+    annotate(&mut result, &leg.stderr);
+    Ok(result)
 }
 
 pub(crate) fn publish(
@@ -1109,7 +1148,7 @@ fn run_publish(
         on_line,
     )?;
     let snapshot = session::refresh(sessions)?;
-    Ok(if leg.cancelled {
+    let mut result = if leg.cancelled {
         op_result(
             OperationKind::Publish,
             Outcome::Cancelled,
@@ -1138,7 +1177,9 @@ fn run_publish(
             Some(push_failure_line(&leg.stderr)),
             snapshot,
         )
-    })
+    };
+    annotate(&mut result, &leg.stderr);
+    Ok(result)
 }
 
 pub(crate) fn preview_delete_remote_branch(
@@ -1278,7 +1319,7 @@ fn run_delete_remote_branch(
         on_line,
     )?;
     let snapshot = session::refresh(sessions)?;
-    Ok(if leg.cancelled {
+    let mut result = if leg.cancelled {
         op_result(
             OperationKind::DeleteRemoteBranch,
             Outcome::Cancelled,
@@ -1308,7 +1349,9 @@ fn run_delete_remote_branch(
             Some(push_failure_line(&leg.stderr)),
             snapshot,
         )
-    })
+    };
+    annotate(&mut result, &leg.stderr);
+    Ok(result)
 }
 
 /// Commit lines in force-push previews: the count is exact, the subjects
@@ -1499,7 +1542,7 @@ fn run_force_push(
         on_line,
     )?;
     let snapshot = session::refresh(sessions)?;
-    Ok(if leg.cancelled {
+    let mut result = if leg.cancelled {
         op_result(
             OperationKind::ForcePush,
             Outcome::Cancelled,
@@ -1528,7 +1571,9 @@ fn run_force_push(
             Some(push_failure_line(&leg.stderr)),
             snapshot,
         )
-    })
+    };
+    annotate(&mut result, &leg.stderr);
+    Ok(result)
 }
 
 /// Binds (or clears) the upstream of one local branch. This only rewrites
@@ -1580,6 +1625,8 @@ fn run_set_upstream(
                 if state.cancel_flag().load(Ordering::SeqCst) {
                     let snapshot = session::refresh(sessions)?;
                     return Ok(OperationResult {
+                        category: None,
+                        suggestion: None,
                         operation_id: 0,
                         kind: OperationKind::SetUpstream,
                         outcome: Outcome::Cancelled,
@@ -1625,6 +1672,8 @@ fn run_set_upstream(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::SetUpstream,
         outcome,
@@ -2306,6 +2355,15 @@ mod tests {
             .as_deref()
             .expect("git's refusal")
             .contains("fast-forward"));
+        assert_eq!(
+            result.category,
+            Some(netclassify::NetCategory::NonFastForward),
+            "the divergence is classified"
+        );
+        assert!(result
+            .suggestion
+            .as_deref()
+            .is_some_and(|line| line.contains("Fetch first")));
         assert_eq!(branch_of(&work, "main").oid, local_tip);
         assert!(result.snapshot.expect("re-read").operation.is_none());
     }
@@ -2665,10 +2723,25 @@ mod tests {
         assert!(result.exit_code.is_some(), "Git's refusal code survives");
         // Measured on Git 2.53: a stale tracking ref earns the "fetch
         // first" label; a fresh-but-diverged one says "non-fast-forward".
-        let details = result.details.expect("git's verdict survives");
+        let details = result.details.as_deref().expect("git's verdict survives");
         assert!(
             details.contains("[rejected]") && details.contains("fetch first"),
             "details: {details}"
+        );
+        assert_eq!(
+            result.category,
+            Some(netclassify::NetCategory::NonFastForward),
+            "details: {details}"
+        );
+        assert_eq!(
+            result.suggestion.as_deref(),
+            Some(netclassify::NetCategory::NonFastForward.suggestion())
+        );
+        let json = serde_json::to_string(&result).expect("result serializes");
+        assert!(
+            json.contains(r#""category":"nonfastforward""#)
+                && json.contains(r#""suggestion":"The remote has commits"#),
+            "wire shape: {json}"
         );
         assert_eq!(
             read(&root.path().join("origin.git"), &["rev-parse", "main"]),
@@ -2697,10 +2770,88 @@ mod tests {
         let details = result.details.expect("the remote's line survives");
         assert!(details.contains("hook declined"), "details: {details}");
         assert_eq!(
+            result.category,
+            Some(netclassify::NetCategory::RemoteHookRejected),
+            "details: {details}"
+        );
+        assert_eq!(
             read(&bare, &["rev-parse", "main"]).len(),
             40,
             "the hook held the remote tip at the base commit"
         );
+    }
+
+    /// M5-05 end-to-end: an HTTP remote that answers 401 to every request
+    /// on the loopback address. No real network or credentials are
+    /// involved; Git itself produces the auth failure that guit must
+    /// classify honestly (GIT_TERMINAL_PROMPT=0 is baked into every
+    /// spawned command).
+    #[test]
+    fn an_http_401_from_the_wire_is_classified_as_auth() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc::TryRecvError;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback port");
+        let addr = listener.local_addr().expect("local addr");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    let mut request = [0u8; 2048];
+                    let _ = stream.read(&mut request);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\n\
+                               WWW-Authenticate: Basic realm=\"guit-test\"\r\n\
+                               Content-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    let _ = stream.flush();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    match rx.try_recv() {
+                        Ok(()) | Err(TryRecvError::Disconnected) => break,
+                        Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+                Err(_) => break,
+            }
+        });
+        let (root, work) = mirrored();
+        git(
+            &work,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &format!("http://{addr}/repo.git"),
+            ],
+        );
+        let (state, sessions, version) = pull_env(&work);
+        let result = fetch(
+            &state,
+            &sessions,
+            version,
+            FetchTarget::Remote("origin".into()),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        drop(tx);
+        server.join().expect("server thread");
+        assert_eq!(result.outcome, Outcome::Failed, "{}", result.message);
+        assert_eq!(
+            result.category,
+            Some(netclassify::NetCategory::Auth),
+            "details: {:?}",
+            result.details
+        );
+        assert_eq!(
+            result.suggestion.as_deref(),
+            Some(netclassify::NetCategory::Auth.suggestion())
+        );
+        result.details.expect("Git's own line survives");
+        drop(root);
     }
 
     #[test]
@@ -2997,6 +3148,15 @@ mod tests {
         // Measured on Git 2.53: the lease mismatch label is "stale info".
         let details = result.details.expect("git's verdict survives");
         assert!(details.contains("stale info"), "details: {details}");
+        assert_eq!(
+            result.category,
+            Some(netclassify::NetCategory::StaleLease),
+            "details: {details}"
+        );
+        assert!(result
+            .suggestion
+            .as_deref()
+            .is_some_and(|line| line.contains("force-with-lease guard")));
         assert_eq!(
             read(&root.path().join("origin.git"), &["rev-parse", "main"]),
             bare_tip,

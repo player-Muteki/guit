@@ -1,6 +1,6 @@
 use crate::probe::{redact, ProbeError};
 use crate::status::StatusEntry;
-use crate::{repo, runner, session, status};
+use crate::{netclassify, repo, runner, session, status};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -434,6 +434,12 @@ pub struct OperationResult {
     pub message: String,
     /// Redacted first line of Git's stderr on failure; never raw output.
     pub details: Option<String>,
+    /// Heuristic cause for a failed *network* operation (M5-05). A
+    /// suggestion layer only: it never replaces `details` or the exit
+    /// code, and local writes leave it `None`.
+    pub category: Option<netclassify::NetCategory>,
+    /// Fixed advice text paired with `category`; `None` without one.
+    pub suggestion: Option<String>,
     pub snapshot: Option<session::SnapshotView>,
 }
 
@@ -505,6 +511,8 @@ pub(crate) fn run_write(
     // Git state; the result is wrong if that read fails.
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         // Assigned by the queue wrapper so every entry point reports it.
         operation_id: 0,
         kind,
@@ -623,6 +631,8 @@ pub(crate) fn run_commit(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::Commit,
         outcome,
@@ -734,6 +744,8 @@ pub(crate) fn run_discard(
     let Some(preview) = state.take_preview(nonce, PreviewKind::Discard) else {
         let snapshot = session::refresh(sessions)?;
         return Ok(OperationResult {
+            category: None,
+            suggestion: None,
             operation_id: 0,
             kind: OperationKind::Discard,
             outcome: Outcome::Rejected,
@@ -800,6 +812,8 @@ pub(crate) fn run_discard(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::Discard,
         outcome,
@@ -949,6 +963,8 @@ pub(crate) fn run_clean(
     let Some(preview) = state.take_preview(nonce, PreviewKind::Clean) else {
         let snapshot = session::refresh(sessions)?;
         return Ok(OperationResult {
+            category: None,
+            suggestion: None,
             operation_id: 0,
             kind: OperationKind::Clean,
             outcome: Outcome::Rejected,
@@ -1007,6 +1023,8 @@ pub(crate) fn run_clean(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::Clean,
         outcome,

@@ -19,6 +19,11 @@ pub struct CloneResult {
     pub success: bool,
     pub cancelled: bool,
     pub message: String,
+    /// Heuristic cause of a Git-level clone failure (M5-05); `None` on
+    /// success, cancellation or a local protocol problem.
+    pub category: Option<crate::netclassify::NetCategory>,
+    /// Fixed advice text paired with `category`.
+    pub suggestion: Option<String>,
     /// Folder left behind by a failed or interrupted clone. guit reports it
     /// but never deletes anything.
     pub residue: Option<String>,
@@ -121,7 +126,7 @@ pub fn clone_repository(
         emit_line(&remainder, on_line);
     }
     let display_target = repo::to_display(&target);
-    let (success, cancelled, message) = match output {
+    let (success, cancelled, message, category) = match output {
         Ok(output) => {
             if output.status.success() && !output.truncated {
                 match repo::detect(&target) {
@@ -129,6 +134,7 @@ pub fn clone_repository(
                         true,
                         false,
                         "Clone completed and the new repository was detected.".to_owned(),
+                        None,
                     ),
                     Err(error) => (
                         false,
@@ -137,9 +143,12 @@ pub fn clone_repository(
                             "Git reported success but no repository was detected: {}",
                             error.message
                         ),
+                        None,
                     ),
                 }
             } else {
+                // A clone is a network operation even when the source is
+                // local; the M5-05 classifier gives the honest suggestion.
                 let detail = last_error_line(&output.stderr);
                 (
                     false,
@@ -148,11 +157,12 @@ pub fn clone_repository(
                         Some(line) => format!("Git clone failed: {line}"),
                         None => "Git clone failed.".to_owned(),
                     },
+                    Some(crate::netclassify::classify(&output.stderr)),
                 )
             }
         }
         Err(error) if error.code == "process_cancelled" => {
-            (false, true, "Clone cancelled.".to_owned())
+            (false, true, "Clone cancelled.".to_owned(), None)
         }
         Err(error) => return Err(error),
     };
@@ -161,6 +171,8 @@ pub fn clone_repository(
         success,
         cancelled,
         message,
+        suggestion: category.map(|category| category.suggestion().to_owned()),
+        category,
         residue: if success { None } else { residue_of(&target) },
     })
 }
@@ -265,6 +277,32 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "clone_target_occupied");
+    }
+
+    #[test]
+    fn a_clone_refused_on_the_wire_is_classified_as_network() {
+        // Loopback port 1: nothing can listen there unprivileged, so Git
+        // fails fast and honestly on the same machine, no real network.
+        let parent = tempfile::tempdir().unwrap();
+        let state = CloneState::default();
+        let result = clone_repository(
+            &state,
+            "http://127.0.0.1:1/nope.git",
+            parent.path(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(!result.success && !result.cancelled, "{}", result.message);
+        assert_eq!(
+            result.category,
+            Some(crate::netclassify::NetCategory::Network),
+            "message: {}",
+            result.message
+        );
+        assert_eq!(
+            result.suggestion.as_deref(),
+            Some(crate::netclassify::NetCategory::Network.suggestion())
+        );
     }
 
     #[test]

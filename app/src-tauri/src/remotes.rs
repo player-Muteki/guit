@@ -265,6 +265,8 @@ fn run_config_op(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind,
         outcome,
@@ -433,6 +435,8 @@ fn run_remove(
     let Some((dir, name, url, tracking)) = state.take_remote_remove(nonce) else {
         let snapshot = session::refresh(sessions)?;
         return Ok(OperationResult {
+            category: None,
+            suggestion: None,
             operation_id: 0,
             kind: OperationKind::RemoteRemove,
             outcome: Outcome::Rejected,
@@ -481,6 +485,8 @@ fn run_remove(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::RemoteRemove,
         outcome,

@@ -498,6 +498,8 @@ fn run_update(
                 if state.cancel_flag().load(Ordering::SeqCst) {
                     let snapshot = session::refresh(sessions)?;
                     return Ok(OperationResult {
+                        category: None,
+                        suggestion: None,
                         operation_id: 0,
                         kind: OperationKind::SubmoduleUpdate,
                         outcome: Outcome::Cancelled,
@@ -564,6 +566,8 @@ fn run_update(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::SubmoduleUpdate,
         outcome,

@@ -253,6 +253,8 @@ fn run_add(
                 // Not a refusal: report the cancel honestly after the refresh.
                 let snapshot = session::refresh(sessions)?;
                 return Ok(OperationResult {
+                    category: None,
+                    suggestion: None,
                     operation_id: 0,
                     kind: OperationKind::WorktreeAdd,
                     outcome: Outcome::Cancelled,
@@ -296,6 +298,8 @@ fn run_add(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::WorktreeAdd,
         outcome,
@@ -399,6 +403,8 @@ fn run_remove(
     else {
         let snapshot = session::refresh(sessions)?;
         return Ok(OperationResult {
+            category: None,
+            suggestion: None,
             operation_id: 0,
             kind: OperationKind::WorktreeRemove,
             outcome: Outcome::Rejected,
@@ -451,6 +457,8 @@ fn run_remove(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::WorktreeRemove,
         outcome,
@@ -531,6 +539,8 @@ fn run_prune(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::WorktreePrune,
         outcome,

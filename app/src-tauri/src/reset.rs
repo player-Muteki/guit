@@ -93,6 +93,8 @@ fn refused(
 ) -> Result<OperationResult, ProbeError> {
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind,
         outcome: Outcome::Rejected,
@@ -152,6 +154,8 @@ fn run_reset(
     if state.cancel_flag().load(Ordering::SeqCst) {
         let snapshot = session::refresh(sessions)?;
         return Ok(OperationResult {
+            category: None,
+            suggestion: None,
             operation_id: 0,
             kind,
             outcome: Outcome::Cancelled,
@@ -186,6 +190,8 @@ fn run_reset(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind,
         outcome,
@@ -353,6 +359,8 @@ fn run_reset_hard(
     if state.cancel_flag().load(Ordering::SeqCst) {
         let snapshot = session::refresh(sessions)?;
         return Ok(OperationResult {
+            category: None,
+            suggestion: None,
             operation_id: 0,
             kind,
             outcome: Outcome::Cancelled,
@@ -389,6 +397,8 @@ fn run_reset_hard(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind,
         outcome,

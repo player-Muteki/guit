@@ -288,6 +288,8 @@ fn run_create(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind,
         outcome,
@@ -403,6 +405,8 @@ fn run_delete(
     else {
         let snapshot = session::refresh(sessions)?;
         return Ok(OperationResult {
+            category: None,
+            suggestion: None,
             operation_id: 0,
             kind,
             outcome: Outcome::Rejected,
@@ -456,6 +460,8 @@ fn run_delete(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind,
         outcome,

@@ -245,6 +245,8 @@ fn run_save(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::StashSave,
         outcome,
@@ -326,6 +328,8 @@ fn run_apply(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind: OperationKind::StashApply,
         outcome,
@@ -448,6 +452,8 @@ fn run_ticketed(
     let Some((work_root, sel, oid, _force)) = state.take_ref_delete(nonce, preview_kind) else {
         let snapshot = session::refresh(sessions)?;
         return Ok(OperationResult {
+            category: None,
+            suggestion: None,
             operation_id: 0,
             kind,
             outcome: Outcome::Rejected,
@@ -503,6 +509,8 @@ fn run_ticketed(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
+        category: None,
+        suggestion: None,
         operation_id: 0,
         kind,
         outcome,
