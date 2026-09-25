@@ -84,3 +84,42 @@ bash tools/bench/paging_supplement.sh app/src-tauri/target/release/guit 5 /tmp/g
 
 Reference reading (scope per `plan/07`: a full editor is not equivalent to a single-purpose client): guit's whole tree on the identical fixture is ≈460 MB median (main process only ≈213 MB) — roughly 3.8× less total RSS. Caveat recorded honestly: the sampler could not assert the SCM sidebar was actually rendered/activated (no UI probe), so provider-scan work may vary; treat as an idle-editor process-tree reference, not a feature-for-feature comparison.
 
+## M6-02 large-repo matrix and policy verdicts
+
+Tools added this subtask (all under `tools/bench/`, regenerable fixtures, nothing in the product): `sweep_untracked.sh` (6 cells tracked×untracked × 3 repeats), `make-history.py` fast-import 10,000-commit fixture, `deep_paging.sh` (raw timed `git log --skip N -n 50`, 5× per skip point, bash ms timing — deliberately outside the guit runner so the 20 ms receive floor is not mixed in), `storm.py` + `burst_measure.sh` (file-event bursts against a running binary with `GUIT_PERF`), `phase2_measures.sh` (serializes hist10k build → deep-page curve → in-app 60-click paging → burst test; all measurements run one at a time).
+
+### Untracked scan sweep (`--untracked-files=all`, kept)
+
+Capture cost per `status` refresh (median over the run; `capture.total` = spawn + parse + in-flight bookkeeping):
+
+| cell | `capture.total` med (min) | `git.status` med | `capture.parse` med | idle tree RSS med | main HWM | inotify |
+| --- | --- | --- | --- | --- | --- | --- |
+| t100-u1k | 23.1 (2.6) | 22.6 | 0.1 | 485,848 KB | 215,032 | 21 |
+| t100-u10k | 30.8 (8.9) | 27.2 | ~0.4 | 597,312 KB | 237,916 | 21 |
+| t1k-u1k | 24.7 (3.7) | 24.1 | 0.1 | 485,556 KB | 215,916 | 39 |
+| t1k-u10k | 32.3 (10.6) | 28.6 | ~0.5 | 596,924 KB | 239,120 | 39 |
+| t10k-u1k | 24.0 (2.4) | 23.4 | 1.1 | 485,036 KB | 212,924 | 198 |
+| t10k-u10k | 36.8 (13.1) | 33.8 | 1.1 | 597,576 KB | 237,612 | 199 |
+
+Medians sit on the runner's ~21 ms spawn floor; minima show the real Git cost (a 10k×10k full sweep executes in ≈10–13 ms). **Verdict (decision 4): keep `all` as the default and do not implement the capped-depth/“Scan fully” fallback.** Evidence: worst cell p50 36.8 ms ≪ the 250 ms pre-registered trigger; parse is ≤1.1 ms of a 32 MB-capped capture (truncation-stays-an-error lane unchanged); RSS grows with the *untracked count only* — flat across tracked tiers (597 MB for every u10k cell), +24 MB main-process HWM for 9k extra paths — so growth is sub-linear in the product `tracked × untracked` that the contingency was sized for. The `plan/02` trigger bullet is annotated as measured-and-not-triggered; the "never silently omit files" rule stands untouched.
+
+### Watcher and idle-refresh chain (decision 5)
+
+Burst test on t10k-u10k: 6 bursts × 10 tracked files, 0.5 s apart, inside a ~11.5 s window → `watch.refresh` = 24, i.e. 2.1/s — at or *below* the ~3/s rate the untracked-sweep cells recorded with no storm at all (21–26 refreshes per ~8 s window). Marginal refreshes attributable to 60 file events: ≈ 0. Per-refresh latency during the storm held at 35–40 ms (`capture.total` for the cell), so the 250 ms debounce + leader/rerun coalescing gate already absorb bursts completely. **Verdict: no adaptive debounce, poll fallback unchanged.** The real cost driver is *idle*: ~2–3 captures/s, each chaining 5+ Git spawns (`git.stash`, `git.remote`, `git.config`×2, `git.ls-files`, `git.for-each-ref` — re-invoked per refresh by per-card pulls). That is handed to M6-03 as the "skip republish when the snapshot is identical / dedupe per-refresh spawns" candidate, with before-data = these sweeps' per-phase tables. inotify count is hard 199 watches on the 10k fixture, no `max_user_watches` pressure, no poll degradation observed at any point.
+
+### Deep paging (decision 6② premise falsified; new frontend hotspot found)
+
+Raw Git curve on the 10,000-commit fixture (`git log --skip N -n 50`, outside guit): skip 0 → 4–6 ms, 2500 → 11–13, 5000 → 16–19, 7500 → 19–24, 9950 → 26–27 ms. Linear, tiny, nowhere near the 200 ms trigger — **the rev-list OID-cursor cache is NOT implemented; its premise (`--skip` superlinearity) does not hold on Git 2.53 and the record stands as the refutation.** In-app, `git.log` stayed flat at med 45.8 ms (n=61, includes the floor) and `history.parse` at 0.1 ms, yet click-to-visible latency in the AT-SPI harness grew **super-linearly with the number of already-loaded rows**: clicks 1–10 med 129 ms → clicks 30–40 med 984 ms → clicks 51–60 med 1664 ms (max 1898). Root cause located in code, not Git: `renderHistoryRows()` (app/src/main.ts:1520) rebuilds and `replaceChildren()` the *entire* loaded list on every page append and on every commit selection — the History list, unlike Changes, is not virtualized, so per-click DOM/layout/AT work is O(loaded rows). Attribution caveat recorded honestly: the harness polls by walking the AT tree, whose size also grows with loaded rows, so part of the measured wall time may be observation rather than user-perceived latency; M6-03's incremental-render fix will be measured with the same harness before/after, which separates the two without changing methodology.
+
+### M6-02 gates and reproduction
+
+No product-code changes in this subtask (measurement + tooling only), so the Rust/TS suites from M6-01 apply unchanged. Reproduction:
+
+```sh
+bash tools/bench/sweep_untracked.sh app/src-tauri/target/release/guit 3 /tmp/guit-m6-untracked.jsonl
+bash tools/bench/phase2_measures.sh app/src-tauri/target/release/guit   # hist10k + deep-page + 60-click + burst
+/usr/bin/python3 tools/bench/reduce_baseline.py /tmp/guit-m6-untracked.jsonl /tmp/guit-m6-hist10k.jsonl
+cat /tmp/guit-m6-deeppage.txt /tmp/guit-m6-burst.txt                    # raw curve and burst counts
+```
+
+
