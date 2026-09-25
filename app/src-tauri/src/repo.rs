@@ -66,10 +66,6 @@ fn rev_parse_line(path: &Path, flag: &str) -> Result<Option<String>, ProbeError>
     Ok((!text.is_empty()).then_some(text))
 }
 
-fn as_path(raw: &str) -> PathBuf {
-    PathBuf::from(OsStr::new(raw))
-}
-
 pub fn detect(candidate: &Path) -> Result<RepoIdentity, ProbeError> {
     let started = std::time::Instant::now();
     let outcome = detect_inner(candidate);
@@ -77,42 +73,104 @@ pub fn detect(candidate: &Path) -> Result<RepoIdentity, ProbeError> {
     outcome
 }
 
-fn detect_inner(candidate: &Path) -> Result<RepoIdentity, ProbeError> {
-    if !candidate.is_dir() {
-        return Err(ProbeError::new(
-            "repo_path_missing",
-            "The selected folder does not exist or is not a directory.",
-        ));
+fn as_path(raw: &str) -> PathBuf {
+    PathBuf::from(OsStr::new(raw))
+}
+
+/// The five repository facts `rev-parse` reports about a directory.
+struct ProbeFacts {
+    inside_work_tree: bool,
+    is_bare: bool,
+    git_dir_raw: String,
+    common_dir_raw: String,
+    toplevel_raw: Option<String>,
+}
+
+/// One `git rev-parse --is-inside-work-tree --is-bare-repository
+/// --absolute-git-dir --git-common-dir --show-toplevel` replacing the five
+/// spawns `detect` used to make. Git 2.53 measured: a work tree prints
+/// exactly five lines (`true`, `false`, absolute git dir, common dir,
+/// absolute toplevel) and a bare repository prints exactly four (`false`,
+/// `true`, git dir, common dir) because `--show-toplevel` contributes
+/// nothing; the fatal notice for the first flag goes to stderr with exit 0.
+/// Any other shape — an older Git rejecting a flag, a locale split, an
+/// unexpected empty toplevel — returns `None` and the caller repeats the
+/// original per-flag sequence, so the single spawn is an optimization that
+/// can never change an outcome on its own.
+fn rev_parse_facts(path: &Path) -> Option<ProbeFacts> {
+    let mut command = user_git_command(path);
+    command.args([
+        "rev-parse",
+        "--is-inside-work-tree",
+        "--is-bare-repository",
+        "--absolute-git-dir",
+        "--git-common-dir",
+        "--show-toplevel",
+    ]);
+    let output = runner::run(
+        command,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+        Duration::from_secs(10),
+        |_, _| {},
+    )
+    .ok()?;
+    if output.truncated || !output.status.success() {
+        return None;
     }
-    let not_repository = || {
-        ProbeError::new(
-            "not_a_repository",
-            "The selected folder is not inside a Git repository. Choose the repository root \
-             or install Git, then set the git executable location.",
-        )
-    };
-    let inside_work_tree =
-        rev_parse_line(candidate, "--is-inside-work-tree")?.ok_or_else(not_repository)?;
-    let inside_work_tree = inside_work_tree == "true";
-    let is_bare =
-        rev_parse_line(candidate, "--is-bare-repository")?.ok_or_else(not_repository)? == "true";
-    if !inside_work_tree && !is_bare {
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.len() == 5
+        && lines[0] == "true"
+        && lines[1] == "false"
+        && !lines[2].is_empty()
+        && !lines[3].is_empty()
+        && as_path(lines[4]).is_absolute()
+    {
+        return Some(ProbeFacts {
+            inside_work_tree: true,
+            is_bare: false,
+            git_dir_raw: lines[2].to_owned(),
+            common_dir_raw: lines[3].to_owned(),
+            toplevel_raw: Some(lines[4].to_owned()),
+        });
+    }
+    lines.truncate(4);
+    if lines.len() == 4
+        && lines[0] == "false"
+        && lines[1] == "true"
+        && !lines[2].is_empty()
+        && !lines[3].is_empty()
+    {
+        return Some(ProbeFacts {
+            inside_work_tree: false,
+            is_bare: true,
+            git_dir_raw: lines[2].to_owned(),
+            common_dir_raw: lines[3].to_owned(),
+            toplevel_raw: None,
+        });
+    }
+    None
+}
+
+fn finish_detect(
+    candidate: &Path,
+    facts: ProbeFacts,
+    not_repository: impl Fn() -> ProbeError,
+) -> Result<RepoIdentity, ProbeError> {
+    if !facts.inside_work_tree && !facts.is_bare {
         return Err(not_repository());
     }
-    let git_dir =
-        as_path(&rev_parse_line(candidate, "--absolute-git-dir")?.ok_or_else(not_repository)?);
-    let common_raw = rev_parse_line(candidate, "--git-common-dir")?.ok_or_else(not_repository)?;
-    let common_dir = if as_path(&common_raw).is_absolute() {
-        as_path(&common_raw)
+    let git_dir = as_path(&facts.git_dir_raw);
+    let common_dir = if as_path(&facts.common_dir_raw).is_absolute() {
+        as_path(&facts.common_dir_raw)
     } else {
-        candidate.join(common_raw)
+        candidate.join(facts.common_dir_raw)
     };
-    let work_root = if is_bare {
+    let work_root = if facts.is_bare {
         None
     } else {
-        rev_parse_line(candidate, "--show-toplevel")?
-            .as_deref()
-            .map(as_path)
+        facts.toplevel_raw.as_deref().map(as_path)
     };
     if !git_dir.exists() {
         return Err(ProbeError::new(
@@ -131,9 +189,48 @@ fn detect_inner(candidate: &Path) -> Result<RepoIdentity, ProbeError> {
         work_root,
         git_dir,
         common_dir,
-        is_bare,
+        is_bare: facts.is_bare,
         linked_worktree,
     })
+}
+
+fn detect_inner(candidate: &Path) -> Result<RepoIdentity, ProbeError> {
+    if !candidate.is_dir() {
+        return Err(ProbeError::new(
+            "repo_path_missing",
+            "The selected folder does not exist or is not a directory.",
+        ));
+    }
+    let not_repository = || {
+        ProbeError::new(
+            "not_a_repository",
+            "The selected folder is not inside a Git repository. Choose the repository root \
+             or install Git, then set the git executable location.",
+        )
+    };
+    if let Some(facts) = rev_parse_facts(candidate) {
+        return finish_detect(candidate, facts, not_repository);
+    }
+    let inside_work_tree =
+        rev_parse_line(candidate, "--is-inside-work-tree")?.ok_or_else(not_repository)?;
+    let inside_work_tree = inside_work_tree == "true";
+    let is_bare =
+        rev_parse_line(candidate, "--is-bare-repository")?.ok_or_else(not_repository)? == "true";
+    let git_dir = rev_parse_line(candidate, "--absolute-git-dir")?.ok_or_else(not_repository)?;
+    let common_dir_raw =
+        rev_parse_line(candidate, "--git-common-dir")?.ok_or_else(not_repository)?;
+    let toplevel_raw = rev_parse_line(candidate, "--show-toplevel")?;
+    finish_detect(
+        candidate,
+        ProbeFacts {
+            inside_work_tree,
+            is_bare,
+            git_dir_raw: git_dir,
+            common_dir_raw,
+            toplevel_raw,
+        },
+        not_repository,
+    )
 }
 
 pub fn to_display(path: &Path) -> String {
