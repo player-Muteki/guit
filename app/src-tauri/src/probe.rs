@@ -67,25 +67,61 @@ pub fn git() -> Result<GitProbe, ProbeError> {
     git_at(OsStr::new("git"))
 }
 
+/// How long a Git is given to answer a probe. A `git` that cannot do this —
+/// a stalled network home, a wrapper script waiting on something — must
+/// report itself, not freeze the view that asked.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// One bounded, isolated Git command: argv only, the user's `GIT_*`
+/// environment removed, running in `directory` with no stdin to wait on.
+fn run_bounded(
+    executable: &OsStr,
+    directory: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<crate::runner::CapturedOutput, ProbeError> {
+    let mut command = isolated_git(executable, directory);
+    command.args(args);
+    crate::runner::run(
+        command,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+        timeout,
+        |_, _| {},
+    )
+}
+
 fn git_at(executable: &OsStr) -> Result<GitProbe, ProbeError> {
-    let version_output = match Command::new(executable)
-        .arg("--version")
-        .current_dir(std::env::temp_dir())
-        .output()
-    {
-        Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(GitProbe {
-                available: false,
-                version: None,
-                executable: None,
-                supported: false,
-                has_restore: false,
-                message: "Git was not found. Install Git or add it to PATH.".into(),
-            });
-        }
-        Err(error) => return Err(ProbeError::new("git_start_failed", error.to_string())),
-    };
+    git_at_within(executable, PROBE_TIMEOUT)
+}
+
+fn git_at_within(executable: &OsStr, timeout: Duration) -> Result<GitProbe, ProbeError> {
+    let version_output =
+        match run_bounded(executable, &std::env::temp_dir(), &["--version"], timeout) {
+            Ok(output) => output,
+            // Either spelling of "this program is not on PATH" means the same
+            // thing for a probe: the Git we were asked about is not installed.
+            Err(error) if matches!(error.code, "git_not_found" | "tool_not_found") => {
+                return Ok(GitProbe {
+                    available: false,
+                    version: None,
+                    executable: None,
+                    supported: false,
+                    has_restore: false,
+                    message: "Git was not found. Install Git or add it to PATH.".into(),
+                });
+            }
+            Err(error) if error.code == "probe_timeout" => {
+                return Err(ProbeError::new(
+                    "git_unresponsive",
+                    format!(
+                        "Git did not answer within {} seconds. Check that `git` starts on its own.",
+                        timeout.as_secs_f64()
+                    ),
+                ))
+            }
+            Err(error) => return Err(error),
+        };
     if !version_output.status.success() {
         return Err(ProbeError::new(
             "git_version_failed",
@@ -95,7 +131,7 @@ fn git_at(executable: &OsStr) -> Result<GitProbe, ProbeError> {
     let version = String::from_utf8_lossy(&version_output.stdout)
         .trim()
         .to_owned();
-    let supported = status_capability(executable)?;
+    let supported = status_capability(executable, timeout)?;
     Ok(GitProbe {
         available: true,
         has_restore: version_at_least(&version, (2, 23)),
@@ -103,9 +139,10 @@ fn git_at(executable: &OsStr) -> Result<GitProbe, ProbeError> {
         executable: Some("git (PATH)".into()),
         supported,
         message: if supported {
-            "M0 status command is available.".into()
+            "All the Git commands guit needs are available.".into()
         } else {
-            "This Git cannot run the porcelain v2 status command required by guit. Update Git."
+            "This Git cannot report the state of a repository the way guit needs. \
+             Install a newer Git."
                 .into()
         },
     })
@@ -128,24 +165,27 @@ pub(crate) fn version_at_least(version: &str, minimum: (u32, u32)) -> bool {
     (major, minor) >= minimum
 }
 
-fn status_capability(executable: &OsStr) -> Result<bool, ProbeError> {
+fn status_capability(executable: &OsStr, timeout: Duration) -> Result<bool, ProbeError> {
     let directory = tempfile::Builder::new()
         .prefix("guit-probe-")
         .tempdir()
         .map_err(|error| ProbeError::new("temp_dir_failed", error.to_string()))?;
     let path = directory.path();
-    let isolated = || isolated_git(executable, path);
-    let init = isolated()
-        .args(["init", "--quiet"])
-        .output()
-        .map_err(|error| ProbeError::new("git_init_failed", error.to_string()))?;
-    if !init.status.success() {
-        return Ok(false);
+    let init = run_bounded(executable, path, &["init", "--quiet"], timeout);
+    match init {
+        Ok(output) if output.status.success() => {}
+        // A Git that starts for `--version` and then fails to initialise a
+        // repository is simply too old, which the guidance below says.
+        Ok(_) => return Ok(false),
+        Err(error) if error.code == "probe_timeout" => return Ok(false),
+        Err(error) => return Err(error),
     }
-    let status = isolated()
-        .args(["status", "--porcelain=v2", "-z", "--branch"])
-        .output()
-        .map_err(|error| ProbeError::new("git_status_failed", error.to_string()))?;
+    let status = run_bounded(
+        executable,
+        path,
+        &["status", "--porcelain=v2", "-z", "--branch"],
+        timeout,
+    )?;
     Ok(status.status.success() && status.stdout.starts_with(b"# branch.oid "))
 }
 
@@ -227,16 +267,26 @@ pub fn transfer(mut progress: impl FnMut(usize)) -> Result<String, ProbeError> {
     ))
 }
 
+/// Reads one user-configured tool name. This one deliberately keeps the
+/// environment untouched: it is reporting the tools the user chose, so it must
+/// read their real configuration — but it is still bounded, because a `git`
+/// that hangs here would otherwise hang the settings view.
 fn configured_tool(key: &str) -> Result<Option<String>, ProbeError> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["config", "--get", key])
-        .current_dir(std::env::temp_dir())
-        .output()
-        .map_err(|error| ProbeError::new("git_config_failed", error.to_string()))?;
+        .current_dir(std::env::temp_dir());
+    let output = crate::runner::run(
+        command,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+        PROBE_TIMEOUT,
+        |_, _| {},
+    )?;
     if output.status.code() == Some(1) {
         return Ok(None);
     }
-    if !output.status.success() {
+    if !output.status.success() || output.truncated {
         return Err(ProbeError::new(
             "git_config_failed",
             String::from_utf8_lossy(&output.stderr),
@@ -339,9 +389,10 @@ mod tests {
     }
 
     fn git_at_freshly_written(executable: &OsStr) -> Result<GitProbe, ProbeError> {
-        // Any `git_start_failed` is retried, which is only ever a spawn that did
-        // not happen: `git_at` reports a script that starts and misbehaves as
-        // `git_version_failed`, so a real problem still fails the test.
+        // Any failure to spawn is retried, which is only ever a spawn that did
+        // not happen: once the script runs, `git_at` reports a misbehaving one
+        // as `git_version_failed` or `git_unresponsive`, so a real problem
+        // still fails the test.
         retry_transient_spawn(|| git_at(executable))
     }
 
@@ -422,7 +473,76 @@ mod tests {
         assert!(result.available);
         assert!(!result.supported);
         assert!(!result.has_restore);
-        assert!(result.message.contains("Update Git"));
+        assert!(result.message.contains("newer Git"));
+        assert!(result.message.contains("Install"));
+        assert!(!carries_developer_label(&result.message));
+    }
+
+    /// A `git` that starts and then never answers must report itself as
+    /// unresponsive instead of blocking the view that asked. The probe runs on
+    /// its own thread with a bounded wait so that a regression to an unbounded
+    /// `.output()` fails this test rather than hanging the whole suite.
+    #[cfg(unix)]
+    #[test]
+    fn a_git_that_never_answers_reports_instead_of_hanging() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("silent-git");
+        std::fs::write(&executable, b"#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut outcome = None;
+            for attempt in 0..5 {
+                match git_at_within(executable.as_os_str(), Duration::from_millis(200)) {
+                    // The fixture was written moments ago; a spawn that never
+                    // happened is not the outcome under test.
+                    Err(error) if error.code == "process_start_failed" => {
+                        std::thread::sleep(Duration::from_millis(20 * (attempt + 1)));
+                    }
+                    answer => outcome = Some(answer.map(|_| ()).map_err(|error| error.code)),
+                }
+            }
+            let _ = sender.send(outcome);
+            drop(directory);
+        });
+        let answer = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the probe reports on its own deadline")
+            .expect("the probe reached a verdict");
+        assert_eq!(
+            answer.err(),
+            Some("git_unresponsive"),
+            "a hung git must report the fault, not a version"
+        );
+    }
+
+    #[test]
+    fn the_supported_probe_sentence_is_advice_a_user_can_act_on() {
+        // Shown verbatim in the settings view, so it must name what is true
+        // without leaking how the work was scheduled.
+        let supported = git().unwrap();
+        assert!(
+            supported.message.contains("available"),
+            "{}",
+            supported.message
+        );
+        assert!(
+            !carries_developer_label(&supported.message),
+            "{}",
+            supported.message
+        );
+    }
+
+    /// `M7-11`, `plan/decisions.md` and friends belong to the development log,
+    /// not to a sentence shown in the user's settings.
+    fn carries_developer_label(text: &str) -> bool {
+        let bytes = text.as_bytes();
+        bytes
+            .windows(2)
+            .any(|pair| pair[0] == b'M' && pair[1].is_ascii_digit())
+            || text.contains("plan/")
+            || text.contains("decision")
     }
 
     #[test]

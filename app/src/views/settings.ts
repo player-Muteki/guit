@@ -180,9 +180,9 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     const [git, tools, geometry] = results;
     if (git.status === "fulfilled") {
       const value = git.value;
-      gitResult.textContent = value.available
-        ? `${value.version} · ${value.supported ? "required commands available" : value.message}`
-        : value.message;
+      // The backend owns this sentence, so the view shows it verbatim instead
+      // of keeping a second copy that can disagree with the first.
+      gitResult.textContent = `${value.version ?? "Git"} · ${value.message}`;
     } else deps.onError(git.reason);
     if (tools.status === "fulfilled") {
       toolsResult.textContent = `Diff: ${tools.value.difftool ?? "not configured"}; Merge: ${tools.value.mergetool ?? "not configured"}; File opener: ${tools.value.opener}`;
