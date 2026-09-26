@@ -53,9 +53,16 @@ def fail(step, message=""):
         handle.write(f"step {step}: {message}\n")
     sys.exit(step)
 
+# M7: the app opens on the Changes view; the export button lives in Settings,
+# so switch to Settings first (the rail item is a button labelled "Settings").
+if not atspi_landmark.wait_for(r"Changes", 20):
+    fail(1, "app did not render its first view")
+settings_tab = atspi_landmark.find_button(name="Settings")
+if settings_tab is None or not atspi_landmark.click(settings_tab):
+    fail(1, "cannot open the settings view")
 if not atspi_landmark.wait_for(r"Export diagnostics", 20):
     fail(1, "export button not in tree")
-trigger = atspi_landmark.find_button(contains="Export diagnostics")
+trigger = atspi_landmark.find_button(name="Export diagnostics…")
 if trigger is None or not atspi_landmark.click(trigger):
     fail(2, "cannot click export button")
 if not atspi_landmark.wait_for(r"plain-text diagnostics report", 10):

@@ -88,7 +88,7 @@ mkdir -p "$home/config/dev.guit.desktop"
 printf '{"schema_version":1,"path":"%s"}\n' "$repo" >"$home/config/dev.guit.desktop/session.json"
 launch_isolated "$work/gui-seeded.log"
 if atspi_expect 30 "Changes"; then
-    say "ok: seeded session restores (Changes card present)"
+    say "ok: seeded session restores (Changes view present)"
 else
     say "FAIL: seeded session restore not visible"; fail=$((fail + 1))
 fi

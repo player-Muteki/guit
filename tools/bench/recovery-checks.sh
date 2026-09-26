@@ -89,8 +89,8 @@ if atspi_probe 15 "$empty_state"; then
 else
     say "FAIL: app did not start cleanly on future-schema config"; fail=$((fail + 1))
 fi
-# showError overwrites: the last refusal wins the single alert element,
-# so match the shared prefix rather than one message.
+# The toast stack persists failures, so stage C can no longer be shadowed by
+# stage B's refusal; the comment records the M7 behaviour change.
 check "refusal is announced to the user" atspi_probe 2 'Unsupported'
 check "refused session was not restored" not_atspi '/should/not/restore'
 terminate_isolated
@@ -106,9 +106,9 @@ check "fresh tempfile sibling kept (a live write may own it)" test -e "$data/ses
 check "config sweep reported" grep -q "1 stale config temp file" "$work/b.log"
 
 say "== C: unreadable index surfaces the Git failure, never a clean report =="
-# The alert element is single and last-error-wins, so each later stage
-# starts from an empty config dir: stage B's refused recent.json would
-# otherwise overwrite the index-failure alert.
+# M7: failures enter a persistent toast stack, so stage C no longer needs
+# an empty config dir to avoid stage B's refusal sitting in the same slot.
+# It is still reset here so the two stages stay independent.
 rm -rf "$data"
 repo_c="$work/c-repo"
 mkdir -p "$repo_c"

@@ -182,10 +182,17 @@ def main():
         text_blob = A.dump()
         if l1 is None and re.search(r"\bChanges\b", text_blob):
             l1 = time.monotonic() - t0
+        # M7 shell: L2 means the Changes view is fully populated (its own
+        # content line is on screen) and the watcher has announced itself in
+        # the status bar. In the pre-M7 single-page layout the landmark also
+        # matched the always-mounted history counter; history now lives behind
+        # its own view, so the counter is asserted separately below after
+        # switching to it. L2 numbers are therefore not the same measurement
+        # as the M6 table.
         if (
             l2 is None
             and re.search(r"Monitor: ", text_blob)
-            and re.search(r"\d+ commit\(s\)|No commits yet", text_blob)
+            and re.search(r"Working copy is clean\.|Stage|Untracked|Conflicts", text_blob)
         ):
             l2 = time.monotonic() - t0
             break
@@ -205,18 +212,28 @@ def main():
         os.remove(os.path.join(args.repo, marker))
 
     if args.history_pages and l2 is not None:
+        # M7 shell: history lives behind its own view; switch to it first so
+        # its "Load older" control is in the accessibility tree.
         page_times = []
-        for _ in range(args.history_pages):
-            button = A.find_button(name="Load older")
-            if button is None:
-                break
-            started = time.monotonic()
-            if not A.click(button):
-                break
-            if A.wait_for(r"\d+ commit\(s\)", 30) is None:
-                break
-            page_times.append(time.monotonic() - started)
-        result["history_page_latencies_s"] = page_times
+        history_tab = A.find_button(name="History")
+        if history_tab is None or not A.click(history_tab):
+            result["history_page_latencies_s"] = page_times
+        elif A.wait_for(r"\d+ commit\(s\)|No commits yet", 30) is None:
+            result["history_page_latencies_s"] = page_times
+        else:
+            for _ in range(args.history_pages):
+                button = A.find_button(name="Load older")
+                if button is None:
+                    break
+                started = time.monotonic()
+                if not A.click(button):
+                    break
+                if A.wait_for(r"\d+ commit\(s\)", 30) is None:
+                    break
+                page_times.append(time.monotonic() - started)
+            result["history_page_latencies_s"] = page_times
+    else:
+        result["history_page_latencies_s"] = []
 
     idle_start = time.monotonic()
     time.sleep(max(0.0, args.idle))

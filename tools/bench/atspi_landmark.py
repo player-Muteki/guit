@@ -26,8 +26,18 @@ def _once(fn, default=None):
 
 
 def app_root():
-    for i in range(Atspi.get_desktop(0).get_child_count()):
-        child = _once(lambda: Atspi.get_desktop(0).get_child_at_index(i))
+    """The guit application node the harness should read.
+
+    Children are scanned newest-first and the last match wins. A guit process
+    left over from an earlier run keeps its accessibility registration alive,
+    and taking the first match instead made every probe read that stale window:
+    the whole suite then failed with "empty state not reached" for a reason that
+    had nothing to do with the build under test. A freshly launched instance
+    always registers last, so newest-first finds the one this run started.
+    """
+    desktop = Atspi.get_desktop(0)
+    for i in reversed(range(desktop.get_child_count())):
+        child = _once(lambda: desktop.get_child_at_index(i))
         if child is None:
             continue
         name = _once(lambda: child.get_name(), default="") or ""
