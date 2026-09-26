@@ -4,7 +4,7 @@
 // every action is injected by `main.ts` so the views stay the only place
 // that talks to the backend.
 
-import { el, icon, type IconName } from "./dom";
+import { el, icon } from "./dom";
 import {
   activeView,
   currentSnapshot,
@@ -18,6 +18,8 @@ import {
   type ViewId,
 } from "./state";
 import type { BranchView } from "./types";
+import { railHint, VIEW_ICONS, VIEW_TITLES } from "./railModel";
+import { VIEW_HINTS } from "./viewHints";
 import { currentFontPx, applyFontPx, FONT_DEFAULT } from "./font";
 import { isAlwaysOnTop, setAlwaysOnTop } from "./window";
 
@@ -58,19 +60,12 @@ export interface Shell {
    * it is a place the user can navigate from.
    */
   focusRail(): void;
+  /** Repaints only the status bar. See `main.ts`: a streamed progress line
+   * must not cost a render of every view. */
+  renderStatus(): void;
   render(): void;
   dispose(): void;
 }
-
-const VIEW_TITLES: Record<ViewId, { title: string; icon: IconName; hint: string }> = {
-  changes: { title: "Changes", icon: "changes", hint: "Staged, unstaged and untracked files; commit here" },
-  history: { title: "History", icon: "history", hint: "Commits of the current branch" },
-  branches: { title: "Branches & Tags", icon: "branches", hint: "Local branches, remote branches and tags" },
-  stash: { title: "Stash", icon: "stash", hint: "Stashed snapshots" },
-  remotes: { title: "Remotes", icon: "remotes", hint: "Remotes and branch synchronisation" },
-  worktrees: { title: "Worktrees & Submodules", icon: "worktrees", hint: "Linked worktrees and submodules" },
-  settings: { title: "Settings", icon: "settings", hint: "Appearance, tools, environment and diagnostics" },
-};
 
 function repoName(): string | null {
   const snapshot = currentSnapshot();
@@ -259,26 +254,20 @@ export function createShell(actions: ShellActions): Shell {
   appbar.append(syncMenu, pullMenu);
 
   // --- rail ---
+  // Every item is built by the same loop, so no view can end up with a hint
+  // its siblings do not have (the first item had lost its shortcut marker).
   const rail = el("nav", { class: "rail", "aria-label": "Views" });
   const railButtons = new Map<ViewId, HTMLButtonElement>();
   const badge = el("span", { class: "rail-badge", hidden: true });
-  const changesButton = el("button", {
-    class: "rail-item",
-    type: "button",
-    "aria-label": "Changes",
-    title: "Changes",
-  }, [icon("changes"), badge]);
-  changesButton.addEventListener("click", () => setActiveView("changes"));
-  railButtons.set("changes", changesButton);
-  rail.append(changesButton);
-  for (const id of VIEW_ORDER.slice(1)) {
-    const meta = VIEW_TITLES[id];
+  for (const id of VIEW_ORDER) {
+    const children: Array<HTMLElement | SVGSVGElement> = [icon(VIEW_ICONS[id])];
+    if (id === "changes") children.push(badge);
     const item = el("button", {
       class: "rail-item",
       type: "button",
-      "aria-label": meta.title,
-      title: `${meta.title} (Ctrl+${VIEW_ORDER.indexOf(id) + 1})`,
-    }, [icon(meta.icon)]);
+      "aria-label": VIEW_TITLES[id],
+      title: railHint(id, VIEW_ORDER, isSessionActive()),
+    }, children);
     item.addEventListener("click", () => setActiveView(id));
     railButtons.set(id, item);
     rail.append(item);
@@ -289,9 +278,10 @@ export function createShell(actions: ShellActions): Shell {
   const cancelButton = el("button", { class: "status-cancel", type: "button", hidden: true });
   // WebKitGTK builds no accessible object for a bare <span> whose text is set
   // from script, so without a role the watch mode would be invisible both to a
-  // screen reader and to the AT-SPI harness. `status` is also the honest role:
-  // the line appears when the watcher starts and changes when it falls back to
-  // polling, and the plan requires that fallback to reach the user.
+  // screen reader and to the harness that drives the real window. `status` is
+  // also the honest role: the line appears when the watcher starts and changes
+  // when it falls back to polling, and a user who cannot tell those two apart
+  // cannot tell whether an outside edit will show up on its own.
   const monitorLabel = el("span", { class: "status-monitor", role: "status" });
   const zoomOut = el("button", { class: "icon-btn tiny", type: "button", "aria-label": "Zoom out" }, [icon("minus", 12)]);
   const zoomLevel = el("span", { class: "status-zoom", "aria-label": "Interface zoom" });
@@ -325,6 +315,22 @@ export function createShell(actions: ShellActions): Shell {
   const views = new Map<ViewId, ViewDescriptor>();
   let welcomeElement: HTMLElement | null = null;
 
+  const renderStatus = (): void => {
+    const line = statusLine();
+    if (statusText.textContent !== line.message) statusText.textContent = line.message;
+    statusText.dataset.kind = line.kind;
+    const busy = isWriteRunning() || isToolRunning();
+    cancelButton.hidden = !busy;
+    cancelButton.textContent = isToolRunning() ? "Stop external tool" : "Cancel";
+    const watch = watchStatus();
+    // Only touch the text when it changes: a live region re-announces on every
+    // mutation, and this line runs for every streamed progress line.
+    const monitor = watch === "none" ? "" : `Monitor: ${watch === "poll" ? "polling" : "filesystem events"}`;
+    if (monitorLabel.textContent !== monitor) monitorLabel.textContent = monitor;
+    const zoom = `${currentFontPx()}px`;
+    if (zoomLevel.textContent !== zoom) zoomLevel.textContent = zoom;
+  };
+
   const render = (): void => {
     const snapshot = currentSnapshot();
     const active = activeView();
@@ -352,31 +358,18 @@ export function createShell(actions: ShellActions): Shell {
       item.classList.toggle("selected", selected);
       item.setAttribute("aria-current", selected ? "page" : "false");
       // A greyed rail item is the honest signal that its view has nothing to
-      // show yet; Settings is exempt because it is application-level.
-      if (id !== "settings") {
-        item.disabled = !session;
-        item.title = session
-          ? item.title
-          : `${VIEW_TITLES[id].title} — open a repository first`;
-      }
+      // show yet; Settings is exempt because it is application-level. The
+      // hint is recomputed from the model either way, so it never sticks to
+      // an item after a repository is opened.
+      if (id !== "settings") item.disabled = !session;
+      item.title = railHint(id, VIEW_ORDER, session);
     }
     for (const [id, view] of views) {
       view.element.hidden = id !== active || (id !== "settings" && !session);
     }
     if (welcomeElement !== null) welcomeElement.hidden = session || active === "settings";
 
-    const line = statusLine();
-    statusText.textContent = line.message;
-    statusText.dataset.kind = line.kind;
-    const busy = isWriteRunning() || isToolRunning();
-    cancelButton.hidden = !busy;
-    cancelButton.textContent = isToolRunning() ? "Stop external tool" : "Cancel";
-    const watch = watchStatus();
-    // Only touch the text when it changes: a live region re-announces on every
-    // mutation, and the shell re-renders on every snapshot and busy-lane edge.
-    const monitor = watch === "none" ? "" : `Monitor: ${watch === "poll" ? "polling" : "filesystem events"}`;
-    if (monitorLabel.textContent !== monitor) monitorLabel.textContent = monitor;
-    zoomLevel.textContent = `${currentFontPx()}px`;
+    renderStatus();
   };
 
   const registerView = (descriptor: ViewDescriptor | { id: "welcome"; element: HTMLElement }): void => {
@@ -389,13 +382,13 @@ export function createShell(actions: ShellActions): Shell {
       stage.prepend(descriptor.element);
       return;
     }
-    const meta = VIEW_TITLES[descriptor.id];
+    const title = VIEW_TITLES[descriptor.id];
     const head = el("header", { class: "view-head" }, [
-      el("h1", { class: "view-title", text: meta.title }),
-      el("p", { class: "view-subtitle", text: meta.hint }),
+      el("h1", { class: "view-title", text: title }),
+      el("p", { class: "view-subtitle", text: VIEW_HINTS[descriptor.id] }),
     ]);
     descriptor.element.classList.add("view");
-    descriptor.element.setAttribute("aria-label", meta.title);
+    descriptor.element.setAttribute("aria-label", title);
     descriptor.element.prepend(head);
     stage.append(descriptor.element);
     views.set(descriptor.id, descriptor);
@@ -421,6 +414,7 @@ export function createShell(actions: ShellActions): Shell {
     registerView,
     focusCommit,
     focusRail,
+    renderStatus,
     render,
     dispose() { closeMenus(); },
   };

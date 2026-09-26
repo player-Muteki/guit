@@ -10,6 +10,7 @@ import {
   setStatus,
   setWatchMode,
   setWriteRunning,
+  subscribe,
   toastStack,
   isWriteRunning,
   isForcePushReady,
@@ -87,4 +88,30 @@ test("the busy lanes, watch mode, status line and force-push gate are readable",
 
   setPendingPreview(null);
   assert.equal(currentSnapshot() === null, false, "a snapshot is still the live one");
+});
+
+test("a progress line repaints the status bar, not the whole window", () => {
+  const changes = [];
+  const unsubscribe = subscribe((change) => changes.push(change));
+  try {
+    setStatus("Receiving objects: 40%", "progress");
+    assert.deepEqual(changes, ["status"], "one streamed line must not cost a window render");
+    setWatchMode("poll");
+    assert.deepEqual(changes, ["status", "status"], "the monitor line lives in the status bar");
+    setWriteRunning(true);
+    assert.deepEqual(changes.slice(2), ["render"], "a busy lane repaints the window");
+  } finally {
+    unsubscribe();
+    setWriteRunning(false);
+    setStatus("", "idle");
+  }
+});
+
+test("a subscriber can stop listening", () => {
+  const changes = [];
+  const unsubscribe = subscribe((change) => changes.push(change));
+  unsubscribe();
+  setStatus("nobody is listening", "info");
+  assert.deepEqual(changes, []);
+  setStatus("", "idle");
 });

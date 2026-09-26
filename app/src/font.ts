@@ -1,6 +1,11 @@
 // Interface zoom and theme. Every rem-based size in the stylesheet follows
 // `documentElement.fontSize`; both choices are persisted in the WebView's
-// localStorage and restored on startup (M1-09, M7).
+// localStorage and restored on startup.
+//
+// Changing the zoom repaints the window: the shell's readout and the row
+// heights the virtual lists assume are both derived from this one number.
+
+import { notifyLayoutChange } from "./state";
 
 const FONT_KEY = "guit.fontPx";
 const FONT_MIN = 12;
@@ -22,6 +27,7 @@ export function applyFontPx(px: number): void {
   } catch {
     // Storage may be unavailable in private mode; scaling still applies.
   }
+  notifyLayoutChange();
 }
 
 export function initFontPx(): void {

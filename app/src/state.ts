@@ -158,15 +158,27 @@ let toasts: Toast[] = [];
 let credentialRetryAction: (() => void) | null = null;
 let forcePushReady = false;
 
-type Listener = () => void;
+type Listener = (change: ChangeKind) => void;
 const listeners = new Set<Listener>();
 
-function notify(): void {
-  for (const listener of listeners) listener();
+// `status` repaints the status bar only; `render` repaints the whole window.
+// A streaming network operation can emit dozens of progress lines per second,
+// and each one used to cost a render of every view, hidden or not.
+export type ChangeKind = "status" | "render";
+
+function notify(change: ChangeKind): void {
+  for (const listener of listeners) listener(change);
 }
 
-export function subscribe(listener: Listener): void {
+const renderNow = (): void => notify("render");
+
+// Returns the way to stop listening, so a caller that only exists for as long
+// as a dialog is open cannot leave a listener behind.
+export function subscribe(listener: Listener): () => void {
   listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 export const isSessionActive = (): boolean => sessionActive;
@@ -189,50 +201,52 @@ export function applySnapshot(next: SnapshotView | null): boolean {
   if (next && snapshot && next.version <= snapshot.version) return false;
   snapshot = next;
   sessionActive = next !== null;
-  notify();
+  renderNow();
   return true;
 }
 
 export function setWriteRunning(value: boolean): void {
   if (write === value) return;
   write = value;
-  notify();
+  renderNow();
 }
 
 export function setToolRunning(value: boolean): void {
   if (tool === value) return;
   tool = value;
-  notify();
+  renderNow();
 }
 
 export function setPendingPreview(next: PendingPreview | null): void {
   if (preview === next) return;
   preview = next;
-  notify();
+  renderNow();
 }
 
 export function setActiveView(next: ViewId): void {
   if (view === next) return;
   view = next;
-  notify();
+  renderNow();
 }
 
+// Both of these only ever repaint the status bar, so they are the two places
+// a `status` change comes from.
 export function setWatchMode(mode: "none" | "poll" | "events"): void {
   if (watchMode === mode) return;
   watchMode = mode;
-  notify();
+  notify("status");
 }
 
 export function setStatus(message: string, kind: StatusKind = "info"): void {
   if (status.kind === kind && status.message === message) return;
   status = { kind, message };
-  notify();
+  notify("status");
 }
 
 export function pushToast(toast: Omit<Toast, "id">): number {
   const id = nextToastId++;
   toasts = [...toasts, { ...toast, id }].slice(-4);
-  notify();
+  renderNow();
   return id;
 }
 
@@ -240,20 +254,20 @@ export function dismissToast(id: number): void {
   const next = toasts.filter((toast) => toast.id !== id);
   if (next.length === toasts.length) return;
   toasts = next;
-  notify();
+  renderNow();
 }
 
 // Git itself decided the failure is about credentials; that is the only
 // moment the explicit credential path appears, and one click spends it.
 export function offerCredentialRetry(retry: (() => void) | null): void {
   credentialRetryAction = retry;
-  notify();
+  renderNow();
 }
 
 export function consumeCredentialRetry(): (() => void) | null {
   const action = credentialRetryAction;
   credentialRetryAction = null;
-  if (action !== null) notify();
+  if (action !== null) renderNow();
   return action;
 }
 
@@ -262,5 +276,12 @@ export function consumeCredentialRetry(): (() => void) | null {
 export function setForcePushReady(value: boolean): void {
   if (forcePushReady === value) return;
   forcePushReady = value;
-  notify();
+  renderNow();
+}
+
+// Interface zoom repaints everything: the status-bar readout shows the new
+// size, and the virtual lists derive their row height from the same root font
+// size, so a stale render would scroll against the wrong geometry.
+export function notifyLayoutChange(): void {
+  renderNow();
 }

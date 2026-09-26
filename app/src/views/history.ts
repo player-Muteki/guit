@@ -8,8 +8,9 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, plural } from "../dom";
-import { buildHistoryRows } from "../historyModel";
-import { revealScroll, visibleWindow } from "../fileModel";
+import { buildHistoryRows, historyPageStart } from "../historyModel";
+import { revealScroll, rowHeightPx, visibleWindow, HISTORY_ROW_REM } from "../fileModel";
+import { currentFontPx } from "../font";
 import {
   applySnapshot,
   currentSnapshot,
@@ -23,9 +24,10 @@ import {
 import type { CommitFileView, CommitView, HistoryPage, OperationResult, ToolResult } from "../types";
 import type { PreviewController } from "../dialogs/preview";
 
-const ROW_HEIGHT = 28;
+// The assumed row height must be the height the stylesheet gives a commit row
+// (`--row-height-history`, rem-based), so it follows interface zoom.
+const rowHeight = (): number => rowHeightPx(currentFontPx(), HISTORY_ROW_REM);
 const OVERSCAN = 6;
-const PAGE_SIZE = 50;
 
 export interface HistoryDeps {
   preview: PreviewController;
@@ -256,7 +258,10 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     loading = true;
     moreButton.disabled = true;
     try {
-      const page = await invoke<HistoryPage>("history_page", { start: commits.length, oid: null });
+      const page = await invoke<HistoryPage>("history_page", {
+        start: historyPageStart(commits.length, reset),
+        oid: null,
+      });
       // The session may have closed or moved on while this request ran.
       if (repoKey !== (currentSnapshot()?.branch?.oid ?? null)) return;
       commits = reset ? page.commits : commits.concat(page.commits);
@@ -279,7 +284,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     if (commits.length === 0) return;
     const rows = buildHistoryRows(commits);
     const viewport = listPane.clientHeight || 240;
-    const slice = visibleWindow(rows.length, listPane.scrollTop, viewport, ROW_HEIGHT, OVERSCAN);
+    const slice = visibleWindow(rows.length, listPane.scrollTop, viewport, rowHeight(), OVERSCAN);
     virtual.style.height = `${slice.totalHeight}px`;
     rowsHost.style.transform = `translateY(${slice.offsetY}px)`;
     const fragment = document.createDocumentFragment();
@@ -354,7 +359,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     }
     event.preventDefault();
     if (target < 0) return;
-    listPane.scrollTop = revealScroll(listPane.scrollTop, viewport, target, ROW_HEIGHT);
+    listPane.scrollTop = revealScroll(listPane.scrollTop, viewport, target, rowHeight());
     setSelected(commits[target], target);
   });
 

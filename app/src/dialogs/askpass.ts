@@ -1,16 +1,16 @@
-// Credential prompt as a native modal <dialog>.
-//
-// Git's categorised prompt arrives as an `askpass-request` event
-// ({operationId, kind, target, user}); the answer goes straight into
-// `submit_askpass` and lives nowhere else. Cancel just closes the dialog —
-// the blocked prompt then expires on the Rust side and Git fails on its
-// own. The submit button is deliberately NOT named "Cancel": M5-07's AT-SPI
-// run showed three same-named Cancel buttons colliding, so a driver click
-// could cancel the wrong lane.
+// A credential prompt arrives as an `askpass-request` event: categorised
+// material only, already proven safe to display by the Rust side (the wording
+// itself is decided in `askpassPrompt.ts`). The answer goes straight into
+// `submit_askpass` and lives nowhere else. Cancel just closes the dialog — the
+// blocked prompt then expires on the Rust side and Git fails on its own. The
+// submit button is deliberately NOT named "Cancel": an accessibility run showed
+// three same-named Cancel buttons colliding, so a driver click could cancel the
+// wrong lane.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { currentActivator, el, icon } from "../dom";
+import { promptText, replacesPrompt } from "./askpassPrompt";
 import type { AskPassRequest } from "../types";
 
 export interface AskpassDialog {
@@ -49,6 +49,8 @@ export function createAskpassDialog(onError: (error: unknown) => void): AskpassD
   submit.addEventListener("click", () => {
     const request = pending;
     const value = secret.value;
+    // `close()` clears the pending request, so a second click on the same
+    // dialog has nothing left to answer.
     close();
     if (!request || value === "") return;
     void invoke("submit_askpass", { operationId: request.operationId, secret: value }).catch(onError);
@@ -66,15 +68,19 @@ export function createAskpassDialog(onError: (error: unknown) => void): AskpassD
   });
 
   void listen<AskPassRequest>("askpass-request", ({ payload }) => {
+    const replaced = replacesPrompt(pending, payload);
     pending = payload;
     secret.type = payload.kind === "password" ? "password" : "text";
+    // Never carry an answer across questions: the text belongs to the target
+    // it was typed for.
     secret.value = "";
-    prompt.textContent =
-      payload.kind === "password" && payload.user !== null
-        ? `Password for ${payload.target} as ${payload.user}:`
-        : `${payload.kind === "password" ? "Password" : "Username"} for ${payload.target}:`;
-    opener = currentActivator();
-    if (!element.open) element.showModal();
+    prompt.textContent = promptText(payload, replaced);
+    if (!element.open) {
+      // Only a freshly opened dialog captures where focus came from; an open
+      // one keeps its original opener, so closing still returns there.
+      opener = currentActivator();
+      element.showModal();
+    }
     secret.focus();
   });
 

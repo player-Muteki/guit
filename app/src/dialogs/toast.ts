@@ -1,10 +1,10 @@
 // Toast stack: failures persist until the user closes or retries them.
 //
-// M6-05 recorded the single `#error` slot as "last write wins" — a second
-// failure silently replaced the first, and a watcher refresh could hide it
-// entirely. The stack appends instead; the oldest entry is dropped only
-// when a fifth arrives, and every entry carries its own close button and
-// optional actions (e.g. "Retry with credentials").
+// A single error slot was "last write wins" — a second failure silently
+// replaced the first, and a watcher refresh could hide it entirely. The stack
+// appends instead; the oldest entry is dropped only when a fifth arrives, and
+// every entry carries its own close button and optional actions (e.g. "Retry
+// with credentials").
 
 import { el, icon } from "../dom";
 import { dismissToast, toastStack } from "../state";
@@ -16,7 +16,9 @@ export interface ToastLayer {
 }
 
 export function createToastLayer(): ToastLayer {
-  const element = el("div", { class: "toast-layer", "aria-live": "polite" });
+  // No live region here: each toast carries `role="alert"` itself, and wrapping
+  // them in a live region as well announces every failure twice.
+  const element = el("div", { class: "toast-layer" });
 
   const render = (): void => {
     const entries = toastStack();

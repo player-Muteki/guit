@@ -28,6 +28,13 @@ export type ListRow =
   | { kind: "heading"; group: FileGroupKey; label: string; count: number; collapsed: boolean }
   | { kind: "file"; file: FileView };
 
+// Only a file is selectable, so only a file is an option in the listbox. A
+// group heading stays visible and clickable, but announcing it as a row would
+// put a non-option child inside a listbox.
+export function listRowRole(kind: ListRow["kind"]): "option" | "presentation" {
+  return kind === "file" ? "option" : "presentation";
+}
+
 export function buildRows(
   files: readonly FileView[],
   collapsed: ReadonlySet<FileGroupKey>,
@@ -58,7 +65,26 @@ export interface VisibleWindow {
   endIndex: number;
   offsetY: number;
   totalHeight: number;
-}/// Row slice a fixed-height virtual list must render for the current scroll
+}
+
+// A fixed-height virtual list is only correct when the height it assumes is
+// the height the stylesheet actually gives a row. Rows are sized in rem and
+// interface zoom changes the root font size, so the assumed height has to be
+// derived from that same number: a hard-coded pixel constant silently drifts
+// out of step with the rows, which shows up as scroll-positioned rows sliding
+// under the viewport and selection landing on the wrong file.
+//
+// `FILE_ROW_REM` and `HISTORY_ROW_REM` must match `--row-height` and
+// `--row-height-history` in style/tokens.css; `row-heights-track-the-css`
+// below is the gate that fails when they do not.
+export const FILE_ROW_REM = 1.5;
+export const HISTORY_ROW_REM = 1.75;
+
+export function rowHeightPx(baseFontPx: number, rowRem: number): number {
+  return baseFontPx * rowRem;
+}
+
+/// Row slice a fixed-height virtual list must render for the current scroll
 /// position. Rows outside the window are represented by total spacer height.
 export function visibleWindow(
   totalRows: number,

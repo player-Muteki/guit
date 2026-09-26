@@ -216,7 +216,12 @@ function render(): void {
 for (const view of [changes, history, branches, stash, remotes, worktrees]) {
   sessionListeners.push(() => view.sync());
 }
-subscribe(render);
+// A status-line change — including every streamed progress line of a fetch or
+// push — repaints the status bar only. Everything else repaints the window.
+subscribe((change) => {
+  if (change === "status") shell.renderStatus();
+  else render();
+});
 
 // --- destructive ticket confirmation routing ---
 preview.onConfirm((pending) => {

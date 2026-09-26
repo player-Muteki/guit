@@ -1,6 +1,6 @@
 // Changes view: the operation banner, the four collapsed file groups
 // (conflicts / staged / worktree / untracked) on the shared virtual list, and
-// the fixed commit footer. Row actions follow the M7 density rule: Stage and
+// the fixed commit footer. Row actions follow one density rule: Stage and
 // Unstage stay visible because they are the everyday verbs; Open, Diff,
 // Diff staged, Resolve and Discard live in a per-row `⋯` menu. Group
 // headings keep the batch actions (Stage all / Unstage all / Discard all /
@@ -9,14 +9,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   buildRows,
+  listRowRole,
   nextSelectableRow,
   revealScroll,
+  rowHeightPx,
   visibleWindow,
+  FILE_ROW_REM,
   type FileGroupKey,
   type FileView,
   type ListRow,
 } from "../fileModel";
 import { button, el, icon, openMenu, plural } from "../dom";
+import { currentFontPx } from "../font";
 import {
   applySnapshot,
   currentSnapshot,
@@ -30,7 +34,10 @@ import {
 import type { OperationResult, ToolPurpose, ToolResult } from "../types";
 import type { PreviewController } from "../dialogs/preview";
 
-const ROW_HEIGHT = 24;
+// A fixed-height virtual list must assume exactly the height the stylesheet
+// gives a row, so the assumption follows interface zoom (`--row-height` in
+// style/tokens.css is `FILE_ROW_REM` rem of the same root font size).
+const rowHeight = (): number => rowHeightPx(currentFontPx(), FILE_ROW_REM);
 const OVERSCAN = 6;
 
 export interface ChangesDeps {
@@ -62,7 +69,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   const fileVirtual = el("div", { class: "virtual" }, [fileRowsHost]);
   const fileList = el("div", {
     class: "file-list",
-    role: "list",
+    role: "listbox",
     "aria-label": "Changed files",
     tabIndex: 0,
   }, [fileVirtual]);
@@ -113,7 +120,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   // changed files costs the same as one with dozens.
   const renderFileRows = (): void => {
     const viewport = fileList.clientHeight || 320;
-    const slice = visibleWindow(listRows.length, fileList.scrollTop, viewport, ROW_HEIGHT, OVERSCAN);
+    const slice = visibleWindow(listRows.length, fileList.scrollTop, viewport, rowHeight(), OVERSCAN);
     fileVirtual.style.height = `${slice.totalHeight}px`;
     fileRowsHost.style.transform = `translateY(${slice.offsetY}px)`;
     const fragment = document.createDocumentFragment();
@@ -240,7 +247,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
 
   // --- row rendering ---
   const createRow = (row: ListRow, index: number): HTMLElement => {
-    const rowElement = el("div", { id: `file-row-${index}`, role: "listitem" });
+    const rowElement = el("div", { id: `file-row-${index}`, role: listRowRole(row.kind) });
     if (row.kind === "heading") {
       rowElement.className = "file-row group-heading";
       const chevron = el("span", { class: "chevron", text: row.collapsed ? "▸" : "▾" });
@@ -446,7 +453,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     const row = listRows[target];
     selectedRow = target;
     selectedFileId = row.kind === "file" ? row.file.id : null;
-    fileList.scrollTop = revealScroll(fileList.scrollTop, viewport, target, ROW_HEIGHT);
+    fileList.scrollTop = revealScroll(fileList.scrollTop, viewport, target, rowHeight());
     renderFileRows();
   });
 

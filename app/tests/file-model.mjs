@@ -1,6 +1,29 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { buildRows, nextSelectableRow, revealScroll, visibleWindow } from "../src/fileModel.ts";
+import { fileURLToPath } from "node:url";
+import {
+  buildRows,
+  listRowRole,
+  nextSelectableRow,
+  revealScroll,
+  rowHeightPx,
+  visibleWindow,
+  FILE_ROW_REM,
+  HISTORY_ROW_REM,
+} from "../src/fileModel.ts";
+
+const stylesheet = (path) =>
+  readFileSync(fileURLToPath(new URL(`../src/${path}`, import.meta.url)), "utf8");
+
+// Reads a rem-based token out of the stylesheet, so the height the list
+// assumes and the height the browser lays out are checked against each other
+// rather than against a copy of the same number.
+const cssRem = (name) => {
+  const match = stylesheet("style/tokens.css").match(new RegExp(`--${name}:\\s*([0-9.]+)rem`));
+  assert.ok(match, `--${name} must be declared in style/tokens.css`);
+  return Number(match[1]);
+};
 
 function file(id, group, display = `file-${id}.txt`) {
   return {
@@ -100,4 +123,40 @@ test("revealScroll keeps a row fully visible without needless movement", () => {
   assert.equal(revealScroll(300, 300, 3, 30), 90); // above: align to top
   assert.equal(revealScroll(0, 300, 15, 30), 180); // below: align to bottom
   assert.equal(revealScroll(0, 300, 8, 30), 0); // exactly at the edge
+});
+
+test("the row height the list assumes is the height the stylesheet gives a row", () => {
+  assert.equal(FILE_ROW_REM, cssRem("row-height"), "file rows follow --row-height");
+  assert.equal(HISTORY_ROW_REM, cssRem("row-height-history"), "commit rows follow --row-height-history");
+});
+
+test("the assumed row height follows interface zoom at every allowed size", () => {
+  for (let fontPx = 12; fontPx <= 24; fontPx += 1) {
+    assert.equal(rowHeightPx(fontPx, FILE_ROW_REM), fontPx * FILE_ROW_REM);
+    assert.equal(rowHeightPx(fontPx, HISTORY_ROW_REM), fontPx * HISTORY_ROW_REM);
+  }
+  // The bug this guards: a hard-coded 24px row height at 20px zoom scrolled
+  // every row out of step with the rows the browser actually laid out.
+  assert.notEqual(rowHeightPx(20, FILE_ROW_REM), 24);
+});
+
+test("a group heading occupies one row slot, not a taller one", () => {
+  const rule = stylesheet("style.css").match(/\.group-heading\s*\{[^}]*\}/);
+  assert.ok(rule, "the file list styles .group-heading");
+  assert.match(rule[0], /height:\s*var\(--row-height\)/, "a heading must be exactly one row tall");
+});
+
+test("only a file is an option; a heading is never announced as a selectable row", () => {
+  const rows = buildRows([file(1, "staged")], new Set());
+  assert.equal(rows[0].kind, "heading");
+  assert.equal(listRowRole(rows[0].kind), "presentation");
+  assert.equal(listRowRole(rows[1].kind), "option");
+});
+
+test("scroll offsets stay consistent with the assumed height across the list", () => {
+  const height = rowHeightPx(20, FILE_ROW_REM);
+  const slice = visibleWindow(1000, 20 * height, 4 * height, height, 0);
+  assert.equal(slice.totalHeight, 1000 * height);
+  assert.equal(slice.offsetY, slice.startIndex * height);
+  assert.equal(slice.startIndex, 20);
 });
