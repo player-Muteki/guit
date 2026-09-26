@@ -161,7 +161,7 @@ pub fn run_with_limit(
     let mut truncated = false;
     let mut status = None;
     let mut pipes_closed = false;
-    let result: Result<(), ProbeError> = loop {
+    let result: Result<ExitStatus, ProbeError> = loop {
         if cancelled.load(Ordering::SeqCst) {
             break Err(ProbeError::new(
                 "process_cancelled",
@@ -177,8 +177,10 @@ pub fn run_with_limit(
         if started.elapsed() >= close_stdin_after {
             drop(stdin.take());
         }
-        if pipes_closed && status.is_some() {
-            break Ok(());
+        if pipes_closed {
+            if let Some(exit) = status.take() {
+                break Ok(exit);
+            }
         }
         match receiver.recv_timeout(Duration::from_millis(20)) {
             Ok(Chunk::Data(is_stderr, bytes)) => {
@@ -208,9 +210,11 @@ pub fn run_with_limit(
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
     perf::mark(&label, launched.elapsed());
-    result?;
+    // A successful wait leaves exactly one exit status, so the loop hands it
+    // out instead of unwrapping it again here.
+    let exit = result?;
     Ok(CapturedOutput {
-        status: status.expect("completed child"),
+        status: exit,
         stdout,
         stderr,
         truncated,
