@@ -1,0 +1,198 @@
+/* M7 design tokens. The shell, views and dialogs only ever reference these
+   custom properties; both schemes are tuned for >= 4.5:1 body text and
+   >= 3:1 for the 2px status rail (never the sole carrier of meaning — every
+   status also has a two-letter code). */
+
+:root {
+  color-scheme: light dark;
+
+  /* surfaces */
+  --surface-app: #f6f8fa;
+  --surface-rail: #eaeef2;
+  --surface-panel: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #eef1f4;
+  --surface-hover: rgba(9, 14, 20, 0.06);
+  --surface-active: rgba(9, 107, 218, 0.12);
+  --surface-input: #ffffff;
+
+  /* lines */
+  --line: #d0d7de;
+  --line-strong: #8c959f;
+
+  /* text */
+  --text: #1f2328;
+  --text-muted: #59636e;
+  --text-faint: #818b98;
+  --text-inverse: #ffffff;
+
+  /* accents */
+  --accent: #0969da;
+  --accent-hover: #0860ca;
+  --accent-soft: rgba(9, 105, 218, 0.14);
+  --danger: #cf222e;
+  --danger-hover: #b91c26;
+  --danger-soft: rgba(207, 34, 46, 0.1);
+  --danger-text: #ffffff;
+
+  /* git status (Primer semantic hues) */
+  --status-added: #1a7f37;
+  --status-modified: #9a6700;
+  --status-deleted: #cf222e;
+  --status-renamed: #8250df;
+  --status-conflict: #8250df;
+  --status-untracked: #57606a;
+  --status-staged: #1a7f37;
+  --status-ignored: #8c959f;
+
+  /* typography */
+  --font-ui: system-ui, -apple-system, "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --text-xs: 0.6875rem;   /* 11px */
+  --text-sm: 0.8125rem;   /* 13px */
+  --text-md: 0.875rem;    /* 14px */
+  --text-lg: 1rem;
+
+  /* metrics */
+  --rail-width: 2.5rem;   /* 40px activity bar */
+  --appbar-height: 2.5rem;
+  --statusbar-height: 1.5rem;
+  --row-height: 1.5rem;   /* 24px file rows */
+  --row-height-history: 1.75rem;
+  --radius: 0.375rem;
+  --radius-sm: 0.25rem;
+  --transition: 120ms ease;
+
+  --focus-ring: 0 0 0 2px var(--surface-panel), 0 0 0 4px var(--accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-app: #0d1117;
+    --surface-rail: #010409;
+    --surface-panel: #0d1117;
+    --surface-raised: #161b22;
+    --surface-sunken: #010409;
+    --surface-hover: rgba(177, 186, 196, 0.12);
+    --surface-active: rgba(56, 139, 253, 0.16);
+    --surface-input: #0d1117;
+
+    --line: #30363d;
+    --line-strong: #6e7681;
+
+    --text: #e6edf3;
+    --text-muted: #9198a1;
+    --text-faint: #6e7681;
+    --text-inverse: #0d1117;
+
+    --accent: #388bfd;
+    --accent-hover: #58a6ff;
+    --accent-soft: rgba(56, 139, 253, 0.16);
+    --danger: #f85149;
+    --danger-hover: #ff7b72;
+    --danger-soft: rgba(248, 81, 73, 0.12);
+    --danger-text: #0d1117;
+
+    --status-added: #3fb950;
+    --status-modified: #d29922;
+    --status-deleted: #f85149;
+    --status-renamed: #a371f7;
+    --status-conflict: #a371f7;
+    --status-untracked: #8b949e;
+    --status-staged: #3fb950;
+    --status-ignored: #6e7681;
+
+    --focus-ring: 0 0 0 2px var(--surface-panel), 0 0 0 4px var(--accent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --transition: 0ms; }
+}
+
+/* Explicit theme override (Settings → General). `system` removes the
+   attribute entirely so prefers-color-scheme decides again. */
+@media (prefers-color-scheme: light) {
+  :root[data-theme="dark"] {
+    --surface-app: #0d1117;
+    --surface-rail: #010409;
+    --surface-panel: #0d1117;
+    --surface-raised: #161b22;
+    --surface-sunken: #010409;
+    --surface-hover: rgba(177, 186, 196, 0.12);
+    --surface-active: rgba(56, 139, 253, 0.16);
+    --surface-input: #0d1117;
+
+    --line: #30363d;
+    --line-strong: #6e7681;
+
+    --text: #e6edf3;
+    --text-muted: #9198a1;
+    --text-faint: #6e7681;
+    --text-inverse: #0d1117;
+
+    --accent: #388bfd;
+    --accent-hover: #58a6ff;
+    --accent-soft: rgba(56, 139, 253, 0.16);
+    --danger: #f85149;
+    --danger-hover: #ff7b72;
+    --danger-soft: rgba(248, 81, 73, 0.12);
+    --danger-text: #0d1117;
+
+    --status-added: #3fb950;
+    --status-modified: #d29922;
+    --status-deleted: #f85149;
+    --status-renamed: #a371f7;
+    --status-conflict: #a371f7;
+    --status-untracked: #8b949e;
+    --status-staged: #3fb950;
+    --status-ignored: #6e7681;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="light"] {
+    --surface-app: #f6f8fa;
+    --surface-rail: #eaeef2;
+    --surface-panel: #ffffff;
+    --surface-raised: #ffffff;
+    --surface-sunken: #eef1f4;
+    --surface-hover: rgba(9, 14, 20, 0.06);
+    --surface-active: rgba(9, 107, 218, 0.12);
+    --surface-input: #ffffff;
+
+    --line: #d0d7de;
+    --line-strong: #8c959f;
+
+    --text: #1f2328;
+    --text-muted: #59636e;
+    --text-faint: #818b98;
+    --text-inverse: #ffffff;
+
+    --accent: #0969da;
+    --accent-hover: #0860ca;
+    --accent-soft: rgba(9, 105, 218, 0.14);
+    --danger: #cf222e;
+    --danger-hover: #b91c26;
+    --danger-soft: rgba(207, 34, 46, 0.1);
+    --danger-text: #ffffff;
+
+    --status-added: #1a7f37;
+    --status-modified: #9a6700;
+    --status-deleted: #cf222e;
+    --status-renamed: #8250df;
+    --status-conflict: #8250df;
+    --status-untracked: #57606a;
+    --status-staged: #1a7f37;
+    --status-ignored: #8c959f;
+  }
+}
+
+/* High-contrast: strengthen lines and text; never rely on colour alone. */
+@media (prefers-contrast: more) {
+  :root {
+    --line: var(--line-strong);
+    --text-muted: var(--text);
+    --text-faint: var(--text-muted);
+  }
+}

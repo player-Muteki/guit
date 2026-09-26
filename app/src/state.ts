@@ -1,0 +1,266 @@
+// Single state layer for the shell, the views and the dialogs.
+//
+// The backend already orders snapshots with a monotonic `version`; this
+// module owns the frontend mirror of that invariant: an older snapshot must
+// never replace a newer one, and every accepted change notifies the
+// renderer once. Busy lanes (`writeRunning`, `toolRunning`), the pending
+// preview ticket, the active view, the status line and the toast stack live
+// here so the shell and the views never keep divergent copies.
+
+import type {
+  SnapshotView,
+  StatusKind,
+  StatusLine,
+  Toast,
+} from "./types";
+
+export type ViewId =
+  | "changes"
+  | "history"
+  | "branches"
+  | "stash"
+  | "remotes"
+  | "worktrees"
+  | "settings";
+
+export const VIEW_ORDER: readonly ViewId[] = [
+  "changes",
+  "history",
+  "branches",
+  "stash",
+  "remotes",
+  "worktrees",
+  "settings",
+];
+
+export type PendingPreview =
+  | {
+      kind: "discard" | "clean";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree?: undefined;
+      remote?: undefined;
+    }
+  | {
+      kind: "branch";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch: { name: string; force: boolean; targetOid: string | null };
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree?: undefined;
+      remote?: undefined;
+    }
+  | {
+      kind: "tag";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag: { name: string; targetOid: string | null };
+      stash?: undefined;
+      reset?: undefined;
+      worktree?: undefined;
+      remote?: undefined;
+    }
+  | {
+      kind: "stashDrop" | "stashPop";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash: { index: number; targetOid: string | null };
+      reset?: undefined;
+      worktree?: undefined;
+      remote?: undefined;
+    }
+  | {
+      kind: "resetHard";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset: { target: string };
+      worktree?: undefined;
+      remote?: undefined;
+    }
+  | {
+      kind: "worktreeRemove";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree: { index: number; targetOid: string | null };
+      remote?: undefined;
+    }
+  | {
+      kind: "remoteRemove";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree?: undefined;
+      remote: { name: string };
+    }
+  | {
+      kind: "remoteBranchDelete";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree?: undefined;
+      remote?: undefined;
+      remoteBranch: { target: string; targetOid: string | null };
+    }
+  | {
+      kind: "forcePush";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree?: undefined;
+      remote?: undefined;
+      remoteBranch?: undefined;
+    };
+
+let sessionActive = false;
+let snapshot: SnapshotView | null = null;
+let write = false;
+let tool = false;
+let preview: PendingPreview | null = null;
+let view: ViewId = "changes";
+let watchMode: "none" | "poll" | "events" = "none";
+let status: StatusLine = { kind: "idle", message: "" };
+let nextToastId = 1;
+let toasts: Toast[] = [];
+let credentialRetryAction: (() => void) | null = null;
+let forcePushReady = false;
+
+type Listener = () => void;
+const listeners = new Set<Listener>();
+
+function notify(): void {
+  for (const listener of listeners) listener();
+}
+
+export function subscribe(listener: Listener): void {
+  listeners.add(listener);
+}
+
+export const isSessionActive = (): boolean => sessionActive;
+export const currentSnapshot = (): SnapshotView | null => snapshot;
+export const snapshotVersion = (): number => snapshot === null ? -1 : snapshot.version;
+export const isWriteRunning = (): boolean => write;
+export const isToolRunning = (): boolean => tool;
+export const pendingPreview = (): PendingPreview | null => preview;
+export const activeView = (): ViewId => view;
+export const watchStatus = (): "none" | "poll" | "events" => watchMode;
+export const statusLine = (): StatusLine => status;
+export const toastStack = (): readonly Toast[] => toasts;
+export const hasCredentialRetry = (): boolean => credentialRetryAction !== null;
+export const isForcePushReady = (): boolean => forcePushReady;
+
+// Accepts a snapshot only when it is strictly newer than the one on screen
+// (file IDs are per-snapshot, so an older one would address the wrong paths).
+// Returns true when the snapshot was accepted.
+export function applySnapshot(next: SnapshotView | null): boolean {
+  if (next && snapshot && next.version <= snapshot.version) return false;
+  snapshot = next;
+  sessionActive = next !== null;
+  notify();
+  return true;
+}
+
+export function setWriteRunning(value: boolean): void {
+  if (write === value) return;
+  write = value;
+  notify();
+}
+
+export function setToolRunning(value: boolean): void {
+  if (tool === value) return;
+  tool = value;
+  notify();
+}
+
+export function setPendingPreview(next: PendingPreview | null): void {
+  if (preview === next) return;
+  preview = next;
+  notify();
+}
+
+export function setActiveView(next: ViewId): void {
+  if (view === next) return;
+  view = next;
+  notify();
+}
+
+export function setWatchMode(mode: "none" | "poll" | "events"): void {
+  if (watchMode === mode) return;
+  watchMode = mode;
+  notify();
+}
+
+export function setStatus(message: string, kind: StatusKind = "info"): void {
+  if (status.kind === kind && status.message === message) return;
+  status = { kind, message };
+  notify();
+}
+
+export function pushToast(toast: Omit<Toast, "id">): number {
+  const id = nextToastId++;
+  toasts = [...toasts, { ...toast, id }].slice(-4);
+  notify();
+  return id;
+}
+
+export function dismissToast(id: number): void {
+  const next = toasts.filter((toast) => toast.id !== id);
+  if (next.length === toasts.length) return;
+  toasts = next;
+  notify();
+}
+
+// Git itself decided the failure is about credentials; that is the only
+// moment the explicit credential path appears, and one click spends it.
+export function offerCredentialRetry(retry: (() => void) | null): void {
+  credentialRetryAction = retry;
+  notify();
+}
+
+export function consumeCredentialRetry(): (() => void) | null {
+  const action = credentialRetryAction;
+  credentialRetryAction = null;
+  if (action !== null) notify();
+  return action;
+}
+
+// The one-time force-push preview appears only after Git itself refused an
+// update; any newer push or session change hides it again.
+export function setForcePushReady(value: boolean): void {
+  if (forcePushReady === value) return;
+  forcePushReady = value;
+  notify();
+}
