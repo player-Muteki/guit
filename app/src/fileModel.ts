@@ -28,11 +28,13 @@ export type ListRow =
   | { kind: "heading"; group: FileGroupKey; label: string; count: number; collapsed: boolean }
   | { kind: "file"; file: FileView };
 
-// Only a file is selectable, so only a file is an option in the listbox. A
+// Only a file is selectable, so only a file is a treeitem in the tree. An
+// `option` would flatten the row: ARIA gives `option` presentational children,
+// so WebKit hides the Stage and More-actions buttons from assistive tech. A
 // group heading stays visible and clickable, but announcing it as a row would
-// put a non-option child inside a listbox.
-export function listRowRole(kind: ListRow["kind"]): "option" | "presentation" {
-  return kind === "file" ? "option" : "presentation";
+// put a non-treeitem child inside a tree.
+export function listRowRole(kind: ListRow["kind"]): "treeitem" | "presentation" {
+  return kind === "file" ? "treeitem" : "presentation";
 }
 
 export function buildRows(

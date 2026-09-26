@@ -146,11 +146,11 @@ test("a group heading occupies one row slot, not a taller one", () => {
   assert.match(rule[0], /height:\s*var\(--row-height\)/, "a heading must be exactly one row tall");
 });
 
-test("only a file is an option; a heading is never announced as a selectable row", () => {
+test("only a file is a selectable row; a heading is never announced as one", () => {
   const rows = buildRows([file(1, "staged")], new Set());
   assert.equal(rows[0].kind, "heading");
   assert.equal(listRowRole(rows[0].kind), "presentation");
-  assert.equal(listRowRole(rows[1].kind), "option");
+  assert.equal(listRowRole(rows[1].kind), "treeitem");
 });
 
 test("scroll offsets stay consistent with the assumed height across the list", () => {

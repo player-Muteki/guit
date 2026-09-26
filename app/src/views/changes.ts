@@ -69,7 +69,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   const fileVirtual = el("div", { class: "virtual" }, [fileRowsHost]);
   const fileList = el("div", {
     class: "file-list",
-    role: "listbox",
+    role: "tree",
     "aria-label": "Changed files",
     tabIndex: 0,
   }, [fileVirtual]);

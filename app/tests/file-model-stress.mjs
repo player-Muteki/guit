@@ -94,9 +94,13 @@ test("empty input and unknown groups", () => {
   assert.deepEqual(buildRows([stranger], new Set()), []);
 });
 
-test("listRowRole keeps non-options out of the listbox", () => {
-  assert.equal(listRowRole("file"), "option");
+test("listRowRole keeps non-selectable rows out and interactive children visible", () => {
+  assert.equal(listRowRole("file"), "treeitem");
   assert.equal(listRowRole("heading"), "presentation");
+  // Regression guard: `option` has presentational children per ARIA, so a
+  // file row with that role hides its Stage/More-actions buttons from
+  // assistive tech (measured over AT-SPI in the live app).
+  assert.notEqual(listRowRole("file"), "option");
 });
 
 test("row-heights-track-the-css: the assumed rem values match tokens.css", () => {
