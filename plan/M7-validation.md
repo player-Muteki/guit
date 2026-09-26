@@ -50,9 +50,9 @@ M7 只重做前端呈现层。Rust 后端、Tauri 命令签名、事件名与数
 
 ## 实施中读出并修复的行为缺口
 
-设计阶段的通读（在没有类型检查的条件下）已修 8 处（`stashPop` 票据被标成 `stashDrop`、`SyncAction` 残留已删除的 `"fetch"` 变体、`rows`/`spellcheck`/`tabindex` 属性类型不符、票据驱动的分支删除丢失 `not fully merged` 强删升级、建分支/标签的起点 OID 不清空、`preview.renew` 的伪取消、外部工具期间票据确认不占写通道、`resetHard` 票据重送解析后的 oid 而非用户请求的 commit id、模态取消丢失 `Cancelled; nothing was changed.` 文案）。
+设计阶段的通读（在没有类型检查的条件下）已修 9 处（`stashPop` 票据被标成 `stashDrop`、`SyncAction` 残留已删除的 `"fetch"` 变体、`rows`/`spellcheck`/`tabindex` 属性类型不符、票据驱动的分支删除丢失 `not fully merged` 强删升级、建分支/标签的起点 OID 不清空、`preview.renew` 的伪取消、外部工具期间票据确认不占写通道、`resetHard` 票据重送解析后的 oid 而非用户请求的 commit id、模态取消丢失 `Cancelled; nothing was changed.` 文案）。
 
-**本轮真正跑起门槛后又发现 11 处**，其中前 6 处是只有运行时/AT-SPI 才能暴露的：
+**本轮真正跑起门槛后又发现 11 处**（合计 20 处），其中前 6 处是只有运行时/AT-SPI 才能暴露的：
 
 1. **Settings 在无仓库时不可达。** 壳层把七个视图一并隐藏、只留欢迎态，而主题、界面缩放、快捷键列表、诊断导出全是应用级的；`diagnostics-export-check.sh` 因此直接失败（step 1「export button not in tree」）。改为：Settings 是唯一无仓库也显示的视图，其余六个在无仓库时置灰（`disabled` + title「open a repository first」），Ctrl+1…7 也随之被同一条件挡住。**这是 M7 自身引入的可达性回归。**
 2. **监听模式行对无障碍树不可见。** 状态栏的监听模式是裸 `<span>`，WebKitGTK 不为「脚本写文本的裸 span」生成可及对象——实测四种写法：裸 span ✗、`<span><strong>`+文本节点 ✗、`aria-label` ✓、`role="status"` ✓、`<div>` ✓。M6 把这行放在仓库摘要的 `<div><strong>` 里所以可见；搬进状态栏后既让读屏用户听不到，也让 `bench_run.py` 的 L2 地标（`Monitor: `）长期为 null（本轮 3 次里 2 次 null）。改用 `role="status"`，并在文本未变时不重写（活动区每次变更都会重播）。Settings 的缩放读数有同一缺陷，一并修。
@@ -91,7 +91,7 @@ M7 只重做前端呈现层。Rust 后端、Tauri 命令签名、事件名与数
 | 明暗双主题 | 两套令牌都在、决定可读性的令牌两套都不同；三个选项都能选中并落库 | ✅ `theme-check.py` 17 断言 fail=0 |
 | 模态 | 丢弃预览 → 列出候选 → 取消关闭 → 票据未消费 | ✅ `view-smoke.py`（模态文案、候选清单、`Cancelled; nothing was changed.`、`git status --porcelain` 前后逐字相同） |
 | Toast 不覆盖 | 连续两次失败同时可见 | ⚠️ 运行时无法稳定制造两次**抛出型**失败；改为在 `app/tests/state.mjs` 单测证明栈语义（追加不覆盖、按 id 独立关闭、封顶 4 条丢最旧），抛出型路径的运行时证据沿用 `recovery-checks.sh` 阶段 B/C |
-| History 分页 | 10k 提交夹具点「Load older」无全表重建回退 | ✅ 12 次点击 0.021–0.045 s/页，中位 0.034 s |
+| History 分页 | 10k 提交夹具点「Load older」无全表重建回退 | ✅ 12 次点击 0.021–0.045 s/页，中位 0.036 s |
 | 打包 | `tauri build --bundles deb,rpm,appimage` 零告警 | ✅ 三件齐出，**无任何 warning 行**（AppImage 需 `APPIMAGE_EXTRACT_AND_RUN=1`） |
 | rpm 载荷 | 载荷内有可执行的 `usr/bin/guit` | ✅ `bsdtar` 解出 4 图标 + desktop + `usr/bin/guit`（`rpm2cpio`/`rpm` 本机无，记录非失败） |
 | AppImage 冒烟 | 隔离 HOME 启动到 Changes 视图 | ✅ `APPIMAGE_EXTRACT_AND_RUN=1` 下启动，AT-SPI 命中 `Commit message` 与 `Monitor: ` |
@@ -116,7 +116,7 @@ M7 只重做前端呈现层。Rust 后端、Tauri 命令签名、事件名与数
 - **主进程峰值低约 5 MB**（~209 MB vs ~215 MB）。
 - inotify 句柄数逐档相同（20 / 20 / 38 / 197），确认监听面未被重做影响。
 
-History 分页（hist10k，PAGE_SIZE=50，点「Load older」到行数落定）：12 次点击 0.021–0.045 s，中位 0.034 s。M6-02 记录的「500 行 129 ms / 3000 行 1664 ms」全表重建未回归（虚拟化沿用 `fileModel` 的窗口函数）。
+History 分页（hist10k，PAGE_SIZE=50，点「Load older」到行数落定）：12 次点击 0.021–0.045 s，中位 0.036 s。M6-02 记录的「500 行 129 ms / 3000 行 1664 ms」全表重建未回归（虚拟化沿用 `fileModel` 的窗口函数）。
 
 ## 基准脚本口径变更（五处，均在本 diff 中）
 
