@@ -58,6 +58,10 @@ and how much of the app one failure can take with it.
 - A `git` that starts and then never answers is reported as unresponsive. It
   used to hold the settings view, and the external-tool rows behind it, open
   forever.
+- A clone that stops reporting is stopped. Two minutes of silence from Git ends
+  the attempt and says it was guit that stopped it; before, the only bound on a
+  clone was the one you pressed, so a remote that went quiet mid-transfer held
+  the window open indefinitely.
 - The commands guit probes at startup no longer describe themselves with an
   internal schedule label.
 

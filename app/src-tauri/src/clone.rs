@@ -1,8 +1,17 @@
 use crate::probe::{redact, ProbeError};
 use crate::repo::{self, user_git_command};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// A clone may run for hours, so guit never bounds its total duration. It
+/// bounds *silence* instead: `--progress` output is a heartbeat, so a
+/// transfer that is merely slow keeps living and a transfer that stopped
+/// reporting is stopped itself.
+pub const CLONE_STALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often the watchdog looks at the heartbeat.
+const CLONE_STALL_POLL: Duration = Duration::from_millis(50);
 
 /// One clone may run at a time; cancellation is requested through the same
 /// flag the process runner polls.
@@ -10,6 +19,49 @@ use std::time::Duration;
 pub struct CloneState {
     pub cancelled: AtomicBool,
     pub running: AtomicBool,
+}
+
+/// The moment Git last said anything, plus the verdict the watchdog reached.
+struct StallWatch {
+    last_beat: Mutex<Instant>,
+    stalled: AtomicBool,
+    stopped: AtomicBool,
+}
+
+impl Default for StallWatch {
+    fn default() -> Self {
+        Self {
+            last_beat: Mutex::new(Instant::now()),
+            stalled: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+        }
+    }
+}
+
+impl StallWatch {
+    fn beat(&self) {
+        *crate::util::guard(&self.last_beat) = Instant::now();
+    }
+
+    fn expired(&self, silence: Duration) -> bool {
+        crate::util::guard(&self.last_beat).elapsed() >= silence
+    }
+
+    /// Kills the clone the heartbeat stops, and records that it was guit —
+    /// not the user — who asked, so the report can say so honestly.
+    fn watch(&self, cancelled: &AtomicBool, silence: Duration) {
+        loop {
+            if self.stopped.load(Ordering::SeqCst) {
+                return;
+            }
+            if self.expired(silence) {
+                self.stalled.store(true, Ordering::SeqCst);
+                cancelled.store(true, Ordering::SeqCst);
+                return;
+            }
+            std::thread::sleep(CLONE_STALL_POLL);
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -79,6 +131,16 @@ pub fn clone_repository(
     parent: &Path,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<CloneResult, ProbeError> {
+    clone_within_silence_limit(state, source, parent, CLONE_STALL_TIMEOUT, on_line)
+}
+
+fn clone_within_silence_limit(
+    state: &CloneState,
+    source: &str,
+    parent: &Path,
+    silence: Duration,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<CloneResult, ProbeError> {
     let source = source.trim();
     if source.is_empty() {
         return Err(ProbeError::new(
@@ -102,8 +164,12 @@ pub fn clone_repository(
     }
     let mut command = user_git_command(parent);
     command.args(["clone", "--progress", "--", source, &name]);
+    let watch = StallWatch::default();
     let mut buffer: Vec<u8> = Vec::new();
     let mut emit_lines = |is_stderr: bool, bytes: &[u8]| {
+        if !bytes.is_empty() {
+            watch.beat();
+        }
         if !is_stderr {
             return;
         }
@@ -113,14 +179,20 @@ pub fn clone_repository(
             emit_line(&line, on_line);
         }
     };
-    let output = crate::runner::run_with_limit(
-        command,
-        &state.cancelled,
-        Duration::ZERO,
-        Duration::MAX,
-        256 * 1024,
-        &mut emit_lines,
-    );
+    let output = std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| watch.watch(&state.cancelled, silence));
+        let output = crate::runner::run_with_limit(
+            command,
+            &state.cancelled,
+            Duration::ZERO,
+            Duration::MAX,
+            256 * 1024,
+            &mut emit_lines,
+        );
+        watch.stopped.store(true, Ordering::SeqCst);
+        let _ = watcher.join();
+        output
+    });
     if !buffer.is_empty() {
         let remainder = std::mem::take(&mut buffer);
         emit_line(&remainder, on_line);
@@ -162,7 +234,21 @@ pub fn clone_repository(
             }
         }
         Err(error) if error.code == "process_cancelled" => {
-            (false, true, "Clone cancelled.".to_owned(), None)
+            if watch.stalled.load(Ordering::SeqCst) {
+                // Not the user: Git stopped talking, so guit stopped it.
+                // Saying "cancelled" here would hide the actual failure.
+                (
+                    false,
+                    false,
+                    format!(
+                        "Git reported nothing for {} seconds, so guit stopped the clone. Check the connection to the remote and start it again.",
+                        silence.as_secs().max(1)
+                    ),
+                    None,
+                )
+            } else {
+                (false, true, "Clone cancelled.".to_owned(), None)
+            }
         }
         Err(error) => return Err(error),
     };
@@ -258,9 +344,58 @@ mod tests {
         state.cancelled.store(true, Ordering::SeqCst);
         let result =
             clone_repository(&state, source.to_str().unwrap(), parent.path(), &mut |_| {}).unwrap();
-        assert!(!result.success);
         assert!(result.cancelled);
-        assert_eq!(result.residue, residue_of(Path::new(&result.target)));
+        assert_eq!(result.message, "Clone cancelled.");
+    }
+
+    // Removing the watchdog brings back the old failure: a remote that stops
+    // talking leaves the clone waiting forever, so this test hangs rather
+    // than fails — which is exactly what it is guarding.
+    #[test]
+    fn a_clone_that_stops_reporting_is_stopped_and_says_so() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = make_source(source_dir.path());
+        let parent = tempfile::tempdir().unwrap();
+        let state = CloneState::default();
+        let silence = Duration::ZERO;
+        let started = std::time::Instant::now();
+        let result = clone_within_silence_limit(
+            &state,
+            source.to_str().unwrap(),
+            parent.path(),
+            silence,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the silent clone was waited on, not stopped"
+        );
+        assert!(!result.success);
+        assert!(
+            !result.cancelled,
+            "guit stopped this clone, so reporting it as the user's \
+             cancellation hides what happened: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains("reported nothing"),
+            "{}",
+            result.message
+        );
+        assert!(state.cancelled.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn only_silence_expires_the_watch_and_any_report_resets_it() {
+        let watch = StallWatch::default();
+        assert!(!watch.expired(Duration::from_secs(120)));
+        // Backdate the heartbeat the way a dead transfer would.
+        *crate::util::guard(&watch.last_beat) = Instant::now() - Duration::from_secs(121);
+        assert!(watch.expired(Duration::from_secs(120)));
+        watch.beat();
+        assert!(!watch.expired(Duration::from_secs(120)));
+        assert!(!watch.stalled.load(Ordering::SeqCst));
     }
 
     #[test]

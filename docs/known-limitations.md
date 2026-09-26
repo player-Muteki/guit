@@ -69,6 +69,19 @@ These need a human and a second machine, and are honestly outstanding:
 - Extremely large repositories may therefore surface "output too large"
   errors instead of partial listings; manual refresh is always offered.
 
+## Long operations
+
+- A clone is bounded by **silence, not by duration**. Two minutes without any
+  progress line from Git ends the attempt, and the report says guit stopped it
+  rather than that you did — a transfer that stopped reporting cannot be
+  revived by waiting. The cost of that choice is real: a server enumerating a
+  very large repository can stay quiet for more than two minutes, and such a
+  clone gets stopped even though it was only slow. Starting it again is the
+  answer. Every other operation has a duration bound instead of a silence
+  bound — one hour for fetch and push, minutes for the write lane — so a
+  stalled clone is the one case guit decides by listening rather than by
+  counting.
+
 ## Watching and responsiveness
 
 - guit watches the working tree with inotify. If the kernel's
