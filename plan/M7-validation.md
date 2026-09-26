@@ -77,7 +77,7 @@ M7 只重做前端呈现层。Rust 后端、Tauri 命令签名、事件名与数
 | --- | --- | --- |
 | 类型检查与构建 | `tsc --noEmit && vite build` | ✅ 0 error；`index.css 20.83 kB` / `index.js 94.71 kB`（gzip 4.26 / 27.83 kB） |
 | 前端单元 | `npm run test:fixture` | ✅ **18/18**（file-model 9、history-model 5、state 4） |
-| Rust 回归 | `cargo test --locked` | ✅ 292 + 5；10 次全量中 1 次单发失败，9 次全绿（见"已知缺口"） |
+| Rust 回归 | `cargo test --locked` | ✅ 292 + 5；22 次全量中 2 次单发失败，20 次全绿（已定位用例，见"已知缺口"） |
 | 格式 | `cargo fmt --check`、`git diff --check` | ✅ 均无输出 |
 | clippy | 存量不增 | ✅ 恒 12 条（7 bin + 5 test-only），`app/src-tauri/` 零改动故必然等同 |
 | 空态契约 | AT-SPI 命中 `Open a repository to list its working copy status.` | ✅ `recovery-checks.sh` 19 断言 fail=0（阶段 A、B） |
@@ -141,7 +141,7 @@ History 分页（hist10k，PAGE_SIZE=50，点「Load older」到行数落定）�
 - **Windows/macOS 未实测**（延续 0.1.0 口径）：无运行时验证，仅配置到位。
 - **焦点无法用 AT-SPI 验证。** 实测该宿主的 AT-SPI 桥把 `FOCUSED` 状态**粘住**（点开应用栏 `⋯` 聚焦首项，再点活动栏 History，旧节点仍报 FOCUSED），且 `do_action` 不移动 DOM 焦点。因此焦点返回/取焦的断言全部从 `view-smoke.py` 移除，改为代码层保证（四条关闭路径统一 `leave()`、`openMenu`/应用栏菜单对称还焦、opener 取自激活元素记录）。**焦点行为本轮未经运行时验证**，与 M6 记录的 Wayland 键盘注入缺口同源。
 - **Toast 栈的"不覆盖"只有单测证据**：见验证清单中该行的说明。
-- **`cargo test` 单发 flake**：10 次全量里 1 次 291/292，失败用例未在重跑中复现（9 次全绿）。与 M6-03/M6-06 记录的同类单发画像一致，**根因未证**，不宣称已修。
+- **`cargo test` 单发 flake（已定位到用例）**：本轮 22 次全量里 2 次 291/292，失败用例是 `probe::tests::unsupported_git_reports_update_guidance`，报错 `git_start_failed: Text file busy (os error 26)`。该用例 `std::fs::write` 写一个 `#!/bin/sh` 假 git 后立刻 `execve` 它，偶发 ETXTBSY（内核在该 inode 上仍见写句柄）。**单独跑该用例 40 次全绿**，只在与全量 292 个用例并发时出现，故属并发/内核时序而非用例逻辑。与 M6-03/M6-06 记录的同类单发画像一致。**未修**：修它要动 `src-tauri/src/probe.rs` 的测试代码，越出 M7「后端零改动」边界；可能的修法（写后 `sync_all` 再 exec、或对 ETXTBSY 做有限重试）留给后续独立议题。
 - **外部 diff/merge 工具的失败文案走状态栏而非 Toast**：与 0.1.0 逐字一致，也符合 `plan/05`"结果文案走状态栏"；代价是它会被下一次状态更新覆盖。本轮按现状保留，如实记录。
 - **1k/10k 夹具在 `submodules_list_too_large` 上失败**：`git ls-files --stage` 走 `DEFAULT_OUTPUT_LIMIT`（64 KB），约千级文件即触顶，于是该档 Changes 列表为空并弹出该错误。**这是 M7 之前就有的后端读上限**（`app/src-tauri/` 零改动，`known-limitations.md`「Output bounds」已记载），M7 未引入也未修复；因 M7 明确不改后端，本轮不擅动，留作独立议题。1k/10k 两档的 L2 因此命中的是空态占位而非填充列表，与 M6 同。
 - **AppImage 需 `APPIMAGE_EXTRACT_AND_RUN=1`**（见"环境"）。
