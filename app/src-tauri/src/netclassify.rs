@@ -300,3 +300,113 @@ mod tests {
         assert_eq!(encode(NetCategory::Other), "\"other\"");
     }
 }
+
+#[cfg(test)]
+mod stress {
+    use super::*;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        }
+        fn below(&mut self, max: usize) -> usize {
+            (self.next() % max as u64) as usize
+        }
+    }
+
+    fn category(stderr: &str) -> NetCategory {
+        classify(stderr.as_bytes())
+    }
+
+    #[test]
+    fn twenty_thousand_random_garbage_inputs_never_panic() {
+        let mut rng = Rng(0xDEADBEEF12345678);
+        for _ in 0..20000 {
+            let length = rng.below(512);
+            let bytes: Vec<u8> = (0..length)
+                .map(|_| match rng.below(8) {
+                    0 => b'\x1b',
+                    1 => b'\r',
+                    2 => b'\n',
+                    3 => 0,
+                    4 => b'\xf0',
+                    5 => 0x80 + rng.below(64) as u8,
+                    6 => b'A' + rng.below(26) as u8,
+                    _ => rng.below(128) as u8,
+                })
+                .collect();
+            let _ = classify(&bytes);
+        }
+    }
+
+    #[test]
+    fn every_pattern_survives_uppercase_and_ansi_noise() {
+        for (pattern, expected) in PATTERNS {
+            let text = format!("\x1b[31m{pattern}\x1b[0m\r\n");
+            let upper = format!("\x1b[31m{}\x1b[0m\r\n", pattern.to_uppercase());
+            assert_eq!(category(&text), *expected, "lowercase {pattern}");
+            assert_eq!(category(&upper), *expected, "uppercase {pattern}");
+        }
+    }
+
+    #[test]
+    fn patterns_split_across_lines_do_not_match() {
+        assert_eq!(category("timed\nout"), NetCategory::Other);
+        assert_eq!(category("non-fast-\nforward"), NetCategory::Other);
+        assert_eq!(category("could not\nresolve host"), NetCategory::Other);
+    }
+
+    #[test]
+    fn a_one_megabyte_log_with_the_verdict_last_still_classifies() {
+        let mut text = "x".repeat(1024 * 1024);
+        text.push('\n');
+        text.push_str("remote: error: GH006: Protected branch update failed.");
+        let started = std::time::Instant::now();
+        assert_eq!(category(&text), NetCategory::ProtectedBranch);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn bare_escapes_and_control_sequences_do_not_panic() {
+        assert_eq!(category("\x1b"), NetCategory::Other);
+        assert_eq!(category("\x1b["), NetCategory::Other);
+        assert_eq!(category("\x1b[K"), NetCategory::Other);
+        // An unterminated CSI swallows everything after it…
+        assert_eq!(
+            category("\x1b[38;5;1connection refused"),
+            NetCategory::Other,
+            "text behind an unterminated CSI is eaten — git never emits one, pinned as behaviour"
+        );
+        // …but text before the escape still classifies.
+        assert_eq!(
+            category("connection refused \x1b[38;5;1"),
+            NetCategory::Network
+        );
+        // OSC (window-title) sequences are NOT stripped: the ESC and one
+        // following byte die, the body survives and can steer the verdict.
+        // Git's --progress output uses only CSI; this documents the limit.
+        assert_eq!(
+            category("\x1b]0;fetch first\u{7}"),
+            NetCategory::NonFastForward,
+            "OSC body is passed through to matching"
+        );
+    }
+
+    #[test]
+    fn first_line_position_beats_pattern_declaration_order() {
+        // "stale info" (StaleLease) sits on line 2 before nothing; a
+        // Network phrase on line 1 wins by earliest occurrence.
+        let text =
+            "fatal: could not resolve host: x.invalid\n ! [rejected] main -> main (stale info)";
+        assert_eq!(category(text), NetCategory::Network);
+        let flipped =
+            " ! [rejected] main -> main (stale info)\nfatal: could not resolve host: x.invalid";
+        assert_eq!(category(flipped), NetCategory::StaleLease);
+    }
+}

@@ -281,3 +281,219 @@ mod tests {
         assert_eq!(command_label(&command), "git.status");
     }
 }
+
+#[cfg(all(test, unix))]
+mod stress {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn sh(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]);
+        command.current_dir(std::env::temp_dir());
+        command
+    }
+
+    fn collect(
+        command: Command,
+        cancelled: &AtomicBool,
+        close_stdin_after: Duration,
+        timeout: Duration,
+        output_limit: usize,
+        progress: impl FnMut(bool, &[u8]),
+    ) -> Result<CapturedOutput, ProbeError> {
+        run_with_limit(
+            command,
+            cancelled,
+            close_stdin_after,
+            timeout,
+            output_limit,
+            progress,
+        )
+    }
+
+    #[test]
+    fn a_group_timeout_kills_grandchildren_that_hold_the_pipes_open() {
+        // The child backgrounds a grandchild that keeps stdout open, then
+        // exits itself. Without killing the process group the reader thread
+        // would block on the pipe forever even though `sh` finished.
+        let started = Instant::now();
+        let outcome = collect(
+            sh("sleep 30 >/dev/null & echo spawned; exit 0"),
+            &AtomicBool::new(false),
+            Duration::from_millis(50),
+            Duration::from_millis(400),
+            DEFAULT_OUTPUT_LIMIT,
+            |_, _| {},
+        );
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("the sleep outruns the timeout"),
+        };
+        assert_eq!(error.code, "probe_timeout");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "killed, not waited out"
+        );
+    }
+
+    #[test]
+    fn cancelling_drops_the_result_and_kills_the_group() {
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&cancelled);
+        let killer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            flag.store(true, Ordering::SeqCst);
+        });
+        let outcome = collect(
+            sh("sleep 30"),
+            &cancelled,
+            Duration::from_millis(50),
+            Duration::from_secs(20),
+            DEFAULT_OUTPUT_LIMIT,
+            |_, _| {},
+        );
+        killer.join().unwrap();
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("cancellation must end the run"),
+        };
+        assert_eq!(error.code, "process_cancelled");
+    }
+
+    #[test]
+    fn stdin_is_closed_so_a_filter_like_cat_completes() {
+        // `cat` only exits when its stdin reaches EOF: the close_stdin_after
+        // path is what stops every piped Git command from hanging.
+        let output = collect(
+            sh("cat"),
+            &AtomicBool::new(false),
+            Duration::from_millis(100),
+            Duration::from_secs(5),
+            DEFAULT_OUTPUT_LIMIT,
+            |_, _| {},
+        )
+        .expect("cat exits once stdin closes");
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn output_beyond_the_limit_is_cut_but_flagged_and_still_streamed_in_full() {
+        let mut streamed = 0usize;
+        let output = collect(
+            sh("head -c 200000 /dev/zero"),
+            &AtomicBool::new(false),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            1000,
+            |_, bytes| streamed += bytes.len(),
+        )
+        .expect("command completes");
+        assert_eq!(
+            output.stdout.len(),
+            1000,
+            "capture stops exactly at the limit"
+        );
+        assert!(output.truncated, "and the reader is told");
+        assert_eq!(
+            streamed, 200000,
+            "progress sees every byte, truncated or not"
+        );
+    }
+
+    #[test]
+    fn a_zero_limit_keeps_nothing_and_still_terminates_cleanly() {
+        let output = collect(
+            sh("printf abc"),
+            &AtomicBool::new(false),
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            0,
+            |_, _| {},
+        )
+        .expect("a zero limit is a cap, not an error");
+        assert!(output.stdout.is_empty());
+        assert!(output.truncated);
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn exit_before_pipe_drain_still_captures_the_full_output() {
+        // 40 KiB written and the process exiting immediately races the
+        // 4 KiB pipe reads: the loop must keep draining after Chunk::Exit.
+        let output = collect(
+            sh("head -c 40000 /dev/zero | tr '\\0' 'x'"),
+            &AtomicBool::new(false),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            DEFAULT_OUTPUT_LIMIT,
+            |_, _| {},
+        )
+        .expect("fast exit");
+        assert_eq!(output.stdout.len(), 40000);
+        assert!(!output.truncated);
+    }
+
+    #[test]
+    fn both_streams_are_tagged_for_progress_and_kept_apart() {
+        let seen = std::sync::Mutex::new((0usize, 0usize));
+        let output = collect(
+            sh("printf out; printf err 1>&2"),
+            &AtomicBool::new(false),
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            DEFAULT_OUTPUT_LIMIT,
+            |is_stderr, bytes| {
+                let mut guard = seen.lock().unwrap();
+                if is_stderr {
+                    guard.1 += bytes.len()
+                } else {
+                    guard.0 += bytes.len()
+                }
+            },
+        )
+        .expect("both streams close");
+        assert_eq!(output.stdout, b"out");
+        assert_eq!(output.stderr, b"err");
+        let (out, err) = *seen.lock().unwrap();
+        assert_eq!((out, err), (3, 3));
+    }
+
+    #[test]
+    fn a_failing_exit_status_is_reported_not_raised() {
+        let output = collect(
+            sh("printf done; exit 3"),
+            &AtomicBool::new(false),
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            DEFAULT_OUTPUT_LIMIT,
+            |_, _| {},
+        )
+        .expect("non-zero exit is data");
+        assert!(!output.status.success());
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.stdout, b"done");
+    }
+
+    #[test]
+    fn labels_survive_hostile_arguments() {
+        let mut command = Command::new("/usr/bin/git");
+        command.args(["", "-x"]);
+        assert_eq!(command_label(&command), "git.", "no usable subcommand word");
+        let mut command = Command::new("weird\x01name");
+        command.arg("status");
+        let label = command_label(&command);
+        assert!(
+            !label.contains('\u{1}'),
+            "control bytes are filtered out: {label}"
+        );
+        let mut command = Command::new("/usr/bin/git");
+        command.args(vec!["-"; 4000]);
+        assert_eq!(
+            command_label(&command),
+            "git.",
+            "4000 flags yield no subcommand"
+        );
+    }
+}

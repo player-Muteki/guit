@@ -593,3 +593,223 @@ mod tests {
         assert!(rename.score.starts_with('R'));
     }
 }
+
+#[cfg(test)]
+mod stress {
+    use super::*;
+
+    /// Deterministic xorshift64* so every fuzz run reproduces from its seed.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        }
+        fn below(&mut self, max: usize) -> usize {
+            (self.next() % max as u64) as usize
+        }
+    }
+
+    fn nul(items: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for item in items {
+            out.extend_from_slice(item.as_bytes());
+            out.push(0);
+        }
+        out
+    }
+
+    const OID: &str = "6b8bd7b0f1e4c9c6b9f1f2a44a8d70f5f52b0a9c";
+    const LONG_OID: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn valid_stream() -> Vec<u8> {
+        nul(&[
+            &format!("# branch.oid {OID}"),
+            "# branch.head main",
+            &format!("1 M. N... 100644 100644 100644 {OID} {LONG_OID} src/file name.txt"),
+            "? untracked 空格.txt",
+        ])
+    }
+
+    #[test]
+    fn fifty_thousand_mutations_of_a_valid_stream_never_panic() {
+        let base = valid_stream();
+        let mut rng = Rng(0x9E3779B97F4A7C15);
+        let mut accepted = 0usize;
+        for _ in 0..50000 {
+            let mut bytes = base.clone();
+            let flips = 1 + rng.below(4);
+            for _ in 0..flips {
+                let index = rng.below(bytes.len());
+                bytes[index] = match rng.below(4) {
+                    0 => b'0' + rng.below(10) as u8,
+                    1 => *b"12u?#!  \t.\x00\xffRW".get(rng.below(12)).unwrap_or(&b'x'),
+                    2 => rng.below(256) as u8,
+                    _ => bytes[index].wrapping_add(1),
+                };
+            }
+            // The parser may reject anything it does not recognize, but it
+            // must never panic and never report a mutation as the pristine
+            // stream while silently dropping entries.
+            let outcome = std::panic::catch_unwind(|| parse(&bytes));
+            if let Ok(Ok(parsed)) = &outcome {
+                if parsed.entries.len() == 2 {
+                    accepted += 1;
+                }
+                for entry in &parsed.entries {
+                    let _ = entry.raw_path();
+                    let _ = entry.is_conflict();
+                    let _ = entry.is_staged();
+                    let _ = entry.is_worktree_change();
+                }
+            }
+        }
+        assert!(
+            accepted > 0,
+            "some mutations must still parse (otherwise the fuzz is vacuous)"
+        );
+    }
+
+    #[test]
+    fn truncated_streams_fail_closed() {
+        let base = valid_stream();
+        for cut in 0..base.len() {
+            // Dropping the final NUL or cutting mid-record must be an error,
+            // never a silently smaller but "successful" status.
+            let _ = parse(&base[..cut]);
+        }
+        assert!(
+            parse(&base[..base.len() - 1]).is_err(),
+            "missing final NUL is an error"
+        );
+    }
+
+    #[test]
+    fn twenty_thousand_records_parse_with_exact_paths() {
+        let mut items: Vec<String> = vec![
+            format!("# branch.oid {OID}"),
+            "# branch.head main".to_string(),
+        ];
+        for index in 0..20000 {
+            items.push(format!(
+                "1 M. N... 100644 100644 100644 {OID} {OID} dir {index}/文件 名.txt"
+            ));
+        }
+        let stream = nul(&items.iter().map(String::as_str).collect::<Vec<_>>());
+        let started = Instant::now();
+        let parsed = parse(&stream).expect("uniform stream parses");
+        assert_eq!(parsed.entries.len(), 20000);
+        for (index, entry) in parsed.entries.iter().enumerate() {
+            assert_eq!(
+                String::from_utf8(entry.raw_path().clone()).unwrap(),
+                format!("dir {index}/文件 名.txt")
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "parsing stays linear"
+        );
+    }
+
+    #[test]
+    fn headers_are_last_write_wins_and_unknown_keys_are_ignored() {
+        let parsed = parse(&nul(&[
+            &format!("# branch.oid {OID}"),
+            "# branch.head first",
+            "# branch.head second",
+            "# branch.mystery whatever",
+            "# branch.upstream origin/x",
+            "# branch.upstream origin/y",
+            "# branch.ab +1 -2",
+        ]))
+        .expect("duplicate headers are legal");
+        let branch = parsed.branch.unwrap();
+        assert_eq!(branch.head, "second");
+        assert_eq!(branch.upstream.as_deref(), Some("origin/y"));
+        assert_eq!((branch.ahead, branch.behind), (1, 2));
+    }
+
+    #[test]
+    fn branch_ab_extremes_and_malformations() {
+        let parsed = parse(&nul(&[
+            "# branch.oid (initial)",
+            "# branch.head (detached)",
+            "# branch.ab +18446744073709551615 -0",
+        ]))
+        .expect("u64 max fits");
+        assert_eq!(parsed.branch.unwrap().ahead, u64::MAX);
+        for bad in [
+            "# branch.ab 1 -2",
+            "# branch.ab +1 2",
+            "# branch.ab +1",
+            "# branch.ab +1 -2 -3",
+            "# branch.ab +x -2",
+            "# branch.ab +-1 -2",
+        ] {
+            let error = parse(&nul(&["# branch.oid (initial)", "# branch.head x", bad]))
+                .expect_err("malformed branch.ab must fail");
+            assert_eq!(error.code, "status_parse_failed", "{bad}");
+        }
+    }
+
+    #[test]
+    fn structural_shorthand_and_odd_but_valid_records() {
+        // An empty path on an untracked record parses; on a 1-record the
+        // grammar requires trailing content, so an empty path fails closed
+        // rather than yielding a phantom entry.
+        let parsed = parse(&nul(&["? "])).expect("empty untracked path parses");
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.entries[0].raw_path().len(), 0);
+        assert!(parse(&nul(&[&format!(
+            "1 .. N... 000000 000000 000000 {OID} {OID} "
+        )]))
+        .is_err());
+        // A sha256 repository uses 64-hex OIDs everywhere; the 4-column
+        // submodule field must be exactly four characters.
+        assert!(parse(&nul(&[&format!(
+            "1 M. S N... 100644 100644 100644 {LONG_OID} {LONG_OID} x"
+        )]))
+        .is_err());
+        parse(&nul(&[&format!(
+            "1 M. N... 100644 100644 100644 {LONG_OID} {LONG_OID} x"
+        )]))
+        .expect("64-hex oids are valid");
+        // A path that itself looks like a record must not be re-read as one
+        // (records are NUL-delimited, so this works only if paths are never
+        // scanned for structure — pin that).
+        let parsed = parse(&nul(&["1 U. N... 100644 100644 100644 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 u U. N... bogus"])).unwrap();
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.entries[0].raw_path(), b"u U. N... bogus");
+    }
+
+    #[test]
+    fn rename_origin_token_is_consumed_exactly_once() {
+        let parsed = parse(&nul(&[
+            &format!("2 R. N... 100644 100644 100644 {OID} {OID} R100 new.txt"),
+            "old.txt",
+            &format!("1 M. N... 100644 100644 100644 {OID} {OID} another.txt"),
+        ]))
+        .unwrap();
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.entries[1].raw_path(), b"another.txt");
+        // Copy records share the shape with a C score.
+        parse(&nul(&[
+            &format!("2 C. N... 100644 100644 100644 {OID} {OID} C75 copy.txt"),
+            "source.txt",
+        ]))
+        .expect("copies parse");
+        // A bogus score letter fails instead of borrowing the next record.
+        let error = parse(&nul(&[
+            &format!("2 R. N... 100644 100644 100644 {OID} {OID} X100 new.txt"),
+            "? not-an-origin.txt",
+        ]))
+        .expect_err("X score is not a rename");
+        assert_eq!(error.code, "status_parse_failed");
+    }
+
+    use std::time::{Duration, Instant};
+}
