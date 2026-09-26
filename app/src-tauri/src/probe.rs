@@ -308,6 +308,43 @@ fn process_with_deadlines(
 mod tests {
     use super::*;
 
+    /// Runs a stand-in executable this test has just written.
+    ///
+    /// `git_at` execs the path it is handed, and these fixtures write a script
+    /// moments earlier. `Command::current_dir` makes the standard library fork
+    /// rather than posix_spawn, so with the whole test binary running in
+    /// parallel the child can reach `execve` while the freshly written inode
+    /// still carries a write path, and Linux answers ETXTBSY ("Text file
+    /// busy"). Observed roughly once in ten full-suite runs, never when the
+    /// test runs alone.
+    ///
+    /// The tolerance lives here and not in `git_at` on purpose: guit execs the
+    /// user's `git`, which it never wrote, so a retry in product code would
+    /// only hide a genuine "text busy" for a real executable. Retrying a spawn
+    /// that never happened cannot mask anything either — a fixture that really
+    /// fails to start still fails once the attempts run out.
+    fn retry_transient_spawn<T, E>(mut attempt_once: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+        const ATTEMPTS: usize = 5;
+        let mut attempt = 0;
+        loop {
+            match attempt_once() {
+                Ok(value) => return Ok(value),
+                Err(_) if attempt + 1 < ATTEMPTS => {
+                    std::thread::sleep(Duration::from_millis(20 * (attempt as u64 + 1)));
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn git_at_freshly_written(executable: &OsStr) -> Result<GitProbe, ProbeError> {
+        // Any `git_start_failed` is retried, which is only ever a spawn that did
+        // not happen: `git_at` reports a script that starts and misbehaves as
+        // `git_version_failed`, so a real problem still fails the test.
+        retry_transient_spawn(|| git_at(executable))
+    }
+
     #[test]
     fn output_is_drained_and_bounded_for_large_git_output() {
         let directory = tempfile::tempdir().unwrap();
@@ -354,16 +391,21 @@ mod tests {
         let executable = directory.path().join("process-tree");
         std::fs::write(&executable, b"#!/bin/sh\nsleep 30 &\nwait\n").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut command = Command::new(executable);
-        command.current_dir(directory.path());
         let started = std::time::Instant::now();
-        let result = crate::runner::run(
-            command,
-            &AtomicBool::new(false),
-            Duration::ZERO,
-            Duration::from_millis(100),
-            |_, _| {},
-        );
+        // Same write-then-exec shape as `git_at_freshly_written`, and the same
+        // tolerance: a spawn that never happened is not the outcome under test,
+        // and a script that really fails to start still fails every attempt.
+        let result = retry_transient_spawn(|| {
+            let mut command = Command::new(&executable);
+            command.current_dir(directory.path());
+            crate::runner::run(
+                command,
+                &AtomicBool::new(false),
+                Duration::ZERO,
+                Duration::from_millis(100),
+                |_, _| {},
+            )
+        });
         assert!(matches!(result, Err(error) if error.code == "probe_timeout"));
         assert!(started.elapsed() < Duration::from_secs(2));
     }
@@ -376,7 +418,7 @@ mod tests {
         let executable = directory.path().join("old-git");
         std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'git version test-old'; exit 0; fi\nexit 129\n").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let result = git_at(executable.as_os_str()).unwrap();
+        let result = git_at_freshly_written(executable.as_os_str()).unwrap();
         assert!(result.available);
         assert!(!result.supported);
         assert!(!result.has_restore);

@@ -368,8 +368,16 @@ fn sweep_stale_bridges_in(bases: &[PathBuf]) -> usize {
             }
             let socket = dir.join("pipe");
             let stale = std::os::unix::net::UnixStream::connect(&socket).is_err();
-            if stale && std::fs::remove_dir_all(&dir).is_ok() {
-                removed += 1;
+            if !stale {
+                continue;
+            }
+            // A sweep that cannot remove what it judged stale would otherwise
+            // be indistinguishable from "nothing was there": the counter is
+            // the only thing startup reports, so a silent failure here reads as
+            // a clean run while the directory is still on disk.
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => removed += 1,
+                Err(error) => eprintln!("guit [sweep]: {} left in place: {error}", dir.display()),
             }
         }
     }
