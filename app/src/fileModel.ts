@@ -114,9 +114,13 @@ export function nextSelectableRow(
   from: number,
   delta: number,
 ): number {
+  const step = delta > 0 ? 1 : delta < 0 ? -1 : 0;
+  if (step === 0) {
+    return from;
+  }
   let index = from;
   for (;;) {
-    index += delta;
+    index += step;
     if (index < 0 || index >= rows.length) {
       return from;
     }
