@@ -40,6 +40,29 @@ PY
 not_atspi() { # not_atspi <regex> — the text must not be in the live tree
     ! atspi_probe 1 "$1"
 }
+atspi_all() { # atspi_all <regex>... — exit 0 when every pattern is in the tree *at once*
+    # A single alert slot passes one of these and fails the rest, because each
+    # refusal replaces the previous one. Reading them from one snapshot of the
+    # tree is what makes this an assertion about coexistence rather than about
+    # each message having been shown at some point.
+    /usr/bin/python3 - "$@" "$tools_dir" <<'PY' >>"$report" 2>&1
+import re
+import sys
+import time
+
+sys.path.insert(0, sys.argv[-1])
+import atspi_landmark
+
+patterns = sys.argv[1:-1]
+deadline = time.time() + 15
+while time.time() < deadline:
+    blob = atspi_landmark.dump()
+    if all(re.search(pattern, blob) for pattern in patterns):
+        sys.exit(0)
+    time.sleep(0.05)
+sys.exit(1)
+PY
+}
 
 launch_isolated() { # launch_isolated <logfile>
     export HOME="$home" XDG_CONFIG_HOME="$home/config" XDG_CACHE_HOME="$home/cache" XDG_RUNTIME_DIR="$home/run"
@@ -92,6 +115,14 @@ fi
 # The toast stack persists failures, so stage C can no longer be shadowed by
 # stage B's refusal; the comment records the M7 behaviour change.
 check "refusal is announced to the user" atspi_probe 2 'Unsupported'
+# M7-03: session, recent and window settings are three separate refusals that
+# all happen during boot. Reading them from one snapshot of the tree is what
+# proves the stack appends — the single alert slot this replaced showed only
+# the last one.
+check "all three boot refusals are on screen at once, none replacing another" \
+    atspi_all 'Unsupported session file version\.' \
+              'Unsupported recent repositories file version\.' \
+              'Unsupported settings version or invalid window size\.'
 check "refused session was not restored" not_atspi '/should/not/restore'
 terminate_isolated
 check "refused session and recent files left byte-identical" sha256sum -c --status \
