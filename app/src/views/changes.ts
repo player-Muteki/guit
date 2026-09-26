@@ -16,7 +16,7 @@ import {
   type FileView,
   type ListRow,
 } from "../fileModel";
-import { button, el, icon, openMenu } from "../dom";
+import { button, el, icon, openMenu, plural } from "../dom";
 import {
   applySnapshot,
   currentSnapshot,
@@ -137,7 +137,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     const snapshot = currentSnapshot();
     if (snapshot === null || isWriteRunning()) return;
     setWriteRunning(true);
-    setStatus(`${command === "stage_files" ? "Staging" : "Unstaging"} ${fileIds.length} file(s)…`, "progress");
+    setStatus(`${command === "stage_files" ? "Staging" : "Unstaging"} ${plural(fileIds.length, "file")}…`, "progress");
     try {
       const result = await invoke<OperationResult>(command, {
         snapshotVersion: snapshot.version,

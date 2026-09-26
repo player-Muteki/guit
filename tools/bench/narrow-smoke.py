@@ -21,6 +21,10 @@ import atspi_landmark as A  # noqa: E402
 RAIL = {"Changes", "History", "Branches & Tags", "Stash", "Remotes",
         "Worktrees & Submodules", "Settings"}
 APPBAR = {"Open repository", "Refresh status", "Sync", "Commit", "Always on top"}
+# At the minimum width the app bar drops its Commit button, because the Changes
+# footer already carries a commit box in the same place. The affordance has to
+# survive, not both copies of it, so it is checked where it lives instead.
+APPBAR_NARROW = APPBAR - {"Commit"}
 ZOOM = {"Zoom in", "Zoom out", "Reset zoom"}
 
 
@@ -59,7 +63,10 @@ def main():
     report = Report()
     try:
         A.Atspi.init()
-        A.wait_for(r"Commit message", 30)
+        if A.wait_for(r"Commit message", 30) is None:
+            report.check("the app reaches the Changes view", False, "no commit box in the tree")
+            print("FAIL: the app never reached the Changes view")
+            return 1
         wide = showing_names()
         report.check("the app bar's primary actions are visible when wide", APPBAR <= wide,
                      ",".join(sorted(APPBAR - wide)))
@@ -74,8 +81,8 @@ def main():
         narrow = showing_names()
         report.check("the activity rail survives 340x400", RAIL <= narrow,
                      f"{len(RAIL & narrow)}/{len(RAIL)} visible")
-        report.check("the app bar's primary actions survive 340x400", APPBAR <= narrow,
-                     ",".join(sorted(APPBAR - narrow)))
+        report.check("the app bar's primary actions survive 340x400", APPBAR_NARROW <= narrow,
+                     ",".join(sorted(APPBAR_NARROW - narrow)))
         report.check("the branch chip survives 340x400", "Switch branch" in narrow)
 
         A.click(A.find_button(name="Changes"))

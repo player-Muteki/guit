@@ -7,7 +7,7 @@
 // page zero.
 
 import { invoke } from "@tauri-apps/api/core";
-import { button, el, icon } from "../dom";
+import { button, el, icon, plural } from "../dom";
 import { buildHistoryRows } from "../historyModel";
 import { revealScroll, visibleWindow } from "../fileModel";
 import {
@@ -264,7 +264,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       listPane.hidden = false;
       splitter.hidden = false;
       emptyState.hidden = true;
-      countLabel.textContent = `${commits.length} commit(s)` + (hasMore ? " so far." : " — all loaded.");
+      countLabel.textContent = plural(commits.length, "commit") + (hasMore ? " so far." : " — all loaded.");
       renderRows();
     } catch (error) {
       deps.onError(error);

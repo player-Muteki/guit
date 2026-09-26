@@ -48,7 +48,7 @@ export function createRemotesView(deps: RemotesDeps): RemotesView {
   const element = el("section", { class: "view-body remotes-view" });
 
   const nameInput = el("input", { class: "input", type: "text", placeholder: "Remote name", "aria-label": "New remote name" });
-  const urlInput = el("input", { class: "input", type: "text", placeholder: "Remote URL or local path", "aria-label": "New remote URL" });
+  const urlInput = el("input", { class: "input", type: "text", placeholder: "URL or local path", "aria-label": "New remote URL" });
   const addButton = el("button", { class: "btn btn-primary", type: "button", text: "Add remote" });
   const fetchAllButton = el("button", { class: "btn", type: "button", text: "Fetch all" });
   const addRow = el("div", { class: "view-tools" }, [nameInput, urlInput, addButton, fetchAllButton]);

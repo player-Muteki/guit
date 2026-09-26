@@ -39,7 +39,7 @@ export function createWelcomeView(deps: WelcomeDeps): { element: HTMLElement; re
   const cloneSource = el("input", {
     class: "input",
     type: "text",
-    placeholder: "Repository URL or local path",
+    placeholder: "URL or local path",
     "aria-label": "Repository to clone",
   });
   const clonePickDir = el("button", { class: "btn", type: "button", text: "Into folder…" });

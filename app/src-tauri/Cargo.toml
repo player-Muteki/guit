@@ -5,6 +5,14 @@ description = "Lightweight Git desktop client"
 license = "MIT"
 edition = "2021"
 
+[features]
+# Without this the binary points its webview at `devUrl` instead of serving the
+# embedded frontend, and a plain `cargo build --release` or `cargo test
+# --release` silently produces a binary that only works next to a Vite server.
+# Build anything meant to be launched with `npm run bin:release`, which turns
+# this on; `tauri dev` builds with --no-default-features and needs it off.
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

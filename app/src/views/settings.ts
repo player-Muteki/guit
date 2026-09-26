@@ -25,7 +25,9 @@ export interface SettingsView {
 }
 
 export function createSettingsView(deps: SettingsDeps): SettingsView {
-  const element = el("section", { class: "view-body settings-view" });
+  // `document-view`: this body is prose and controls, not a list of scrollers,
+  // so it scrolls as a whole and its sections keep their natural height.
+  const element = el("section", { class: "view-body settings-view document-view" });
 
   // --- appearance ---
   const themeSelect = el("select", { class: "input", "aria-label": "Theme" }, [

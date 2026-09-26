@@ -88,6 +88,22 @@ M7 只重做前端呈现层。Rust 后端、Tauri 命令签名、事件名与数
 3. **`probe::tests` 的 ETXTBSY 单发 flake**（已修，见「已知缺口」第 1 条）。
 4. **启动清扫把 `remove_dir_all` 的失败静默吞掉**（可诊断性缺陷，已修）。`sweep_stale_bridges_in` 用 `.is_ok()` 决定计数，失败时既不计数也不出声；而这个计数是启动时唯一上报的东西，于是「扫不掉」与「本来就没有」在用户看来完全一样。现在失败会 `eprintln!` 出具体目录与错误。
 
+## 第三轮修复（2026-09-26，窄窗口为主战场）
+
+前两轮的功能门槛都是绿的，但它们只断言「元素在可及树里」，**看不见元素画成了什么样**。本轮把 340px 当主战场逐屏审视，结论是功能门槛当时是假门槛：Settings 在 ≤480px 大面积文字叠印，而 `narrow-smoke.py` 全绿。
+
+1. **Settings 正文被裁切并与后续区块叠印**（真缺陷，已修）。
+   根因在 CSS，不在字号：`.view-body` 是列向 flex 且 `overflow: hidden`，Settings 的 `GENERAL` / `ENVIRONMENT & DIAGNOSTICS` / `DEVELOPER` 三个区块被压到不足内容高度，文字溢出各自盒子后压到下一区块上。修法是把 Settings 标成文档型滚动体（`.view-body.document-view`，`overflow-y: auto` + 子区块 `flex: 0 0 auto`），列表型视图仍由内部 `.file-list/.ref-list` 滚动。
+2. **窄态应用栏与行内信息被压成省略号**（真缺陷，已修）。≤480px 隐藏与原生标题栏重复的 wordmark、与 Changes 页脚重复的提交按钮；分支芯片给足 `min-width`；引用行改为「名称优先、URL 等细节先省略」（此前 `origin` 被压成 `o…` 而完整 URL 照打）；worktree 行因首列是绝对路径，在窄态改为按行换行，路径、分支注记、动作各自成行；设置行、创建行、缩放控件的窄态堆叠一并规整；补 `plural()` 助手修掉 `1 commit(s)` 这类文案。
+3. **功能门槛对布局无感**（已修，并给新门槛做了反向验证）。
+   新增 `tools/bench/layout-check.py`：以 AT-SPI 几何检查文字叠印、横向出界、以及「可见却画不出」的文本，在 340/400/480/560/900 五档宽度上覆盖七视图加行内菜单与确认对话框两个浮层。
+   **它第一版是没有牙齿的**：撤掉第 1 条的修复后重跑，仍然 fail=0。原因是 `TEXT_ROLES` 漏了 `<dt>`/`<dd>`（`DESCRIPTION_TERM`/`DESCRIPTION_VALUE`）和 `BUTTON`/`PUSH_BUTTON`——Settings 的叠印恰好全在这些角色上。补齐后同一构建报 4 处失败，且逐条对应截图里可见的碰撞（`Ctrl/Cmd + 1…7` 压 `ENVIRONMENT & DIAGNOSTICS` 等）。**反向验证因此成为这道门槛的验收条件**：修复版 0 失败、撤掉修复必失败，两头都跑过。
+4. **两处 AT-SPI 假阳性，按机制而非按现象排除**（已修）。判定前先用截图定性，不靠猜：
+   - 关闭的弹出菜单与 `<select>` 的 `<option>` 会留在树里，且**所有项共用同一个盒子**，而它们的容器 `MENU` 报告零面积。`rect()` 原先把零面积当作「无数据」返回 `None`，导致祖先链里根本没有这个盒子、规则失效。改为区分「无 extent」与「零面积 extent」，凡是处在塌缩祖先下的子树一律不测。
+   - 固定应用栏/状态栏不随正文滚动，其坐标与滚动内容不在同一空间，跨空间比较必然造出「看不见的重叠」。改为按**包含关系**判定 chrome（落在 `FOOTER`/`HEADER` 盒内即 chrome），且只与同类比较。
+5. **构建契约有洞：二进制是否可用取决于外部传参**（真缺陷，已修）。仓库没有 `[features]`，`custom-protocol` 全靠 `tauri build` 注入；因此 `cargo build --release` 与 `cargo test --release` 都会**静默**产出只会去连 `devUrl`（`127.0.0.1:1420`）的二进制，页面直接显示「Could not connect to 127.0.0.1」。本轮因此误判过一次「应用起不来」。按 Tauri 官方模板补上 `custom-protocol` feature，并加 `npm run bin:release`（`tauri build` 与 `tauri dev` 行为不变），此后 `cargo test --release` 不再污染可运行产物。
+6. **`narrow-smoke.py` 的一条断言与设计决定冲突**（已修）。窄态刻意隐藏应用栏里重复的提交按钮，而断言要求它在树内。改为窄态校验 `APPBAR - {Commit}`，提交入口本身由既有断言「提交框在 340×400 下可及」独立守住——守住的是能力，不是两份拷贝。
+
 ## 验证清单（本轮实测结果）
 
 | 项目 | 判据 | 结果 |
@@ -105,6 +121,7 @@ M7 只重做前端呈现层。Rust 后端、Tauri 命令签名、事件名与数
 | 提交计数 | 历史就绪行 `N commit(s)` 仍可见 | ✅ `bench_run.py --history-pages` 路径（见性能表） |
 | 诊断导出 | 按钮名 `Export diagnostics…`、模态确认 `Export…`、原生 `Save`、落盘内容与脱敏 | ✅ `diagnostics-export-check.sh` 10 断言 fail=0 |
 | 窄窗口 | 340×400 主要动作仍可达 | ✅ `narrow-smoke.py` 9 断言 fail=0（活动栏 7/7、应用栏主动作、分支芯片、提交框、缩放控件、行内 `⋯` 全部在树内且 SHOWING；窗口可复原） |
+| 窄窗口布局 | 五档宽度下七视图 + 两个浮层无叠印、无出界、无画不出的文本 | ✅ `layout-check.py` 在 340/400/480/560/900 **全部 fail=0**；**反向验证**：撤掉 `document-view` 后同一门槛在 340px 报 4 处失败且逐条对应截图里的碰撞。定性的依据是截图，不是 AT-SPI 读数 |
 | 明暗双主题 | 两套令牌都在、决定可读性的令牌两套都不同；三个选项都能选中并落库 | ✅ `theme-check.py` 17 断言 fail=0 |
 | 模态 | 丢弃预览 → 列出候选 → 取消关闭 → 票据未消费 | ✅ `view-smoke.py`（模态文案、候选清单、`Cancelled; nothing was changed.`、`git status --porcelain` 前后逐字相同） |
 | 焦点返回 | 触发元素仍在 → 精确回该按钮；触发元素已被重建 → 落到文档化替代点 | ✅ `view-smoke.py` 两条断言 fail=0（第二条即本轮修的缺陷） |
@@ -151,6 +168,7 @@ History 分页（hist10k，PAGE_SIZE=50，点「Load older」到行数落定）�
 | `tools/bench/make-dirty-repo.sh` | 提交后再改脏的夹具，暂存/未暂存/删除/未跟踪同时存在；NUL 分隔 pathspec 保证非 ASCII 与含空格路径完整 |
 | `tools/bench/view-smoke.py` | 19 断言：七视图各自内容、三组变更标题、行内菜单、丢弃票据的取消路径、状态行确认、工作副本零变化 |
 | `tools/bench/narrow-smoke.py` | 9 断言：340×400 下活动栏/应用栏/提交框/缩放控件/行内动作仍在可及树内，窗口可复原 |
+| `tools/bench/layout-check.py` | 五档宽度 × （七视图 + 行内菜单 + 确认对话框）的几何门槛：文字叠印、横向出界、可见却画不出的文本。**验收条件含反向验证**——撤掉修复必须失败；另按机制排除两处 AT-SPI 假阳性（塌缩祖先下的弹出项、跨滚动上下文的 chrome） |
 | `tools/bench/theme-check.py` | 17 断言：两套令牌都在且决定性令牌全不同、三个主题选项可选且落库正确（复制 localStorage 后只读副本，绝不打开原库） |
 | `app/tests/state.mjs` | 4 单测：快照只前进、Toast 追加不覆盖且按 id 独立关闭且封顶 4 条、忙碌/监听/状态/强推闸门可读 |
 
@@ -165,10 +183,18 @@ History 分页（hist10k，PAGE_SIZE=50，点「Load older」到行数落定）�
 - **外部 diff/merge 工具的失败文案走状态栏而非 Toast**：与 0.1.0 逐字一致，也符合 `plan/05`"结果文案走状态栏"；代价是它会被下一次状态更新覆盖。本轮按现状保留，如实记录。
 - ~~1k/10k 夹具在 `submodules_list_too_large` 上失败，该档 Changes 列表为空~~ **上一轮这条记错了，本轮已更正并修复。** 当时写的是「Changes 列表为空并弹出该错误」——**这是错的**：`submodule_status` 是独立命令、不参与快照，1200 文件的脏夹具实测 Changes 列表完整（`Staged changes (80)`、76 行可见、无 "Working copy is clean."），坏的只有 Worktrees 视图里的子模块段。那两档之所以看起来是空的，真正原因是 `make-repo.sh` 的 `dirty` 在提交前追加（工作副本本来干净），与读上限无关。读上限本身仍是真缺陷且已修，见「第二轮修复」第 2 条。
 - **AppImage 需 `APPIMAGE_EXTRACT_AND_RUN=1`**（见"环境"）。
+- **窄窗口的视觉结论是单机、且靠截图而非 AT-SPI 下的**：
+  - 本轮所有宽度结论只在本机 X11/Wayland 会话上取得，**Windows/macOS 仍未实测**，与 0.1.0 口径一致。
+  - `layout-check.py` 能守住的是**叠印、出界、画不出的文本**三类。它**看不见省略号**：一行文字被 `text-overflow: ellipsis` 截断时盒子仍在视口内，几何完全合法。本轮的 worktree 路径截断（`/tmp/guit-ui/show…`）就是它放过的真缺陷，靠逐屏看图发现并单独修掉。因此「无叠印」不等于「排版好」，窄态排版仍需人眼过一遍。
+  - 它的坐标来自 AT-SPI，滚动容器的报告盒是**内容盒**而非可视区（实测 340px 下 document 报 828 高而实际可视 700）。跨滚动上下文的几何不可比，这也是第 4 条那两处排除规则存在的原因。
 - `docs/known-limitations.md` 的「单一错误告警位」条目已改为 M7-03 修复记录。
 
 ## 运行时结果
 
 **全部门槛已在本机实跑。** 逐项命令与数字见上表与性能表；`recovery-checks.sh` 20/20、`diagnostics-export-check.sh` 10/10、`view-smoke.py` 22/22、`narrow-smoke.py` 9/9、`theme-check.py` 17/17 均 fail=0，五套连跑后无残留进程。类型检查、构建、18 个前端单测、293+5 Rust 单测、`fmt --check`、`clippy` 存量、三件打包均通过。
+
+第三轮（窄窗口）复跑：`layout-check.py` 五档宽度 fail=0 并通过反向验证；`narrow-smoke.py` 9/9、`view-smoke.py` 22/22、`theme-check.py` 17/17、`recovery-checks.sh` 20/20、`diagnostics-export-check.sh` 10/10 全部 fail=0；`tsc --noEmit`、18 个前端单测、293+5 Rust 单测通过；解包出的 `usr/bin/guit` 直跑 `layout-check.py` 亦 340px fail=0，确认打进 deb 的就是当前前端。**AppImage 一步本轮未产出**：`tauri build` 在 AppImage 阶段报 `failed to run linuxdeploy`（需联网取运行时），deb 与 rpm 在其之前已成功，**这是打包工具的网络依赖，不是代码失败**；AppImage 的验证证据沿用上一轮那次成功构建。
+
+可运行产物必须用 `npm run bin:release`（或 `tauri build`）产出。`cargo build --release` 与 `cargo test --release` 不带 `custom-protocol`，会覆盖 `target/release/guit` 成只认 dev server 的二进制。
 
 结论：**M7 达成 Linux 已验证出口**；本记录与用户文档处处只作单机结论，不含三平台声明。

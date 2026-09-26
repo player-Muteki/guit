@@ -210,3 +210,12 @@ export function openMenu(anchor: HTMLElement, items: MenuItem[]): void {
   }, 0);
   (menu.firstElementChild as HTMLElement | null)?.focus();
 }
+
+/**
+ * "1 branch" / "3 branches". The narrow layout gives a status line one or two
+ * rows, and `4 commit(s) — all loaded.` spent a whole line on a bracket that
+ * only exists because nobody wrote the rule down.
+ */
+export function plural(count: number, one: string, many = `${one}s`): string {
+  return `${count} ${count === 1 ? one : many}`;
+}

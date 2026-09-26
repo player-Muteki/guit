@@ -9,7 +9,7 @@
 // goes through the shared preview ticket.
 
 import { invoke } from "@tauri-apps/api/core";
-import { button, el, icon, openMenu } from "../dom";
+import { button, el, icon, openMenu, plural } from "../dom";
 import {
   applySnapshot,
   currentSnapshot,
@@ -64,7 +64,7 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
   const createRow = el("div", { class: "create-row" }, [branchName, branchCreate, branchForce]);
 
   const tagName = el("input", { class: "input", type: "text", placeholder: "New tag name", "aria-label": "New tag name" });
-  const tagMessage = el("input", { class: "input", type: "text", placeholder: "Annotation — blank makes a lightweight tag", "aria-label": "Tag annotation (optional)" });
+  const tagMessage = el("input", { class: "input", type: "text", placeholder: "Annotation (optional)", "aria-label": "Tag annotation (optional)" });
   const tagCreate = el("button", { class: "btn", type: "button", text: "Create tag" });
   const tagRow = el("div", { class: "create-row" }, [tagName, tagMessage, tagCreate]);
 
@@ -365,7 +365,7 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
       ...renderRemoteBranches(listing.remotes),
       ...renderTags(listing.tags),
     );
-    status.textContent = `${branches.length} branch(es) shown, ${listing.remotes.length} remote ref(s), ${listing.tags.length} tag(s).`;
+    status.textContent = `${plural(branches.length, "branch")} shown, ${plural(listing.remotes.length, "remote ref")}, ${plural(listing.tags.length, "tag")}.`;
   };
 
   const load = async (): Promise<void> => {
@@ -376,7 +376,7 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
       if (seq !== requestSeq) return; // a newer request took over
       listing = result;
       render();
-      status.textContent = `${result.branches.length} branch(es), ${result.remotes.length} remote ref(s), ${result.tags.length} tag(s).`;
+      status.textContent = `${plural(result.branches.length, "branch")}, ${plural(result.remotes.length, "remote ref")}, ${plural(result.tags.length, "tag")}.`;
     } catch (error) {
       if (seq !== requestSeq) return;
       deps.onError(error);

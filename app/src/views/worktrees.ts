@@ -49,7 +49,7 @@ export function createWorktreesView(deps: WorktreesDeps): WorktreesView {
   const element = el("section", { class: "view-body worktrees-view" });
 
   // --- worktrees ---
-  const target = el("input", { class: "input", type: "text", placeholder: "Local branch name or full commit id", "aria-label": "Worktree target" });
+  const target = el("input", { class: "input", type: "text", placeholder: "Branch or commit id", "aria-label": "Worktree target" });
   const addButton = el("button", { class: "btn btn-primary", type: "button", text: "Add worktree…", title: "Choose a folder, then register a new linked worktree" });
   const pruneButton = el("button", { class: "btn", type: "button", text: "Prune stale", title: "Forget Git's records of worktree folders that no longer exist" });
   const worktreeTools = el("div", { class: "view-tools" }, [target, addButton, pruneButton]);
