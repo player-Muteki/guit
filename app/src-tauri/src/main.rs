@@ -1798,4 +1798,45 @@ mod tests {
         assert_eq!((settings.width, settings.height), (1740, 802));
         assert_eq!((settings.x, settings.y), (-1920, 0));
     }
+
+    /// Unwrapping a lock whose previous holder panicked fails with "a lock was
+    /// poisoned" — it names neither the state nor the failure the user already
+    /// saw, and it keeps failing for every later request. Shared state is
+    /// therefore borrowed through `util::guard`/`util::wait`, and this scans the
+    /// shipped sources rather than trusting that each new lock remembers.
+    #[test]
+    fn shared_state_is_borrowed_without_unwrapping_a_poisoned_lock() {
+        let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&source_dir).unwrap() {
+            let path = entry.unwrap().path();
+            let Some(file_name) = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            if path.extension().and_then(|name| name.to_str()) != Some("rs")
+                || file_name == "util.rs"
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let collapsed: String = text
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect();
+            for forbidden in [".lock().unwrap()", "wait_timeout("] {
+                if collapsed.contains(forbidden) {
+                    offenders.push(format!("{file_name}: {forbidden}"));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "locks borrowed by panicking on poison: {offenders:?}"
+        );
+    }
 }

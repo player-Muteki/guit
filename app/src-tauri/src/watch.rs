@@ -224,7 +224,7 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
 pub fn restart(app: &tauri::AppHandle) {
     let state = app.state::<WatchState>();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let previous = state.current.lock().unwrap().replace(shutdown.clone());
+    let previous = crate::util::guard(&state.current).replace(shutdown.clone());
     if let Some(previous) = previous {
         previous.store(true, Ordering::SeqCst);
     }
@@ -238,7 +238,7 @@ pub fn restart(app: &tauri::AppHandle) {
         .spawn(move || supervisor(handle, identity, thread_shutdown))
         .is_err()
     {
-        state.current.lock().unwrap().take();
+        crate::util::guard(&state.current).take();
     }
 }
 
@@ -246,7 +246,7 @@ pub fn restart(app: &tauri::AppHandle) {
 pub fn stop(app: &tauri::AppHandle) {
     LAST_MODE.store(0, Ordering::Relaxed);
     let state = app.state::<WatchState>();
-    if let Some(previous) = state.current.lock().unwrap().take() {
+    if let Some(previous) = crate::util::guard(&state.current).take() {
         previous.store(true, Ordering::SeqCst);
     }
     let _ = app.emit("watch-status", WatchStatus { mode: "none" });

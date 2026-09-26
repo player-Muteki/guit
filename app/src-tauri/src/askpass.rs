@@ -168,7 +168,7 @@ impl AskPassManager {
     /// prompt of that operation is waiting (answered, expired, or gone).
     /// The secret is consumed here and never echoed back.
     pub(crate) fn submit(&self, operation_id: u64, secret: String) -> bool {
-        let mut guard = self.slot.lock().unwrap();
+        let mut guard = crate::util::guard(&self.slot);
         match guard.as_mut() {
             Some(pending) if pending.operation_id == operation_id => {
                 pending.tx.send(secret).is_ok()
@@ -223,7 +223,7 @@ impl Bridge {
         let token = write::new_nonce();
         let operation = Arc::new(AtomicU64::new(UNATTACHED));
         let (tx, rx) = mpsc::channel::<String>();
-        *manager.slot.lock().unwrap() = Some(Pending {
+        *crate::util::guard(&manager.slot) = Some(Pending {
             operation_id: UNATTACHED,
             token: token.clone(),
             tx,
@@ -259,7 +259,7 @@ impl Bridge {
     /// child. Prompts arriving before this call are refused outright.
     pub(crate) fn attach_operation(&self, operation_id: u64) {
         self.operation.store(operation_id, Ordering::SeqCst);
-        let mut guard = self.slot.lock().unwrap();
+        let mut guard = crate::util::guard(&self.slot);
         if guard
             .as_ref()
             .is_some_and(|pending| pending.token == self.token)
@@ -284,7 +284,7 @@ impl Bridge {
         // Retire the answer route first: dropping the only sender wakes a
         // blocked prompt as a refusal so the worker join cannot stall.
         {
-            let mut guard = self.slot.lock().unwrap();
+            let mut guard = crate::util::guard(&self.slot);
             if guard
                 .as_ref()
                 .is_some_and(|pending| pending.token == self.token)

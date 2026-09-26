@@ -43,9 +43,7 @@ struct ActiveRepo {
 
 impl SessionState {
     pub(crate) fn current_identity(&self) -> Option<RepoIdentity> {
-        self.current
-            .lock()
-            .unwrap()
+        crate::util::guard(&self.current)
             .as_ref()
             .map(|active| active.identity.clone())
     }
@@ -57,9 +55,7 @@ impl SessionState {
     }
 
     fn snapshot(&self) -> Option<SnapshotView> {
-        self.current
-            .lock()
-            .unwrap()
+        crate::util::guard(&self.current)
             .as_ref()
             .map(|active| active.view.clone())
     }
@@ -72,7 +68,7 @@ impl SessionState {
         &self,
         expected_version: u64,
     ) -> Result<(PathBuf, bool), ProbeError> {
-        let current = self.current.lock().unwrap();
+        let current = crate::util::guard(&self.current);
         let active = current
             .as_ref()
             .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
@@ -111,7 +107,7 @@ impl SessionState {
         expected_version: u64,
         ids: &[u32],
     ) -> Result<(PathBuf, Vec<Vec<u8>>), ProbeError> {
-        let current = self.current.lock().unwrap();
+        let current = crate::util::guard(&self.current);
         let active = current
             .as_ref()
             .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
@@ -244,7 +240,7 @@ fn publish(
     snapshot: Capture,
     guard: bool,
 ) -> Option<SnapshotView> {
-    let mut current = state.current.lock().unwrap();
+    let mut current = crate::util::guard(&state.current);
     if guard
         && !current
             .as_ref()
@@ -273,8 +269,8 @@ pub fn open(state: &SessionState, path: &Path) -> Result<SnapshotView, ProbeErro
 }
 
 pub fn close(state: &SessionState) {
-    *state.current.lock().unwrap() = None;
-    let mut gate = state.gate.lock().unwrap();
+    *crate::util::guard(&state.current) = None;
+    let mut gate = crate::util::guard(&state.gate);
     gate.epoch += 1;
     state.gate_cv.notify_all();
 }
@@ -293,17 +289,15 @@ fn refresh_with<F: Fn(&RepoIdentity) -> Result<Capture, ProbeError>>(
     let Some(identity) = state.current_identity() else {
         return Ok(None);
     };
-    let mut gate = state.gate.lock().unwrap();
+    let mut gate = crate::util::guard(&state.gate);
     if gate.leader {
         gate.rerun = true;
         let entry = gate.epoch;
         while gate.epoch == entry {
-            let (next, wait) = state
-                .gate_cv
-                .wait_timeout(gate, Duration::from_secs(15))
-                .unwrap();
+            let (next, timed_out) =
+                crate::util::wait(&state.gate_cv, gate, Duration::from_secs(15));
             gate = next;
-            if wait.timed_out() {
+            if timed_out {
                 break;
             }
         }
@@ -324,7 +318,7 @@ fn refresh_leader<F: Fn(&RepoIdentity) -> Result<Capture, ProbeError>>(
     cap: &F,
 ) -> Result<Option<SnapshotView>, ProbeError> {
     let finish = |state: &SessionState| {
-        let mut gate = state.gate.lock().unwrap();
+        let mut gate = crate::util::guard(&state.gate);
         gate.leader = false;
         gate.epoch += 1;
         state.gate_cv.notify_all();
@@ -342,7 +336,7 @@ fn refresh_leader<F: Fn(&RepoIdentity) -> Result<Capture, ProbeError>>(
             finish(state);
             return Ok(state.snapshot());
         };
-        let mut gate = state.gate.lock().unwrap();
+        let mut gate = crate::util::guard(&state.gate);
         gate.epoch += 1;
         state.gate_cv.notify_all();
         if !gate.rerun {

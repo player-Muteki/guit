@@ -62,17 +62,27 @@ fn truncate_bytes(text: &str, limit: usize) -> String {
 
 pub(crate) fn record(kind: &'static str, name: String, ms: u64, summary: String) {
     let summary = truncate_bytes(&fold_home(&summary), SUMMARY_LIMIT);
-    let mut buffer = ring().lock().unwrap();
+    record_into(
+        ring(),
+        Entry {
+            kind,
+            name,
+            ms,
+            summary,
+            at_ms: now_ms(),
+        },
+    );
+}
+
+/// The ring's only writer. The buffer arrives as an argument so a test can hand
+/// it a ring whose previous holder panicked, which the process-wide one cannot
+/// be asked to survive without taking every other test with it.
+fn record_into(ring: &Mutex<VecDeque<Entry>>, entry: Entry) {
+    let mut buffer = crate::util::guard(ring);
     if buffer.len() == RING_CAPACITY {
         buffer.pop_front();
     }
-    buffer.push_back(Entry {
-        kind,
-        name,
-        ms,
-        summary,
-        at_ms: now_ms(),
-    });
+    buffer.push_back(entry);
 }
 
 pub(crate) fn perf_mark(phase: &str, elapsed: std::time::Duration) {
@@ -89,7 +99,13 @@ pub(crate) fn error(code: &str, message: &str) {
 }
 
 pub(crate) fn snapshot() -> Vec<Entry> {
-    ring().lock().unwrap().iter().cloned().collect()
+    entries_from(ring())
+}
+
+/// Read side of the ring, taking the buffer for the same testable-seam reason
+/// as [`record_into`].
+fn entries_from(ring: &Mutex<VecDeque<Entry>>) -> Vec<Entry> {
+    crate::util::guard(ring).iter().cloned().collect()
 }
 
 /// One config-directory file: name, size and declared schema version. Paths
@@ -225,6 +241,42 @@ mod tests {
             format!("test.ring.{index}"),
             1,
             "x".repeat(SUMMARY_LIMIT * 3),
+        );
+    }
+
+    /// One failure must not blind the reporter that explains it. The real ring
+    /// is process-wide, so this hands a poisoned buffer — one whose holder
+    /// unwound while holding it — to the same writer and reader the product
+    /// uses, and expects both to keep working.
+    #[test]
+    fn a_ring_whose_holder_panicked_still_records_and_reads() {
+        let ring = Mutex::new(VecDeque::with_capacity(RING_CAPACITY));
+        let entry = |name: &str| Entry {
+            kind: "perf",
+            name: name.to_owned(),
+            ms: 1,
+            summary: String::new(),
+            at_ms: 2,
+        };
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut held = crate::util::guard(&ring);
+            held.push_back(entry("before the panic"));
+            // Unwinding with the guard still held is what poisons the ring, so
+            // this borrows the buffer directly instead of going through the
+            // writer, which returns its guard before the failure.
+            panic!("expected: a holder failed while the ring was borrowed");
+        }));
+        assert!(unwound.is_err(), "the fixture must reach a panic");
+        assert!(ring.is_poisoned(), "the fixture must leave it poisoned");
+
+        record_into(&ring, entry("after the panic"));
+        let names: Vec<String> = entries_from(&ring)
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["before the panic".to_owned(), "after the panic".to_owned()]
         );
     }
 

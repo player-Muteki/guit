@@ -95,7 +95,7 @@ impl WriteState {
 
     fn stage_preview(&self, ticket: Preview) -> String {
         let nonce = new_nonce();
-        self.previews.lock().unwrap().insert(nonce.clone(), ticket);
+        crate::util::guard(&self.previews).insert(nonce.clone(), ticket);
         nonce
     }
 
@@ -135,7 +135,7 @@ impl WriteState {
     /// Confirmation nonces are single-use: the take removes them even when
     /// the follow-up check then refuses, forcing a fresh preview.
     fn take_preview(&self, nonce: &str, kind: PreviewKind) -> Option<Preview> {
-        let removed = self.previews.lock().unwrap().remove(nonce);
+        let removed = crate::util::guard(&self.previews).remove(nonce);
         match removed {
             Some(ticket) if ticket.kind == kind => Some(ticket),
             Some(_) => None,
@@ -283,7 +283,7 @@ impl WriteState {
     }
 
     pub(crate) fn clear_previews(&self) {
-        self.previews.lock().unwrap().clear();
+        crate::util::guard(&self.previews).clear();
     }
 }
 
