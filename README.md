@@ -5,6 +5,12 @@ Git workflow — status, staging, commits, branches, stash, history, merge
 and rebase conflicts, worktrees, submodules and remote sync — in a small
 window that stays out of your way, with an optional always-on-top mode.
 
+The window is organised like an editor's source-control sidebar: an app bar
+with the repository and branch, an activity rail switching between Changes,
+History, Branches & Tags, Stash, Remotes, Worktrees & Submodules and
+Settings, and a status bar that carries the running operation. It follows
+your system's light or dark appearance and has no editor chrome.
+
 guit deliberately shows **no file contents and no diffs**. It is not an
 editor: files, diffs and conflict resolution open in *your* configured tools
 (`git difftool` / `git mergetool` / the system opener). guit runs your

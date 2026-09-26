@@ -103,6 +103,29 @@ M1 已于 2026-09-23 在 Linux 主机完成交付验证，详见 [M1-validation.
 - [x] **M6-07** 执行 [07-quality-release.md](07-quality-release.md) 的发布门槛检查，记录阻断项处理结果。
   - 证据（2026-09-25，Linux 单机，全记录见 [M6-validation.md](M6-validation.md) §M6-07）：**门槛全绿**——`cargo test --locked` 292+5、fixture 9/0、`npm run build`、`fmt --check`、`git diff --check`、clippy 恒 12 存量（M6 代码零告警）；终码 `tauri build --bundles deb,rpm,appimage` 出三件（deb 4,268,734 / rpm 4,269,639 / AppImage 85,531,128 B）；终 deb 上 recovery 19 断言与诊断导出 10 断言双套 fail=0；rpm 载荷 `rpm2cpio` 复核在位；AppImage 隔离 HOME 冒烟至空态（restore_at 841.7 ms）。**阈值一次性冻结（决策 13）**入 07 §发布性能阈值：13 行阈值均取自 M6-03 修复后实测中位并附环境重测条款。**阻断项账本**：AppImage 本宿主已解决（分发面留开非阻断）；Win/mac 恒 Pending（仅配置口径写入全部用户文档）；真实供应商凭据、M6-05 三个人工门槛、Wayland 打字类点穿维持如实留开；单告警位以"文档化行为+诊断环全量留痕"关题；CI 已备未跑（Prepared-never-executed，无远端，不得声称任何 CI 通过）；两起单发不可复现 flake 如实记录未证根因；`rpm -qp --requires` 与主页缺失均为记录而非失败。逐条对照 07 阻断定义（确认数据丢失/错误目标强推/秘密泄露/常见路径误操作/平台无法启动）：已验证 Linux 道无一命中——**0.1.0 达"Linux 已验证发布"出口；本记录与用户文档处处只作单机结论，不含三平台声明**。
 
+## M7 界面重设计（布局、视图与视觉）
+
+M0–M6 已交付 0.1.0（Linux 已验证，见 `plan/M6-validation.md`）。M7 只重做前端呈现层：不新增 npm 依赖、不改任何 Tauri 命令/事件/数据结构、不引入 UI 框架，Rust 后端不动。已确认方向：保留系统原生标题栏（应用内第一行为自绘应用栏）；明暗双主题跟随系统。规格见 `plan/05-desktop-ux.md`，验证记录见 `plan/M7-validation.md`。
+
+**状态：全部十项已实现并在本机跑绿（2026-09-26，Linux 单机）。** 实施期的执行类命令阻断已解除，全部门槛实跑并记入 [M7-validation.md](M7-validation.md)。`app/src/` 由单文件 4014 行拆为 24 个模块（最大 459 行），后端 `app/src-tauri/` 全程零改动。
+
+- [x] **M7-01** 设计令牌与前端基础模块抽取（`style/tokens.css` 198 行、`types.ts` 326 行、`dom.ts` 210 行、`state.ts` 266 行）。证据：`tsc --noEmit` 0 error、`vite build` 出 `index.css 20.83 kB` / `index.js 94.71 kB`；`app/tests/state.mjs` 4 单测覆盖快照只前进与 Toast 栈语义；`theme-check.py` 静态半程证明两套令牌都在且六个决定性令牌两套全不同。
+- [x] **M7-02** 应用栏、活动栏、状态栏与欢迎态外壳；`main.ts` 瘦身为 341 行启动器。证据：`view-smoke.py` 19/19 fail=0（活动栏七项各自打开并显示自己的内容）；`narrow-smoke.py` 9/9（340×400 下活动栏 7/7、应用栏主动作、分支芯片、提交框、缩放控件、行内 `⋯` 均在可及树内且 SHOWING，窗口可复原）。**本轮修正**：Settings 是唯一无仓库也显示的视图，其余六个置灰——否则主题/缩放/快捷键/诊断在空态不可达（`diagnostics-export-check.sh` 曾因此 step 1 失败）。
+- [x] **M7-03** 全局模态与反馈层：票据确认 `<dialog>`、askpass `<dialog>`、Toast 栈（修复单告警位覆盖）。证据：`view-smoke.py` 实测丢弃票据全链路——模态文案命中、候选清单列出、取消后状态行 `Cancelled; nothing was changed.`、`git status --porcelain` 前后逐字相同（票据未消费）；单测证明两条失败同时在栈内、按 id 独立关闭、封顶 4 条丢最旧。**本轮修正**：四条关闭路径统一还焦；`openMenu` 的 document 监听器泄漏与缺失的 Escape 补齐。
+- [x] **M7-04** Changes 视图：操作横幅、四组折叠虚拟列表、固定提交页脚、克隆与最近仓库。证据：`view-smoke.py` 断言 `Staged changes` / `Changes (n)` / `Untracked files` 三组标题同时渲染（用新增的 `make-dirty-repo.sh` 造暂存/未暂存/删除/未跟踪并存的夹具）；tracked 行的 `⋯` 菜单实测给出 `Discard,Diff,Open`；`recovery-checks.sh` 19/19 含空态串与「损坏索引不得显示 Working copy is clean.」「陈旧 index.lock 只读穿透」。
+- [x] **M7-05** History 视图：虚拟提交列表 + 可拖拽分隔详情。证据：`app/tests/history-model.mjs` 5 单测（含 10k 提交窗口切片）；`bench_run.py --history-pages 4` 在 10k 提交夹具上 12 次点击 0.021–0.045 s/页、中位 0.034 s，**M6-02 记录的 500 行 129 ms / 3000 行 1664 ms 全表重建未回归**；`view-smoke.py` 断言该视图可达且显示自己的内容。
+- [x] **M7-06** Branches 视图：搜索、分段列表、动作条与 `⋯` 菜单、上游点选器。证据：`view-smoke.py` 断言该视图可达且命中 `New branch|Search`；11 种票据的 `build`/`rebuild`/`requestArgs`/`targetOidOf` 四张表在类型检查下互证，`rebuild()` 改为逐分支显式返回以去掉 `as` 断言。
+- [x] **M7-07** Stash / Remotes / Worktrees & Submodules 视图。证据：`view-smoke.py` 断言三者各自可达并命中自己的内容（`Stash changes`、`Add remote|Fetch|Publish`、`Add worktree|Submodules|Linked worktrees`）。
+- [x] **M7-08** Settings 视图（General / Environment & diagnostics / Developer / 快捷键）。证据：`diagnostics-export-check.sh` **10/10 fail=0**——从 Settings 驱动 `Export diagnostics…` → 内容清单模态 `Export…` → zh_CN 原生 `Save` → 落盘文件为合法导出、含 `platform: linux` / `watch_mode:` / `config files (` / `excluded by design:`、HOME 前缀折叠、无凭据形状行、状态行确认写入；`theme-check.py` 17/17 覆盖 General 主题与缩放。
+- [x] **M7-09** 响应式与无障碍收口：≤480px、Ctrl+1…7、Escape/焦点返回、减弱动效、高对比。证据：`narrow-smoke.py` 9/9（≤480px 媒体查询生效后的最小窗口全量在树断言）；`view-smoke.py` 覆盖行内菜单与模态取消。**如实留缺口**：本宿主 AT-SPI 的 `FOCUSED` 状态粘住且 `do_action` 不移动 DOM 焦点，故焦点返回只有代码层保证、**无运行时证据**（M7-validation「已知缺口」首条）；减弱动效与高对比由 CSS 媒体查询承担，同样无 AT-SPI 断言。
+- [x] **M7-10** 文档与验证记录。证据：`plan/05-desktop-ux.md` 重写信息架构（活动栏 + 视图模型 + 视图内容映射表）、`TECHNICAL_DESIGN.md` §7 对齐、新建 `plan/M7-validation.md`（环境/决策/结构/17 处修复/验证清单/性能对照/脚本口径/已知缺口/运行时结果）、本 backlog 证据回填。`tauri build --bundles deb,rpm,appimage` **零 warning** 出三件（deb 4,275,934 / rpm 4,275,805 / AppImage 85,539,320 B；AppImage 需 `APPIMAGE_EXTRACT_AND_RUN=1`，见 M7-validation「环境」）；rpm 载荷 `bsdtar` 复核含可执行 `usr/bin/guit`；AppImage 隔离 HOME 冒烟至 Changes 视图并命中 `Monitor: `。
+
+**M7 门槛总表（2026-09-26，Linux 单机）**：`npm run build` ✅ · `npm run test:fixture` 18/0 · `cargo test --locked` 292+5（10 次全量 1 次单发 flake，9 次全绿，根因未证）· `cargo fmt --check` ✅ · `git diff --check` ✅ · clippy 恒 12 存量（后端零改动）· `recovery-checks.sh` 19/0 · `diagnostics-export-check.sh` 10/0 · `view-smoke.py` 19/0 · `narrow-smoke.py` 9/0 · `theme-check.py` 17/0 · 三件打包零告警。
+
+**性能对照 M6-01**（1k warmed；L2 地标定义已变故不与 M6 表直接比）：dirty→visible 0.340–0.386 s vs 0.360–0.394 s；空闲 RSS 459 MB vs 470 MB（**低约 11 MB**）；空闲 CPU 0.003–0.006 核 vs 0.075–0.079 核（**低一个数量级**，历史不再常驻挂载）；主进程 HWM ~209 MB vs ~215 MB；inotify 逐档相同（20/20/38/197）。
+
+**阻断项账本（M7）**：Windows/macOS 恒 Pending（延续 0.1.0 口径，无运行时验证）；焦点行为与减弱动效/高对比无 AT-SPI 证据（如实留开）；`cargo test` 单发 flake 未证根因；`make-repo.sh` 的 `dirty` 参数在提交前追加、故 M0–M6 基线从未渲染文件行（已补 `make-dirty-repo.sh`，M6 表不作重解释）；1k/10k 夹具因后端 `ls-files` 64 KB 读上限报 `submodules_list_too_large`（**M7 之前既有**，`known-limitations.md` 已记载，M7 不改后端故不擅动，留作独立议题）；`atspi_landmark.app_root()` 原取第一个匹配会被残留进程抢占 AT-SPI 应用名，已改为从后往前取最后一个。逐条对照 07 阻断定义：**已验证 Linux 道无一命中——M7 达 Linux 已验证出口；本记录处处只作单机结论，不含三平台声明**。
+
 ## 开始编码前的明确决策
 
 以下问题保留为可验证决策，不凭空给出结论：最低 Git 版本、三平台 Tauri/WebView 打包依赖、Windows 路径编码往返、取消进程树能力、difftool/mergetool 的可用配置方式、首轮性能基线及发布阈值。M0/M1 的验证结果应反向更新 [02-technology-stack.md](02-technology-stack.md) 和相关设计。

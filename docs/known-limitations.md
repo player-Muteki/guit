@@ -53,10 +53,11 @@ Linux**; "not verified" is stated explicitly where it applies.
 - guit shows no file contents, diffs, or editor. Diffs, conflict resolution
   and file opening always leave for external tools
   (see `docs/external-tools.md`).
-- The window has one error alert slot: when several failures arrive in quick
-  succession (e.g. two refused config files at boot), only the last is shown
-  on screen. Nothing is lost — every failure also lands in the diagnostics
-  ring and reaches the exported report.
+- ~~The window has one error alert slot~~ **Fixed in M7-03.** Failures now
+  enter a toast stack (top-right, up to four, each with its own close
+  button) instead of a single slot, so a second failure no longer replaces
+  the first and a watcher refresh can no longer hide it. The old limit
+  applied up to v0.1.0.
 - Force pushes and destructive operations are only possible through the
   preview → recheck → confirm ticket flow; tickets are single-use and die
   with the process (a restart cannot resurrect one).
