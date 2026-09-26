@@ -27,12 +27,14 @@ export function noteActivator(element: HTMLElement): void {
 }
 
 export function currentActivator(): HTMLElement | null {
+  // "What did the user last activate" is the question a dialog needs answered,
+  // and that is the click record — not the focus. `showModal()` takes focus
+  // for itself and the close hands it back on WebKit's schedule, so reading
+  // `activeElement` at the moment a dialog opens describes the dialog, not the
+  // caller. The focus is only consulted when no click has been recorded.
+  if (lastActivator?.isConnected) return lastActivator;
   const active = document.activeElement;
-  // WebKit parks `activeElement` on the scroller whenever no control holds
-  // focus, so it is only trusted when it is itself activatable; otherwise the
-  // last clicked control is the better answer.
-  if (active instanceof HTMLElement && active.matches(ACTIVATORS)) return active;
-  return lastActivator?.isConnected ? lastActivator : null;
+  return active instanceof HTMLElement && active.matches(ACTIVATORS) ? active : null;
 }
 
 export type Child = Node | string | null | undefined | false;

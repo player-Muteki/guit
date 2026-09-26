@@ -55,7 +55,11 @@ const showError = (error: unknown): void => {
   pushToast({ level: "error", message });
 };
 
-const preview = createPreviewController(showError);
+// Declared here so the preview controller can name a focus fallback; the
+// closure only runs once a dialog closes, long after `createShell` returns.
+let shell: Shell;
+
+const preview = createPreviewController(showError, () => shell.focusRail());
 const askpass = createAskpassDialog(showError);
 const toasts = createToastLayer();
 document.body.append(askpass.element, toasts.element);
@@ -153,7 +157,6 @@ const worktrees = createWorktreesView({ preview, onError: showError });
 const settings = createSettingsView({ onError: showError });
 
 // --- shell ---
-let shell: Shell;
 shell = createShell({
   openRepository: () => void pickRepository(),
   refresh: () => void refreshSession(false),

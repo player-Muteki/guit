@@ -110,8 +110,11 @@ export interface PreviewController {
   renew(): Promise<void>;
 }
 
-export function createPreviewController(onError: (error: unknown) => void): PreviewController {
-  const dialog = createConfirmDialog();
+export function createPreviewController(
+  onError: (error: unknown) => void,
+  onFocusFallback?: () => void,
+): PreviewController {
+  const dialog = createConfirmDialog(onFocusFallback);
   document.body.append(dialog.element);
   let files: readonly FileView[] = [];
   let onConfirm: (pending: PendingPreview) => void = () => {};

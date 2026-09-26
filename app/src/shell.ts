@@ -51,6 +51,13 @@ export interface Shell {
   readonly stage: HTMLElement;
   registerView(descriptor: ViewDescriptor | { id: "welcome"; element: HTMLElement }): void;
   focusCommit(): void;
+  /**
+   * Focuses the activity-rail item for the view on screen. This is where the
+   * confirm dialog sends focus when the button that opened it was rebuilt
+   * while the dialog was up: the rail is chrome, so it is never replaced, and
+   * it is a place the user can navigate from.
+   */
+  focusRail(): void;
   render(): void;
   dispose(): void;
 }
@@ -400,6 +407,12 @@ export function createShell(actions: ShellActions): Shell {
     box?.focus();
   };
 
+  const focusRail = (): void => {
+    const current = activeView();
+    const item = railButtons.get(current) ?? railButtons.get("changes");
+    item?.focus();
+  };
+
   return {
     appbar,
     rail,
@@ -407,6 +420,7 @@ export function createShell(actions: ShellActions): Shell {
     stage,
     registerView,
     focusCommit,
+    focusRail,
     render,
     dispose() { closeMenus(); },
   };

@@ -16,10 +16,11 @@ Landmark rules are the one in atspi_landmark.py, plus three this script needs:
 - the file list is virtualised, so only the groups inside the rendered window
   are asserted, and the fixture is small enough to fit all of them.
 
-Focus is deliberately not asserted: on this host AT-SPI reports FOCUSED
-stickily (a control keeps the state after another control is clicked), and
-`do_action` does not move DOM focus, so neither reading nor writing focus can
-be measured over AT-SPI. See plan/M7-validation.md.
+Focus *is* asserted, on both paths a confirm dialog can take: cancelling one
+whose trigger survived hands focus back to that trigger, and cancelling one
+whose trigger was rebuilt while the dialog was open hands it to the documented
+substitute. A control experiment (click a rail item: nothing stays focused)
+ruled out the earlier reading that AT-SPI's FOCUSED state is sticky here.
 
 Usage: view-smoke.py <release-binary> <fixture-repo> <work-dir> [--keep]
 Prints one line per assertion; exits non-zero when any assertion fails.
@@ -79,6 +80,19 @@ def states(node):
 
 def focused(node):
     return "ATSPI_STATE_FOCUSED" in states(node)
+
+
+def focused_name(role=None):
+    """The name of the one control that holds focus, if any."""
+    for node in A.tree(A.app_root()):
+        if not focused(node):
+            continue
+        if role is not None and (A._once(lambda: node.get_role().value_name, default="") or "") != role:
+            continue
+        name = A._once(lambda: node.get_name(), default="") or ""
+        if name:
+            return name
+    return None
 
 
 def porcelain(repo):
@@ -181,6 +195,26 @@ def main():
         report.check("cancel is confirmed in the status line",
                      A.wait_for(r"Cancelled; nothing was changed\.", 5) is not None)
         report.check("cancel discarded nothing", before == porcelain(args.repo))
+        # Focus must not stay on the closed dialog's own button. "Discard all"
+        # lives in a virtualised row that the preview's snapshot already
+        # rebuilt, so the documented substitute is the activity-rail item.
+        report.check("focus leaves the closed dialog", focused_name("ATSPI_ROLE_BUTTON") == "Changes",
+                     f"focus is on {focused_name('ATSPI_ROLE_BUTTON')!r}")
+
+        # --- the same dialog when the trigger *is* still there ---
+        # Settings' export button is ordinary chrome, so cancelling its content
+        # manifest must hand focus back to that exact button.
+        A.click(A.find_button(name="Settings"))
+        time.sleep(1.0)
+        A.click(A.find_button(name="Export diagnostics…"))
+        time.sleep(1.0)
+        report.check("the export manifest opens",
+                     A.wait_for(r"plain-text diagnostics report", 8) is not None)
+        A.click(find("Cancel", "ATSPI_ROLE_BUTTON"))
+        time.sleep(1.0)
+        report.check("focus returns to the button that opened the dialog",
+                     focused_name("ATSPI_ROLE_BUTTON") == "Export diagnostics…",
+                     f"focus is on {focused_name('ATSPI_ROLE_BUTTON')!r}")
     finally:
         try:
             os.killpg(os.getpgid(proc.pid), 15)
