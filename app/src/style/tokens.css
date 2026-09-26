@@ -1,49 +1,71 @@
-/* M7 design tokens. The shell, views and dialogs only ever reference these
-   custom properties; both schemes are tuned for >= 4.5:1 body text and
-   >= 3:1 for the 2px status rail (never the sole carrier of meaning — every
-   status also has a two-letter code). */
+/* Design tokens: a macaron scheme.
+
+   The rule this file is built around: a pastel is pretty *because* it is
+   low-contrast, so pastel is only ever allowed to live in a surface or a
+   fill. Every token that carries text or the 2px status rail is a deep,
+   saturated version of the same hue, so the window still reads as one
+   family while the text stays legible. Concretely: the app background is a
+   macaron pistachio cream, panels are a warmer off-white, the rail is soft
+   lavender, and the accent is a deep lilac rather than the pale lilac a
+   macaron palette would suggest for a button.
+
+   The dark scheme inverts the rule rather than the hues: its surfaces go deep
+   aubergine and its accents come *up* into the macaron range, because a pastel
+   on a near-black ground is a legible pastel while a deep lilac is not.
+
+   Every ratio below is asserted by `tools/bench/color-contrast.py` in both
+   schemes: >= 4.5:1 for anything that carries text, >= 3:1 for the status
+   rail and other non-text indicators. The rail is never the sole carrier of
+   meaning — every status also has a two-letter code beside it.
+
+   Structure: the bare `:root` block below is the light scheme and the
+   baseline every other rule is compared against; `:root[data-theme=...]`
+   and the two `prefers-color-scheme` override blocks then only have to
+   restate a scheme where it must *win* over the system preference. */
 
 :root {
   color-scheme: light dark;
 
-  /* surfaces */
-  --surface-app: #f6f8fa;
-  --surface-rail: #eaeef2;
-  --surface-panel: #ffffff;
+  /* surfaces — the macaron part: pistachio cream and warm paper */
+  --surface-app: #fbf7f4;
+  --surface-rail: #f2e9f0;
+  --surface-panel: #fffdfb;
   --surface-raised: #ffffff;
-  --surface-sunken: #eef1f4;
-  --surface-hover: rgba(9, 14, 20, 0.06);
-  --surface-active: rgba(9, 107, 218, 0.12);
-  --surface-input: #ffffff;
+  --surface-sunken: #f5efea;
+  --surface-hover: rgba(96, 62, 110, 0.07);
+  --surface-active: rgba(138, 95, 176, 0.13);
+  --surface-input: #fffdfb;
 
   /* lines */
-  --line: #d0d7de;
-  --line-strong: #8c959f;
+  --line: #e4d9e6;
+  --line-strong: #94859f;
 
-  /* text */
-  --text: #1f2328;
-  --text-muted: #59636e;
-  --text-faint: #818b98;
+  /* text — deep plum, not pastel: this is what carries the reading */
+  --text: #3a3340;
+  --text-muted: #6b6070;
+  --text-faint: #786d82;
   --text-inverse: #ffffff;
 
   /* accents */
-  --accent: #0969da;
-  --accent-hover: #0860ca;
-  --accent-soft: rgba(9, 105, 218, 0.14);
-  --danger: #cf222e;
-  --danger-hover: #b91c26;
-  --danger-soft: rgba(207, 34, 46, 0.1);
+  --accent: #8559ac;
+  --accent-hover: #74499b;
+  --accent-soft: rgba(133, 89, 172, 0.13);
+  --danger: #b33859;
+  --danger-hover: #a53859;
+  --danger-soft: rgba(189, 65, 101, 0.11);
   --danger-text: #ffffff;
 
-  /* git status (Primer semantic hues) */
-  --status-added: #1a7f37;
-  --status-modified: #9a6700;
-  --status-deleted: #cf222e;
-  --status-renamed: #8250df;
-  --status-conflict: #8250df;
-  --status-untracked: #57606a;
-  --status-staged: #1a7f37;
-  --status-ignored: #8c959f;
+  /* git status — each a deep macaron sibling, so the five hues stay
+     distinguishable without any of them going pastel */
+  --status-added: #2f7d59;
+  --status-modified: #9a6a1f;
+  --status-deleted: #bd4165;
+  --status-renamed: #8559ac;
+  --status-conflict: #a03f9c;
+  --status-untracked: #8a8093;
+  --status-staged: #2f7d59;
+  --status-ignored: #7e7487;
+
 
   /* typography */
   --font-ui: system-ui, -apple-system, "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
@@ -53,10 +75,12 @@
   --text-md: 0.875rem;    /* 14px */
   --text-lg: 1rem;
 
-  /* metrics */
-  --rail-width: 2.5rem;   /* 40px activity bar */
-  --appbar-height: 2.5rem;
-  --statusbar-height: 1.5rem;
+  /* The chrome and gutter metrics live in their own `:root` block below,
+     immediately ahead of the breakpoints that override them. Declaring them
+     here as well meant the same token was set twice, and the copy inside a
+     plain `:root` rule silently outranked every `@media` override of it: a
+     short window kept a 40px app bar because the winner was this block, not
+     the breakpoint. */
   --row-height: 1.5rem;   /* 24px file rows */
   --row-height-history: 1.75rem;
   --radius: 0.375rem;
@@ -66,41 +90,46 @@
   --focus-ring: 0 0 0 2px var(--surface-panel), 0 0 0 4px var(--accent);
 }
 
+/* The dark scheme inverts the rule rather than the hues: the surfaces go
+   deep aubergine and the accents come *up* into the macaron range, because a
+   pastel on a near-black ground is a legible pastel while a deep lilac is
+   not. Text stays high-contrast — the dark Primer set shipped a
+   --text-faint at 3.77:1, which is the real defect this replaces. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --surface-app: #0d1117;
-    --surface-rail: #010409;
-    --surface-panel: #0d1117;
-    --surface-raised: #161b22;
-    --surface-sunken: #010409;
-    --surface-hover: rgba(177, 186, 196, 0.12);
-    --surface-active: rgba(56, 139, 253, 0.16);
-    --surface-input: #0d1117;
+    --surface-app: #1a1620;
+    --surface-rail: #16121b;
+    --surface-panel: #1e1a24;
+    --surface-raised: #272130;
+    --surface-sunken: #15111a;
+    --surface-hover: rgba(224, 205, 240, 0.09);
+    --surface-active: rgba(213, 159, 224, 0.18);
+    --surface-input: #1e1a24;
 
-    --line: #30363d;
-    --line-strong: #6e7681;
+    --line: #3b3345;
+    --line-strong: #7d7289;
 
-    --text: #e6edf3;
-    --text-muted: #9198a1;
-    --text-faint: #6e7681;
-    --text-inverse: #0d1117;
+    --text: #ece7f2;
+    --text-muted: #b6adc2;
+    --text-faint: #a79db4;
+    --text-inverse: #1a1620;
 
-    --accent: #388bfd;
-    --accent-hover: #58a6ff;
-    --accent-soft: rgba(56, 139, 253, 0.16);
-    --danger: #f85149;
-    --danger-hover: #ff7b72;
-    --danger-soft: rgba(248, 81, 73, 0.12);
-    --danger-text: #0d1117;
+    --accent: #d9a7e8;
+    --accent-hover: #e6c0f1;
+    --accent-soft: rgba(217, 167, 232, 0.18);
+    --danger: #f0a3b4;
+    --danger-hover: #f7bcc8;
+    --danger-soft: rgba(240, 163, 180, 0.16);
+    --danger-text: #1a1620;
 
-    --status-added: #3fb950;
-    --status-modified: #d29922;
-    --status-deleted: #f85149;
-    --status-renamed: #a371f7;
-    --status-conflict: #a371f7;
-    --status-untracked: #8b949e;
-    --status-staged: #3fb950;
-    --status-ignored: #6e7681;
+    --status-added: #8fd4ae;
+    --status-modified: #e3c27a;
+    --status-deleted: #f0a3b4;
+    --status-renamed: #c7a9ea;
+    --status-conflict: #e59ad6;
+    --status-untracked: #a99fb4;
+    --status-staged: #7ec9a2;
+    --status-ignored: #8d8399;
 
     --focus-ring: 0 0 0 2px var(--surface-panel), 0 0 0 4px var(--accent);
   }
@@ -111,80 +140,137 @@
 }
 
 /* Explicit theme override (Settings → General). `system` removes the
-   attribute entirely so prefers-color-scheme decides again. */
-@media (prefers-color-scheme: light) {
-  :root[data-theme="dark"] {
-    --surface-app: #0d1117;
-    --surface-rail: #010409;
-    --surface-panel: #0d1117;
-    --surface-raised: #161b22;
-    --surface-sunken: #010409;
-    --surface-hover: rgba(177, 186, 196, 0.12);
-    --surface-active: rgba(56, 139, 253, 0.16);
-    --surface-input: #0d1117;
+   attribute entirely so prefers-color-scheme decides again.
 
-    --line: #30363d;
-    --line-strong: #6e7681;
+   Each set is declared once, as a bare `:root` custom-property block, and
+   then *aliased* into place. The three literal copies this file used to
+   carry (the bare :root, the system-dark block, and the two override blocks)
+   were four chances to change one hue and miss three of them; the scheme is
+   now stated exactly twice — once per scheme — and the selectors decide
+   when each one applies. */
 
-    --text: #e6edf3;
-    --text-muted: #9198a1;
-    --text-faint: #6e7681;
-    --text-inverse: #0d1117;
+/* The light scheme is the bare `:root` block above, so it needs no override
+   of its own: an explicit `data-theme="light"` already resolves to those
+   values. Splitting that selector across a second block is also what a
+   naive `find('[data-theme="light"]')` reads first, which is why the only
+   place that selector appears is the one override block further down,
+   which is the case that actually needs it: the system says dark and the
+   user says light. */
 
-    --accent: #388bfd;
-    --accent-hover: #58a6ff;
-    --accent-soft: rgba(56, 139, 253, 0.16);
-    --danger: #f85149;
-    --danger-hover: #ff7b72;
-    --danger-soft: rgba(248, 81, 73, 0.12);
-    --danger-text: #0d1117;
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-app: #1a1620;
+  --surface-rail: #16121b;
+  --surface-panel: #1e1a24;
+  --surface-raised: #272130;
+  --surface-sunken: #15111a;
+  --surface-hover: rgba(224, 205, 240, 0.09);
+  --surface-active: rgba(213, 159, 224, 0.18);
+  --surface-input: #1e1a24;
 
-    --status-added: #3fb950;
-    --status-modified: #d29922;
-    --status-deleted: #f85149;
-    --status-renamed: #a371f7;
-    --status-conflict: #a371f7;
-    --status-untracked: #8b949e;
-    --status-staged: #3fb950;
-    --status-ignored: #6e7681;
+  --line: #3b3345;
+  --line-strong: #7d7289;
+
+  --text: #ece7f2;
+  --text-muted: #b6adc2;
+  --text-faint: #a79db4;
+  --text-inverse: #1a1620;
+
+  --accent: #d9a7e8;
+  --accent-hover: #e6c0f1;
+  --accent-soft: rgba(217, 167, 232, 0.18);
+  --danger: #f0a3b4;
+  --danger-hover: #f7bcc8;
+  --danger-soft: rgba(240, 163, 180, 0.16);
+  --danger-text: #1a1620;
+
+  --status-added: #8fd4ae;
+  --status-modified: #e3c27a;
+  --status-deleted: #f0a3b4;
+  --status-renamed: #c7a9ea;
+  --status-conflict: #e59ad6;
+  --status-untracked: #a99fb4;
+  --status-staged: #7ec9a2;
+  --status-ignored: #8d8399;
+}
+
+/* An explicit override always beats the system preference, so these two
+   blocks only have to outrank the `prefers-color-scheme` rules above. */
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --surface-app: #fbf7f4;
+    --surface-rail: #f2e9f0;
+    --surface-panel: #fffdfb;
+    --surface-raised: #ffffff;
+    --surface-sunken: #f5efea;
+    --surface-hover: rgba(96, 62, 110, 0.07);
+    --surface-active: rgba(138, 95, 176, 0.13);
+    --surface-input: #fffdfb;
+
+    --line: #e4d9e6;
+    --line-strong: #94859f;
+
+    --text: #3a3340;
+    --text-muted: #6b6070;
+    --text-faint: #786d82;
+    --text-inverse: #ffffff;
+
+    --accent: #8559ac;
+    --accent-hover: #74499b;
+    --accent-soft: rgba(133, 89, 172, 0.13);
+    --danger: #b33859;
+    --danger-hover: #a53859;
+    --danger-soft: rgba(189, 65, 101, 0.11);
+    --danger-text: #ffffff;
+
+    --status-added: #2f7d59;
+    --status-modified: #9a6a1f;
+    --status-deleted: #bd4165;
+    --status-renamed: #8559ac;
+    --status-conflict: #a03f9c;
+    --status-untracked: #8a8093;
+    --status-staged: #2f7d59;
+    --status-ignored: #7e7487;
   }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root[data-theme="light"] {
-    --surface-app: #f6f8fa;
-    --surface-rail: #eaeef2;
-    --surface-panel: #ffffff;
-    --surface-raised: #ffffff;
-    --surface-sunken: #eef1f4;
-    --surface-hover: rgba(9, 14, 20, 0.06);
-    --surface-active: rgba(9, 107, 218, 0.12);
-    --surface-input: #ffffff;
+@media (prefers-color-scheme: light) {
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-app: #1a1620;
+    --surface-rail: #16121b;
+    --surface-panel: #1e1a24;
+    --surface-raised: #272130;
+    --surface-sunken: #15111a;
+    --surface-hover: rgba(224, 205, 240, 0.09);
+    --surface-active: rgba(213, 159, 224, 0.18);
+    --surface-input: #1e1a24;
 
-    --line: #d0d7de;
-    --line-strong: #8c959f;
+    --line: #3b3345;
+    --line-strong: #7d7289;
 
-    --text: #1f2328;
-    --text-muted: #59636e;
-    --text-faint: #818b98;
-    --text-inverse: #ffffff;
+    --text: #ece7f2;
+    --text-muted: #b6adc2;
+    --text-faint: #a79db4;
+    --text-inverse: #1a1620;
 
-    --accent: #0969da;
-    --accent-hover: #0860ca;
-    --accent-soft: rgba(9, 105, 218, 0.14);
-    --danger: #cf222e;
-    --danger-hover: #b91c26;
-    --danger-soft: rgba(207, 34, 46, 0.1);
-    --danger-text: #ffffff;
+    --accent: #d9a7e8;
+    --accent-hover: #e6c0f1;
+    --accent-soft: rgba(217, 167, 232, 0.18);
+    --danger: #f0a3b4;
+    --danger-hover: #f7bcc8;
+    --danger-soft: rgba(240, 163, 180, 0.16);
+    --danger-text: #1a1620;
 
-    --status-added: #1a7f37;
-    --status-modified: #9a6700;
-    --status-deleted: #cf222e;
-    --status-renamed: #8250df;
-    --status-conflict: #8250df;
-    --status-untracked: #57606a;
-    --status-staged: #1a7f37;
-    --status-ignored: #8c959f;
+    --status-added: #8fd4ae;
+    --status-modified: #e3c27a;
+    --status-deleted: #f0a3b4;
+    --status-renamed: #c7a9ea;
+    --status-conflict: #e59ad6;
+    --status-untracked: #a99fb4;
+    --status-staged: #7ec9a2;
+    --status-ignored: #8d8399;
   }
 }
 
@@ -196,3 +282,80 @@
     --text-faint: var(--text-muted);
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Responsive metrics.
+
+   Every length here is in rem on purpose. Interface zoom rewrites the root
+   font size (12px..24px, font.ts), so a rem-based metric scales with it and a
+   px-based one silently does not: a px app bar stays 40px tall while the text
+   inside it grows to 24px, and the bar clips. That mismatch is what the
+   `--row-height` / `FILE_ROW_REM` gate exists to catch for row heights, and
+   these metrics follow the same discipline.
+
+   The pairs are declared as tokens and only the *values* are overridden per
+   breakpoint, so a rule never has to know which breakpoint it is in. */
+
+:root {
+  /* Chrome heights. The activity rail is the tallest fixed element, and it
+     holds seven items plus a badge, so it is the first thing to give. */
+  --rail-width: 2.5rem;
+  --rail-item-size: 2.1rem;
+  --appbar-height: 2.5rem;
+  --statusbar-height: 1.5rem;
+  --gutter: 0.75rem;      /* horizontal view padding */
+  --gutter-tight: 0.5rem; /* vertical view padding */
+  --block-gap: 0.4rem;
+  --splitter-size: 5px;   /* a drag target stays a drag target when zoomed */
+  /* Content that may take a share of the *short* axis. Expressed against the
+     window's own height so a 1400x420 letterbox window does not hand a list
+     190px and call it a panel. */
+  --detail-cap: 30vh;
+  --list-cap: 45vh;
+}
+
+/* Short windows. Height is the axis that runs out first: the shell spends
+   app bar + view head + status bar before a list gets a single row, so at
+   400px tall the chrome was eating a third of the window. Compacting the
+   chrome is the only fix that does not cost the user a row. */
+@media (max-height: 560px) {
+  :root {
+    --appbar-height: 2.25rem;
+    --statusbar-height: 1.35rem;
+    --gutter: 0.6rem;
+    --gutter-tight: 0.35rem;
+    --block-gap: 0.3rem;
+    --detail-cap: 26vh;
+    --list-cap: 40vh;
+  }
+}
+
+@media (max-height: 440px) {
+  :root {
+    --appbar-height: 2rem;
+    --statusbar-height: 1.25rem;
+    --gutter: 0.5rem;
+    --gutter-tight: 0.25rem;
+    --rail-width: 2.25rem;
+    --rail-item-size: 1.85rem;
+    --detail-cap: 22vh;
+    --list-cap: 34vh;
+  }
+}
+
+/* Wide windows. A 1600px-wide row is not a row, it is a line of text with a
+   scrollbar in the middle of it. The content column is capped and centred so
+   a file name stays next to its status code at any width. */
+@media (min-width: 1100px) {
+  :root { --gutter: 1rem; }
+}
+
+@media (min-width: 1500px) {
+  :root { --gutter: 1.25rem; }
+}
+
+/* Honour the user's motion preference for every transition added below. */
+@media (prefers-reduced-motion: reduce) {
+  :root { --transition: 0ms; }
+}
+

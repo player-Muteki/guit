@@ -8,4 +8,9 @@
 /.DS_Store
 /Thumbs.db
 
+# Tool-local settings. These are per-developer permissions, not project state,
+# and they name the editor that wrote them.
+.claude/
+.qoder/
+
 __pycache__/

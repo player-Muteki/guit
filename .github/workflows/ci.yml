@@ -52,6 +52,14 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:fixture
+      # The two stylesheet gates. Both are pure-stdlib Python and read the
+      # *built* bundle, so they judge what actually ships rather than the
+      # source: a token that a bundler drops or a minifier rewrites is caught
+      # here, and neither gate needs a display, a WebView or AT-SPI.
+      - name: Colour contrast (both schemes)
+        run: python3 ../tools/bench/color-contrast.py dist/assets
+      - name: Responsive geometry invariants
+        run: python3 ../tools/bench/responsive-check.py ../app/src/style.css ../app/src/style/tokens.css
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       # The verified baseline is a fixed set of pre-existing warnings, so
       # clippy runs without -D warnings; new code must not add to the list
