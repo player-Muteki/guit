@@ -20,7 +20,7 @@
 
 use crate::probe::{redact, ProbeError};
 use crate::repo::{self, RepoIdentity};
-use crate::runner::{self, DEFAULT_OUTPUT_LIMIT};
+use crate::runner;
 use crate::write::{self, OperationKind, OperationResult, Outcome, WriteState};
 use crate::{history, session};
 use serde::Serialize;
@@ -32,6 +32,16 @@ use std::time::Duration;
 /// Read-only listing helpers never participate in write cancellation; they
 /// run against this permanently-unset flag, mirroring the worktree module.
 static NO_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// `git ls-files --stage -z` emits one record per tracked file — mode, a
+/// 40-character object id, the stage, a tab and the path — so its size grows
+/// with the repository exactly the way `git status` output does. It used to
+/// share the 64 KB default capture limit, which a repository of roughly a
+/// thousand files already exceeded: every such repository reported
+/// `submodules_list_too_large` and its submodule list was refused, including
+/// repositories with no submodules at all. The bound tracks the status limit,
+/// which covers a few hundred thousand files.
+const GITLINK_OUTPUT_LIMIT: usize = runner::STATUS_OUTPUT_LIMIT;
 
 /// Streaming clones can take far longer than any other write; the external
 /// tool budget (3600 s) applies, with Stop covering the gap.
@@ -110,7 +120,7 @@ fn run_git_os(dir: &Path, args: &[&OsStr]) -> Result<runner::CapturedOutput, Pro
         &NO_CANCEL,
         Duration::ZERO,
         Duration::from_secs(60),
-        DEFAULT_OUTPUT_LIMIT,
+        GITLINK_OUTPUT_LIMIT,
         |_, _| {},
     )
 }
@@ -972,5 +982,57 @@ mod tests {
         );
         session::open(&sessions, root.path()).unwrap();
         assert!(list_view(&sessions).unwrap().is_empty());
+    }
+
+    /// The index listing is read to find gitlinks, so its size is the
+    /// repository's file count, not its submodule count. It used to share the
+    /// 64 KB default capture limit and a repository of about a thousand files
+    /// already exceeded it, which made every such repository report
+    /// `submodules_list_too_large` — including one with no submodules, whose
+    /// submodule list is legitimately empty. This pins the bound against a
+    /// real index rather than against the constant.
+    #[test]
+    fn an_index_larger_than_the_default_capture_limit_still_lists() {
+        const FILES: usize = 1200;
+        let root = tempfile::tempdir().unwrap();
+        repo::git_with(
+            root.path(),
+            &[],
+            &["init", "--quiet", "--initial-branch=main"],
+        );
+        let bulk = root.path().join("bulk");
+        std::fs::create_dir_all(&bulk).unwrap();
+        for index in 0..FILES {
+            std::fs::write(bulk.join(format!("f{index}.txt")), "x\n").unwrap();
+        }
+        git(root.path(), &["add", "--", "bulk"]);
+        git(root.path(), &["commit", "-q", "-m", "bulk"]);
+        // The fixture has to be over the old limit or the test proves nothing.
+        let listing = run_git_os(
+            root.path(),
+            &[
+                OsStr::new("ls-files"),
+                OsStr::new("--stage"),
+                OsStr::new("-z"),
+            ],
+        )
+        .unwrap();
+        assert!(
+            !listing.truncated,
+            "the fixture must exceed the old 64 KB limit"
+        );
+        assert!(
+            listing.stdout.len() > runner::DEFAULT_OUTPUT_LIMIT,
+            "fixture index is only {} bytes",
+            listing.stdout.len()
+        );
+
+        let sessions = session::SessionState::default();
+        session::open(&sessions, root.path()).unwrap();
+        let views = list_view(&sessions).unwrap();
+        assert!(
+            views.is_empty(),
+            "no submodules is a real answer, not an error"
+        );
     }
 }
