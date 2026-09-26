@@ -1,4 +1,4 @@
-//! Tag create / view / delete (plan/04 写入动作规则). Names are validated by
+//! Tag create / view / delete. Names are validated by
 //! the user's own Git through `check-ref-format refs/tags/<name>` — the
 //! prefix guarantees a name can never be read as an option or land outside
 //! refs/tags. Annotation text travels to Git in a 0600 temp file that is

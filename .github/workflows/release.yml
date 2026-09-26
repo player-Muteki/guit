@@ -80,7 +80,7 @@ jobs:
           ## Verified / unverified platforms
 
           - **Linux** — install trial, click-through and recovery smoke verified on
-            Ubuntu 26.04 (see \`plan/M6-validation.md\` in the repository).
+            Ubuntu 26.04 (see \`docs/known-limitations.md\` in the repository).
           - **macOS / Windows** — artifacts are built by this pipeline but have
             **not** been runtime-verified; treat them as untested previews.
 

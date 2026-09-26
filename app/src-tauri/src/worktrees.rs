@@ -1,4 +1,4 @@
-//! Worktree management (plan/04 外部工具与 worktree, M4-06). The list is
+//! Worktree management. The list is
 //! parsed from `git worktree list --porcelain` fail-closed; the frontend
 //! addresses entries only by their list position (`u32`), so raw paths never
 //! round-trip through the client except as display text. Removal is the

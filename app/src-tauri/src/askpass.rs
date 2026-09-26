@@ -1,4 +1,4 @@
-//! Controlled credential prompting (plan/04 网络、认证和取消, M5-06).
+//! Controlled credential prompting.
 //! The default posture stays non-interactive: every Git process runs with
 //! `GIT_TERMINAL_PROMPT=0` and no `GIT_ASKPASS`, so a credential-protected
 //! remote fails fast and the M5-05 classifier says why. The only way a

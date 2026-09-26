@@ -1,4 +1,4 @@
-//! Remote synchronization (plan/04 网络、认证和取消, M5-02). Fetch and
+//! Remote synchronization. Fetch and
 //! upstream binding ride the same serialized write lane as every other
 //! repository mutation: `git fetch` rewrites remote-tracking refs, which is
 //! repository state, so it can never overlap a local commit or a worktree

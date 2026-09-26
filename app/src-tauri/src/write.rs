@@ -56,7 +56,7 @@ struct Preview {
     force: bool,
 }
 
-/// Serializes every Git write in the repository (plan/03: 同仓库写入严格串行).
+/// Serializes every Git write in the repository, strictly in order.
 /// One operation holds the slot at a time; a second submitter is refused with
 /// `write_queue_busy` instead of queueing invisibly. Cancellation shares the
 /// runner's atomic flag so a running Git process is killed by its group.
@@ -421,7 +421,7 @@ pub enum Outcome {
     Conflicted,
 }
 
-/// Uniform answer for write operations (plan/03 数据契约). The embedded
+/// Uniform answer for write operations. The embedded
 /// snapshot is Git's actual state re-read after success, failure or
 /// cancellation; the frontend applies it through the version guard.
 #[derive(Debug, Serialize)]
@@ -731,7 +731,7 @@ pub(crate) fn discard_files(
 
 /// Assumes the queue slot is held; tests call this directly. The nonce is
 /// consumed either way; a candidate-set mismatch refuses the write and tells
-/// the UI to preview again (plan/04: 候选集变化即拒绝重确认).
+/// the UI to preview again: a changed candidate set refuses re-confirmation.
 pub(crate) fn run_discard(
     state: &WriteState,
     sessions: &session::SessionState,
@@ -950,7 +950,7 @@ pub(crate) fn clean_files(
 /// Assumes the queue slot is held; tests call this directly. The stored
 /// candidate set and a fresh `git clean -nd` must contain exactly the same
 /// paths before Git runs; a match then deletes by explicit pathspec so the
-/// execution can never touch anything the user did not confirm (plan/04).
+/// execution can never touch anything the user did not confirm.
 pub(crate) fn run_clean(
     state: &WriteState,
     sessions: &session::SessionState,

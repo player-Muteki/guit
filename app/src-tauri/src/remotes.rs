@@ -1,4 +1,4 @@
-//! Remote configuration (plan/04 远端, M5-01). The remote list is read from
+//! Remote configuration. The remote list is read from
 //! `git remote` plus a per-name `git remote get-url [--push]`, and every URL
 //! that leaves this module is redacted — a URL can embed a token and the
 //! frontend must never see the raw form. Names and URLs are validated by

@@ -1,4 +1,4 @@
-//! Branch create / switch / rename / delete (plan/04 写入动作规则). Every
+//! Branch create / switch / rename / delete. Every
 //! operation runs through the repository write queue, validates user-typed
 //! names with the user's own Git (`check-ref-format`), and ends with a forced
 //! re-read of the real state. Deletion is destructive: it requires the

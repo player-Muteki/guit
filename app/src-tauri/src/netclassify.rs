@@ -19,7 +19,7 @@ pub(crate) enum NetCategory {
 }
 
 impl NetCategory {
-    /// Fixed advice per category (plan/05: different failures get
+    /// Fixed advice per category: different failures get
     /// different, concrete suggestions; Other never pretends to know).
     pub(crate) fn suggestion(self) -> &'static str {
         match self {

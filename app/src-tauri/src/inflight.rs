@@ -1,4 +1,4 @@
-//! In-flight Git operation detection (M4-02, plan/04 读取命令表). The
+//! In-flight Git operation detection. The
 //! snapshot must never present a repository as clean while Git holds an
 //! unfinished merge/rebase/cherry-pick/revert, and the continue/abort
 //! affordances may only be offered when the operation is positively

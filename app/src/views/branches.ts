@@ -240,7 +240,7 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
       if (branch.ahead !== null) parts.push(`↑${branch.ahead}`);
       if (branch.behind !== null) parts.push(`↓${branch.behind}`);
       const element = refRow(branch.head ? "●" : "", branch.name, parts.join("  "), branch.addressable);
-      // Only byte-round-trippable names can be write targets (plan/04); the
+      // Only byte-round-trippable names can be write targets; the
       // checked-out branch can be renamed but never switched away or deleted.
       if (branch.addressable && renaming === branch.name) {
         element.classList.add("renaming");

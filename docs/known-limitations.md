@@ -5,25 +5,51 @@ Linux**; "not verified" is stated explicitly where it applies.
 
 ## Platform coverage
 
-- Linux (Ubuntu 26.04, GNOME Wayland): fully exercised — unit + integration
-  tests, packaged deb/rpm, runtime click-through via AT-SPI.
-- **Windows and macOS: build configuration only.** The release binary has
-  not been run on either platform during this cycle; the platform matrix in
-  `plan/M6-validation.md` lists every behavior as Pending.
-- The interactive HTTPS askpass bridge is **unix-only by design**; on Windows
-  credential retry is refused with guidance to use a `credential.helper`
-  (see `docs/credentials.md`). SSH passphrase prompting is refused on all
-  platforms — ssh-agent is the only supported path.
+All runtime evidence comes from a single Linux host (Ubuntu 26.04.1 LTS, GNOME
+Wayland via XWayland, HiDPI scale 2, Git 2.53, WebKitGTK 2.52.6 / GTK 3.24.52,
+rustc/Cargo 1.96, Node 26). Nothing in this project validates any other
+platform.
+
+| Platform | Status |
+| --- | --- |
+| **Linux** (x86_64) | **Verified.** Unit and integration tests, installed-package trial of the deb, and end-to-end click-throughs of every view, both dialogs and the diagnostics export. deb, rpm and AppImage all produced and launched. |
+| **macOS** | **Build configuration only.** Bundle metadata (dmg/app, minimum system version 10.13) is schema- and config-validated. The app has never been run on macOS. Treat it as an untested preview. |
+| **Windows** | **Build configuration only.** Bundle metadata (NSIS currentUser, MSI, WebView2 download bootstrapper) is schema- and config-validated. The app has never been run on Windows. Treat it as an untested preview. |
+
+The interactive HTTPS askpass bridge is **unix-only by design**; on Windows a
+credential retry is refused with guidance to use a `credential.helper`
+(see `docs/credentials.md`). SSH passphrase prompting is refused on every
+platform — ssh-agent is the only supported path.
+
+Continuous integration is configured (`.github/workflows/`) for per-platform
+bundles, but **it has never executed: there is no git remote for this
+project**. No CI pass is claimed anywhere, and none should be inferred from
+the workflow files being present.
+
+## Manual gates still open
+
+These need a human and a second machine, and are honestly outstanding:
+
+- The attended credential pass against real GitHub / GitLab / Gitea accounts.
+- An interactive fetch killed mid-flight against a credential-protected
+  remote, to confirm startup recovery removes the orphaned askpass directory
+  and leaves the repository in its real state.
+- The branch-delete ticket dialog killed mid-confirmation, to confirm a
+  restart cannot resurrect the confirmation.
+- Multi-display window clamping (the verification host is single-display;
+  the clamp itself is unit-tested).
+- Installing the packages on a distribution other than the verification host.
 
 ## Packaging
 
-- The **AppImage** bundle was blocked by an M0-era network issue downloading
-  its AppRun helper; the M6-04 retry produced it and it launched on the
-  verification host (`APPIMAGE_EXTRACT_AND_RUN=1`, isolated HOME). No
-  distribution beyond that host has been attempted. deb and rpm remain the
-  primary Linux artifacts (`plan/M6-validation.md` §M6-04).
-- Windows/macOS installers (NSIS/MSI, dmg) are configured but unbuilt this
-  cycle.
+- **AppImage** is produced and launches on the verification host, but it needs
+  `APPIMAGE_EXTRACT_AND_RUN=1` both to build and to run: `appimagetool` mounts
+  its squashfs image through FUSE, which that host does not provide. Without
+  the variable, `tauri build --bundles appimage` fails in `linuxdeploy`
+  (Tauri's wrapper wording; the real blocker is the FUSE mount). Building it
+  also needs network access to fetch the AppRun helper. deb and rpm are the
+  primary Linux artifacts.
+- Windows/macOS installers (NSIS/MSI, dmg) are configured but unbuilt.
 
 ## Output bounds (fail-closed, never silently wrong)
 
@@ -80,6 +106,6 @@ Linux**; "not verified" is stated explicitly where it applies.
 
 The credential dialog was verified end-to-end against a local 401 server
 and via integration tests with real `git ls-remote`; **the manual pass
-against GitHub/GitLab/Gitea accounts is a documented remaining gate**
-(`plan/M6-validation.md`). Protected-branch refusals and provider-specific
-SSO flows have not been exercised.
+against GitHub/GitLab/Gitea accounts is a documented remaining gate** (see
+"Manual gates still open" above). Protected-branch refusals and
+provider-specific SSO flows have not been exercised.

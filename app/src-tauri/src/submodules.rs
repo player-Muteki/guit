@@ -1,4 +1,4 @@
-//! Submodule status and init/update (plan/04 写入动作规则, M4-07). The index
+//! Submodule status and init/update. The index
 //! is the authoritative list: mode-160000 records from
 //! `git ls-files --stage -z` give each entry's raw path and recorded commit
 //! without any quoting ambiguity. Per-entry state is then verified with one

@@ -1,4 +1,4 @@
-//! Stash operations (plan/04 写入动作表, M4-01). The frontend addresses
+//! Stash operations. The frontend addresses
 //! entries only by their list position (`u32`); this module is the sole
 //! place that turns a position into a `stash@{N}` selector string, so no
 //! ref-syntax typed by a client ever reaches Git. Apply keeps the entry,

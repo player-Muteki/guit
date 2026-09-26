@@ -273,7 +273,7 @@ pub(crate) fn start_in_slot(
             } else {
                 // `--no-edit` keeps Git from demanding a commit-message
                 // editor; cherry-pick and a plain rebase need nothing
-                // (measured on Git 2.53, plan/04).
+                // (measured on Git 2.53).
                 let args: Vec<&str> = match mode {
                     Start::Merge => vec!["merge", "--no-edit", target],
                     Start::MergeNoFf => vec!["merge", "--no-edit", "--no-ff", target],
@@ -427,7 +427,7 @@ fn decide_step(
         inflight::OperationKindView::Unknown => unreachable!("filtered above"),
     };
     // Measured on Git 2.53: only `merge --continue` and `rebase --continue`
-    // invoke the commit-message editor; plan/04 records the GIT_EDITOR=:
+    // invoke the commit-message editor; GIT_EDITOR=:
     // deviation for those two paths.
     let needs_editor = matches!(step, Step::Continue)
         && matches!(

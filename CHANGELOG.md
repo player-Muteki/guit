@@ -2,7 +2,8 @@
 
 All notable changes to guit are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-SemVer. Milestone development records live in `plan/M*-validation.md`.
+SemVer. This file is the record of what changed; `docs/known-limitations.md`
+is the record of what is not verified.
 
 ## [0.1.0] - 2026-09-25
 

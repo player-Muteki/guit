@@ -1,5 +1,5 @@
 // The single-use ticket flow shared by every destructive action
-// (plan/04 协议): preview → recheck → confirm.
+// preview → recheck → confirm.
 //
 // One controller owns the pending ticket, the modal dialog and the renew
 // hook. A newer snapshot invalidates file IDs, so while a ticket is open

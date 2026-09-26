@@ -53,9 +53,9 @@ baseline is the repository's own empty tree object (established via
 Linux, `open` on macOS, `explorer.exe` on Windows — and does not wait for the
 application. guit does not bundle or manage editor processes.
 
-Note: only the Linux lane has been executed on a development machine;
-the macOS and Windows openers are configured but not yet runtime-verified
-(see `plan/M6-validation.md` platform matrix).
+Note: only the Linux lane has been exercised on a real machine; the
+macOS and Windows openers are configured but not yet runtime-verified
+(see the platform table in `docs/known-limitations.md`).
 
 ## Conflict resolution outside guit
 

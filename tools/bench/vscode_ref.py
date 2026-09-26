@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Bounded reference measurement for plan/07: VS Code SCM sidebar on the same
+"""Bounded reference measurement: VS Code SCM sidebar on the same
 fixture. Not a product benchmark — a scope-limited comparison of one window's
 process tree (guit's tree includes WebKitGTK helpers; VS Code's includes
 Electron helpers). Third-party extensions are excluded via an empty
