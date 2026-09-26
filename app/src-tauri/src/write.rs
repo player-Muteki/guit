@@ -434,7 +434,7 @@ pub struct OperationResult {
     pub message: String,
     /// Redacted first line of Git's stderr on failure; never raw output.
     pub details: Option<String>,
-    /// Heuristic cause for a failed *network* operation (M5-05). A
+    /// Heuristic cause for a failed *network* operation. A
     /// suggestion layer only: it never replaces `details` or the exit
     /// code, and local writes leave it `None`.
     pub category: Option<netclassify::NetCategory>,

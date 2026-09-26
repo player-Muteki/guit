@@ -1,7 +1,7 @@
 // Window behaviour: always-on-top, bounds persistence (viewport pixels plus
-// measured frame, per the M0-05 HiDPI fix), focus refresh, and the
-// compact/restore size test used by Settings. The native title bar stays —
-// this module never sets `decorations: false`.
+// measured frame, which is what survives a scale change), focus refresh, and
+// the compact/restore size test used by Settings. The native title bar stays
+// — this module never sets `decorations: false`.
 
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";

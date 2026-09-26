@@ -5,9 +5,65 @@ All notable changes to guit are documented here. The format follows
 SemVer. This file is the record of what changed; `docs/known-limitations.md`
 is the record of what is not verified.
 
+## [Unreleased]
+
+Everything that has landed since 0.1.0. None of it changes what guit can do to
+your repository; it changes the shape of the window, what a failure tells you,
+and how much of the app one failure can take with it.
+
+### Changed
+
+- The window is a title bar, an app bar (repository, branch chip with
+  ahead/behind, sync, commit, pin), an activity rail, one view at a time and a
+  status bar. Before, all ten areas were cards stacked on one long scrolling
+  page, so staging a change meant scrolling past stash, remotes and worktrees.
+- The six views that need a repository are grey with a reason when none is
+  open; Settings is application-level and stays reachable.
+- Rows act on click and stay legible at a narrow width: at 480 px and below
+  the duplicated wordmark and commit button go, the branch chip keeps a
+  readable floor, names keep their space and details ellipsize instead, and
+  worktree paths wrap onto deliberate lines rather than losing their tail.
+- Settings scrolls as a document, so its sections keep their natural height.
+  List views still scroll inside their own lists.
+- A progress line updates the status bar instead of redrawing the whole window,
+  and changing the interface zoom updates its own readout.
+
+### Fixed
+
+- Failures keep each other. They enter a stack of up to four notices, each with
+  its own close button, so a second failure no longer replaces the first and a
+  watcher refresh can no longer hide one.
+- Cancelling a confirmation returns the keyboard to a control that still
+  exists. The action that opened it is often rebuilt by the preview the dialog
+  is waiting on, and focus was being left on the button that had just gone.
+- The rail's hover hints tell the truth after a repository is open; each one
+  used to keep saying that a repository had to be opened first.
+- Commit and file lists measure their rows in the same units the stylesheet
+  uses, so a zoomed interface no longer draws the wrong number of rows, and a
+  group heading occupies exactly the row it is painted in.
+- Loading an older page of history no longer skips a commit at the seam
+  between pages.
+- Commit rows announce themselves to a screen reader as the selectable items
+  they are; group headings no longer claim to be selectable.
+- A credential prompt that replaces the one already on screen says so, instead
+  of discarding what you had typed without a word.
+- A repository of roughly a thousand files or more reported its submodule list
+  as "output too large" — including repositories with no submodules at all.
+  The index listing now has a bound of its own instead of sharing the small
+  limit meant for one-shot tool output.
+- guit keeps serving later requests after any internal failure. Every shared
+  lock was unwrapped, so one panicked command made each later one fail with "a
+  lock was poisoned", which named neither the data nor the failure you had
+  already seen.
+- A `git` that starts and then never answers is reported as unresponsive. It
+  used to hold the settings view, and the external-tool rows behind it, open
+  forever.
+- The commands guit probes at startup no longer describe themselves with an
+  internal schedule label.
+
 ## [0.1.0] - 2026-09-25
 
-First feature-complete release milestone (M0–M6). Verified on Linux
+First feature-complete release. Verified on Linux
 (Ubuntu 26.04, Git 2.53); Windows and macOS runtime verification is pending
 (see `docs/known-limitations.md`).
 

@@ -1,4 +1,4 @@
-//! Sequencer operations (M4-02/M4-03): starting merges and rebases and
+//! Sequencer operations: starting merges and rebases and
 //! finishing whatever is in progress with continue/abort/skip. Which
 //! operation is in flight is never taken from the client — every
 //! continue/abort/skip re-detects the kind from the repository's own

@@ -1,4 +1,4 @@
-//! Diagnostics ring buffer and export serializer (M6-06, plan decision 11).
+//! Diagnostics ring buffer and export serializer.
 //! Red line: an export never leaves the machine without the user confirming
 //! it, and it carries zero secrets. Two feed points only — constructed
 //! `ProbeError`s (already URL-redacted by construction) and perf marks — and

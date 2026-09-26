@@ -19,7 +19,7 @@ pub struct CloneResult {
     pub success: bool,
     pub cancelled: bool,
     pub message: String,
-    /// Heuristic cause of a Git-level clone failure (M5-05); `None` on
+    /// Heuristic cause of a Git-level clone failure; `None` on
     /// success, cancellation or a local protocol problem.
     pub category: Option<crate::netclassify::NetCategory>,
     /// Fixed advice text paired with `category`.
@@ -148,7 +148,7 @@ pub fn clone_repository(
                 }
             } else {
                 // A clone is a network operation even when the source is
-                // local; the M5-05 classifier gives the honest suggestion.
+                // local; the failure classifier gives the honest suggestion.
                 let detail = last_error_line(&output.stderr);
                 (
                     false,

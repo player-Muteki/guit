@@ -1,10 +1,10 @@
 //! Controlled credential prompting.
 //! The default posture stays non-interactive: every Git process runs with
 //! `GIT_TERMINAL_PROMPT=0` and no `GIT_ASKPASS`, so a credential-protected
-//! remote fails fast and the M5-05 classifier says why. The only way a
-//! secret reaches guit is the explicit "Retry with credentials" path: the
-//! network command arrives with `interactive: true`, which starts a bridge
-//! living exactly as long as that queued operation.
+//! remote fails fast and the network-failure classifier says why. The only
+//! way a secret reaches guit is the explicit "Retry with credentials" path:
+//! the network command arrives with `interactive: true`, which starts a
+//! bridge living exactly as long as that queued operation.
 //!
 //! The bridge is a Unix socket (mode 0600) in a fresh 0700 directory under
 //! `$XDG_RUNTIME_DIR` (the temp dir when unset) guarded by a per-bridge

@@ -668,7 +668,7 @@ mod tests {
 
         // Pop consumes it — from a clean tree again, the way a user would
         // after inspecting the applied changes (a pop whose output would
-        // overwrite local edits is a real Git failure, tested in M2 paths).
+        // overwrite local edits is a real Git failure, tested below).
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();
         let version = version_of(&applied);
         let preview = preview_stash_pop(&writes, &sessions, version, 0).unwrap();

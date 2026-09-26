@@ -1,4 +1,4 @@
-//! Reset (M4-04): three modes at two risk levels. Soft and mixed moves
+//! Reset: three modes at two risk levels. Soft and mixed moves
 //! HEAD (and the index) but never touches file contents, so they ride the
 //! ordinary write queue with the same target discipline as the sequencer:
 //! a full commit id or one exact local branch name, never a revspec

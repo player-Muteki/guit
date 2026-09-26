@@ -862,7 +862,7 @@ mod tests {
         assert_eq!(again.message, "No stale worktree records.");
     }
 
-    // M4-08 cross-module scenario: in-flight detection reads the session
+    // Cross-module scenario: in-flight detection reads the session
     // identity's own git dir, so a merge started inside a linked worktree
     // is visible exactly where it runs — the work tree guit has open and
     // the main checkout see different states.

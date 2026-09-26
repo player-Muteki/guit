@@ -160,7 +160,7 @@ export type ToolResult = {
   snapshot: SnapshotView | null;
 };
 
-// --- references (M3-03) ---------------------------------------------------
+// --- references ---------------------------------------------------
 
 export type BranchRef = {
   name: string;
@@ -198,7 +198,7 @@ export type TagDetail = {
   message: string;
 };
 
-// --- history (M3-02) ------------------------------------------------------
+// --- history ------------------------------------------------------
 
 export type CommitView = {
   oid: string;
@@ -217,11 +217,11 @@ export type HistoryPage = { start: number; commits: CommitView[]; hasMore: boole
 
 export type CommitFileView = { status: string; path: string; oldPath: string | null };
 
-// --- stash (M4-01) --------------------------------------------------------
+// --- stash --------------------------------------------------------
 
 export type StashEntry = { index: number; date: string; subject: string };
 
-// --- worktrees (M4-06) / submodules (M4-07) -------------------------------
+// --- worktrees / submodules -------------------------------
 
 export type WorktreeView = {
   index: number;
@@ -254,7 +254,7 @@ export const SUBMODULE_STATE_LABELS: Readonly<Record<SubmoduleView["state"], str
   unmapped: "no .gitmodules mapping",
 };
 
-// --- remotes (M5-01..03) --------------------------------------------------
+// --- remotes --------------------------------------------------
 
 export type RemoteView = {
   name: string;
@@ -274,7 +274,7 @@ export type PullDefault = {
 
 export type PublishTarget = { name: string; url: string | null };
 
-// --- askpass (M5-06) ------------------------------------------------------
+// --- askpass ------------------------------------------------------
 
 // The payload of one `askpass-request` event: categorised prompt material
 // only. The Rust side has already stripped everything else and can prove
@@ -286,7 +286,7 @@ export type AskPassRequest = {
   user: string | null;
 };
 
-// --- destructive-operation tickets (M2-05, M3-04/05, M4-01/06, M5-01/04) --
+// --- destructive-operation tickets --
 
 export type PreviewKindKey =
   | "discard"

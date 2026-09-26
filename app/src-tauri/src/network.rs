@@ -125,7 +125,7 @@ struct Sweep {
     fetched: Vec<String>,
     failed: Vec<String>,
     /// (exit code, raw stderr) of the first failure; the raw bytes feed
-    /// the M5-05 classifier while `details` keeps only the redacted line.
+    /// the failure classifier while `details` keeps only the redacted line.
     first_failure: Option<(i32, Vec<u8>)>,
     cancelled: bool,
 }
@@ -841,7 +841,7 @@ fn run_pull(
     }
 }
 
-// --- push family (M5-04) ----------------------------------------------------
+// --- push family ----------------------------------------------------
 // Push, publish, remote-branch delete and the lease-guarded force push all
 // ride the same write lane and network budget as fetch. The client names
 // nothing: the branch, upstream, remote and lease value come from a fresh
@@ -941,7 +941,7 @@ fn op_result(
     }
 }
 
-/// Attaches the M5-05 heuristic verdict to a *failed* network result from
+/// Attaches the heuristic verdict to a *failed* network result from
 /// the leg's raw stderr (the classifier redacts per line before matching).
 /// Successes, cancellations and gate refusals never get a category, and
 /// the redacted `details` stay exactly Git's own words.
@@ -2303,7 +2303,7 @@ mod tests {
             (rebase.value.as_str(), rebase.scope.as_str()),
             ("merges", "local")
         );
-        // Measured mapping (plan decision 8): merges rides the merge lane
+        // Measured mapping: a merge rides the merge lane
         // and says so.
         assert_eq!(configured.effective, "merge");
         assert!(
@@ -2864,7 +2864,7 @@ mod tests {
         );
     }
 
-    /// M5-05 end-to-end: an HTTP remote that answers 401 to every request
+    /// End-to-end: an HTTP remote that answers 401 to every request
     /// on the loopback address. No real network or credentials are
     /// involved; Git itself produces the auth failure that guit must
     /// classify honestly (GIT_TERMINAL_PROMPT=0 is baked into every
@@ -3348,7 +3348,7 @@ mod tests {
         }
     }
 
-    /// M5-07 closing reconciliation: local head, its remote-tracking ref
+    /// Closing reconciliation: local head, its remote-tracking ref
     /// and the bare's branch must be the same commit, and both object
     /// stores must still pass Git's own integrity check.
     fn agree(work: &Path, bare: &Path, branch: &str) {

@@ -534,8 +534,8 @@ mod tests {
         );
     }
 
-    /// `M7-11`, `plan/decisions.md` and friends belong to the development log,
-    /// not to a sentence shown in the user's settings.
+    /// A round label or a path into the deleted development plan belongs to
+    /// the development log, not to a sentence shown in the user's settings.
     fn carries_developer_label(text: &str) -> bool {
         let bytes = text.as_bytes();
         bytes

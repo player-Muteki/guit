@@ -1,7 +1,8 @@
 # Known limitations
 
-Honest list as of v0.1.0 (2026-09-25). Everything below was **measured on
-Linux**; "not verified" is stated explicitly where it applies.
+Honest list for the build after v0.1.0 (2026-09-26). Everything below was
+**measured on Linux**; "not verified" is stated explicitly where it applies.
+What changed since v0.1.0 is in `CHANGELOG.md`, not here.
 
 ## Platform coverage
 
@@ -63,7 +64,8 @@ These need a human and a second machine, and are honestly outstanding:
   repository's *file* count rather than with its submodule count. It used to
   share the 64 KB bound meant for one-shot tool output, so any repository of
   roughly a thousand files or more reported the submodule list as too large —
-  including repositories with no submodules at all. Fixed in M7.
+  including repositories with no submodules at all. Fixed since v0.1.0, so a
+  0.1.0 install still has the old behaviour.
 - Extremely large repositories may therefore surface "output too large"
   errors instead of partial listings; manual refresh is always offered.
 
@@ -85,7 +87,7 @@ These need a human and a second machine, and are honestly outstanding:
 - guit shows no file contents, diffs, or editor. Diffs, conflict resolution
   and file opening always leave for external tools
   (see `docs/external-tools.md`).
-- ~~The window has one error alert slot~~ **Fixed in M7-03.** Failures now
+- ~~The window has one error alert slot~~ **Fixed since v0.1.0.** Failures now
   enter a toast stack (top-right, up to four, each with its own close
   button) instead of a single slot, so a second failure no longer replaces
   the first and a watcher refresh can no longer hide it. The old limit

@@ -1,4 +1,4 @@
-// Failure classification for network operations (plan M5-05). The verdict
+// Failure classification for network operations. The verdict
 // is a heuristic suggestion layer only: guit keeps Git's redacted original
 // stderr in `details` and the exit code untouched, and never rewrites the
 // message around a guessed cause. Unknown failures report Other honestly.

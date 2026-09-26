@@ -114,7 +114,7 @@ pub fn run_with_limit(
         .map_err(|error| {
             // An unresolvable executable is the "not installed / not on
             // PATH" failure the user can actually act on, so it must not
-            // hide behind the generic start failure (plan decision 10).
+            // hide behind the generic start failure.
             // Git is named honestly; any other program is reported under
             // its own name so a missing external tool is not blamed on Git.
             if error.kind() == std::io::ErrorKind::NotFound {

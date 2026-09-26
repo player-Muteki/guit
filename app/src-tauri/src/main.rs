@@ -1223,7 +1223,7 @@ async fn remove_remote(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
-/// M5-06: the only interactive entry point for secrets. A bridge exists
+/// The only interactive entry point for secrets. A bridge exists
 /// exactly as long as the queued operation whose command arrived with
 /// `interactive: true`; non-Unix platforms get the documented refusal
 /// from `askpass::Bridge::start`.
@@ -1510,7 +1510,7 @@ async fn credential_status(app: tauri::AppHandle) -> Result<askpass::CredentialV
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
-/// M6-06: writes the fixed diagnostics snapshot to the path the user chose
+/// Writes the fixed diagnostics snapshot to the path the user chose
 /// in the save dialog (the content manifest was confirmed in the UI before
 /// this is ever invoked). The frontend sends only a path; every fact comes
 /// from the backend's own redacted views.
@@ -1596,7 +1596,7 @@ async fn export_diagnostics(app: tauri::AppHandle, path: String) -> Result<Strin
 
 fn main() {
     perf::init();
-    // M5-06: Git spawns this executable as its askpass helper with the
+    // Git spawns this executable as its askpass helper with the
     // prompt as argv. The helper role must be recognised before any GUI
     // machinery runs — a second real instance would only confuse the user.
     #[cfg(unix)]
@@ -1620,7 +1620,7 @@ fn main() {
         .manage(extools::ToolState::default())
         .manage(askpass::AskPassManager::default())
         .setup(|app| {
-            // M6-05: reclaim what a kill -9 left behind — orphaned askpass
+            // Reclaim what a kill -9 left behind — orphaned askpass
             // bridge directories and abandoned atomic-write siblings. The
             // counts are reported but startup never fails over them.
             #[cfg(unix)]
@@ -1769,8 +1769,8 @@ mod tests {
         );
     }
 
-    // Decision 9: a future window.json version is refused fail-closed, the
-    // bytes survive untouched, and the restore path reports no settings, so
+    // A future window.json version is refused fail-closed: the bytes
+    // survive untouched, and the restore path reports no settings, so
     // the frontend keeps the shipped 720x560 default instead of guessing.
     #[test]
     fn future_window_version_is_refused_and_left_untouched() {

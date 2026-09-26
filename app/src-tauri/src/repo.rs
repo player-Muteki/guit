@@ -11,7 +11,8 @@ pub struct RepoIdentity {
     pub candidate: PathBuf,
     pub work_root: Option<PathBuf>,
     pub git_dir: PathBuf,
-    /// Read by the filesystem watcher (M1-07) and write paths later.
+    /// Watched alongside `git_dir`: a linked worktree that moves a shared
+    /// branch changes this directory, and the status has to follow.
     #[allow(dead_code)]
     pub common_dir: PathBuf,
     pub is_bare: bool,
@@ -266,7 +267,7 @@ pub fn status_output(identity: &RepoIdentity, untracked: bool) -> Result<Vec<u8>
     // subcommand. Beyond skipping opportunistic index writes, it stops Git
     // from creating and removing `.git/index.lock` at all: those events fed
     // the file watcher, so a single real change made guit refresh forever
-    // (measured on the M6 tmpfs fixtures, ~3.5 refreshes/s never settling).
+    // (measured on a tmpfs fixture: ~3.5 refreshes/s, never settling).
     command.args(["--no-optional-locks"]);
     // Option values must use the `=` form: `--untracked-files all` would treat
     // `all` as a pathspec and silently report an empty repository.

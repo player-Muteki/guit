@@ -859,7 +859,7 @@ mod tests {
         );
     }
 
-    // Decision 9: forward refusal is fail-closed — a future schema_version is
+    // Forward refusal is fail-closed — a future schema_version is
     // rejected outright, the bytes are left untouched for a later release,
     // and no code path rewrites a file it refused to read.
     #[test]

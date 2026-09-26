@@ -1,4 +1,4 @@
-//! Opt-in phase timing for performance work (M6-01). The marks ship in
+//! Opt-in phase timing for performance work. The marks ship in
 //! release builds but stay silent unless `GUIT_PERF=1` is set in the
 //! environment; when disabled a mark costs one process-wide check. Labels
 //! carry phase names only — never paths, arguments, URLs or output.
@@ -33,7 +33,7 @@ pub fn init() {
 }
 
 /// Mirrors one `[perf]` line to stderr when enabled. The diagnostics ring
-/// always receives the mark; `GUIT_PERF` only gates the mirror (decision 11).
+/// always receives the mark; `GUIT_PERF` only gates the mirror.
 pub fn mark(phase: &str, elapsed: Duration) {
     crate::diagnostics::perf_mark(phase, elapsed);
     if enabled() {

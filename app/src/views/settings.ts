@@ -1,7 +1,8 @@
 // Settings view: General, External tools, Environment & diagnostics and
-// Developer. The M0 probes (git/tool/window checks, compact-window test,
-// diagnostics export manifest, process and transfer probes) live here so
-// the everyday views stay focused on the Git workflow. Theme follows the
+// Developer. The environment probes (git/tool/window checks, the
+// compact-window test, the diagnostics export manifest, the process and
+// transfer probes) live here so the everyday views stay focused on the Git
+// workflow. Theme follows the
 // system by default; the selector is stored in localStorage and applied as
 // a `data-theme` attribute on <html>.
 
@@ -131,7 +132,7 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
 
   element.append(general, environment, developer);
 
-  // --- diagnostics export (M6-06 manifest as the confirmation) ---
+  // --- diagnostics export (the manifest is the confirmation) ---
   const confirm = createConfirmDialog();
   document.body.append(confirm.element);
   confirm.onConfirm(() => void doExport());

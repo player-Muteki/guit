@@ -3,7 +3,7 @@
 // Names come from the backend's fixed-field for-each-ref protocol. Refs
 // whose raw bytes do not round-trip through the display form are listed
 // but flagged non-addressable, so no write action can ever target a
-// look-alike ref name. Per the M7 density rule the everyday verbs (Switch
+// look-alike ref name. By the density rule the everyday verbs (Switch
 // for local branches) stay visible on the row; Merge, Rebase, Rename,
 // Delete and Set upstream live in a per-row `⋯` menu, and every delete
 // goes through the shared preview ticket.
@@ -211,7 +211,7 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
   const buildUpstreamPicker = (branch: BranchRef): HTMLElement => {
     const group = el("div", { class: "file-row ref-row upstream-picker", role: "group", "aria-label": `Choose upstream for ${branch.name}` });
     group.append(el("span", { class: "ref-name", text: `Upstream for ${branch.name}:` }));
-    // M5-02: the picker lists only addressable, non-symbolic remote-tracking
+    // The picker lists only addressable, non-symbolic remote-tracking
     // refs from the last read listing; the backend re-verifies both sides
     // against its own fresh listing before Git runs.
     const candidates = (listing?.remotes ?? []).filter((remote) => remote.addressable && remote.symref === null);
