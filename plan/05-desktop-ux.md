@@ -77,7 +77,11 @@
 
 - 活动栏视图可由 Ctrl/Cmd+1…7 切换；Ctrl/Cmd+R 刷新，Ctrl/Cmd+O 打开仓库，Ctrl/Cmd +/−/0 缩放，Ctrl/Cmd+Enter 提交。
 - 文件列表 `tabindex=0` + 方向键在文件行间移动（跳过组标题、两端钳制）、Home/End 跳转、Enter 折叠/展开所在组，`aria-activedescendant` 报告当前行。提交列表为 `role=listbox`，方向键与 Home/End 移动选中。
-- 菜单、模态支持 Escape 关闭和焦点返回。焦点来源不能只依赖 `document.activeElement`：WebKitGTK 在无控件持有焦点时把它停在滚动容器上，而经行内 `⋯` 菜单触发的动作其触发元素已经离树。`dom.ts` 因此记录最近被激活的可操作元素，模态与菜单从它取还焦目标。快捷键在 Settings → General 列出。
+- 菜单、模态支持 Escape 关闭和焦点返回。取还焦目标有三条规则，缺一条就不成立：
+  1. **来源是"最近被激活的可操作元素"，不是 `document.activeElement`。** `showModal()` 自己接管焦点、关闭时的归还又由 WebKit 决定，所以开对话框那一刻的 `activeElement` 描述的是对话框而不是调用方；WebKitGTK 在无控件持有焦点时还会把它停在 `<body>` 上。`dom.ts` 用一个捕获阶段的 click 监听记录它。
+  2. **opener 属于一次对话框会话，不属于每次刷新。** 票据在每次重发预览时都会再显示一次对话框，若那时重取 opener，拿到的会是对话框自己的按钮，于是还焦把焦点送回一个即将不可见甚至已关闭的节点。
+  3. **触发元素可能已经不在树里。** 危险动作几乎都要先过预览，而预览返回新快照，虚拟列表随即重建行——点"全部丢弃"的那个按钮在对话框出现前就没了。此时不还焦给消失的节点、也不留在对话框里，而是交给壳层指定的稳定替代点：活动栏当前视图项（chrome，永不重建，且是从那里继续导航的合理位置）。
+  快捷键在 Settings → General 列出。
 - 每个文件行左侧有 2px 状态轨，同时行首保留等宽两字母状态码（`M`/`A`/`D`/`R`/`U`/`??`），颜色从不单独承载信息。支持系统高对比度（`prefers-contrast: more` 加深分隔线）、缩放和减少动效（`prefers-reduced-motion: reduce`）。
 - 活动栏按钮带 `aria-label` 与 `aria-current="page"`；图标一律 `aria-hidden`。
 - **脚本写文本的裸 `<span>` 在 WebKitGTK 下不生成可及对象**，状态栏监听模式行与 Settings 缩放读数因此必须带 `role="status"`（它们本身就是要播报的变化），否则读屏用户听不到、AT-SPI 也测不到。其余承载文本的行（文件行、引用行、提交行）都在带 `role="listitem"`/`"option"` 的容器内，文本随容器聚合，无需额外角色。

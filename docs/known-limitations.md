@@ -32,6 +32,12 @@ Linux**; "not verified" is stated explicitly where it applies.
   as a clean repository.
 - `git for-each-ref` (branches/tags list) and history page output are capped
   at 8 MB and refuse truncated input the same way.
+- `git ls-files --stage` (the index listing the submodule view reads) is
+  capped at 32 MB, the same bound as `git status`, because it grows with the
+  repository's *file* count rather than with its submodule count. It used to
+  share the 64 KB bound meant for one-shot tool output, so any repository of
+  roughly a thousand files or more reported the submodule list as too large —
+  including repositories with no submodules at all. Fixed in M7.
 - Extremely large repositories may therefore surface "output too large"
   errors instead of partial listings; manual refresh is always offered.
 

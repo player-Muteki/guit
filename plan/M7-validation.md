@@ -71,28 +71,46 @@ M7 只重做前端呈现层。Rust 后端、Tauri 命令签名、事件名与数
 - `recovery-checks.sh` 阶段 B 的 `Unsupported` 断言一度失败，是**遗留进程**抢占 AT-SPI 应用名所致（见下"基准脚本口径"第 5 条），不是应用行为。
 - `make-repo.sh` 的 `dirty` 参数在提交**之前**追加内容，所以它造的夹具工作副本始终是干净的，M0–M6 的基线表里 1k/10k 两档其实从未渲染过文件行。本轮补 `make-dirty-repo.sh`（提交后再改脏，并让暂存/未暂存/删除/未跟踪同时存在）来真正走通行内路径。
 
+## 第二轮修复（2026-09-26，接上一轮之后的「继续修复」）
+
+上一轮把三件事如实留开，本轮逐一处理。其中第 1 条推翻了上一轮自己的一个结论。
+
+1. **`show()` 在票据重发时覆盖 opener，焦点被留在已关闭的对话框里**（真缺陷，已修并补运行时断言）。
+   上一轮只做到了「四条关闭路径统一还焦 + opener 取自激活元素记录」，仍不工作。逐步定位：
+   - 触发按钮在预览返回新快照后被虚拟列表**重建**，`lastActivator.isConnected` 为 false → 无 opener 可还；
+   - 于是加了文档化的替代点（`shell.focusRail()`，活动栏当前视图项，是不会被重建的 chrome）；
+   - 但仍失败，诊断显示 `branch=restore:BUTTON.btn btn-danger`——opener 竟是**对话框自己的确认按钮**。
+   根因：`show()` 每次都重取 opener，而票据在每次重发预览时都会再 `show()` 一次；那时对话框里的确认按钮已经持有焦点，于是 opener 被自己覆盖。**修法**：`if (!element.open) opener = currentActivator();`——opener 属于一次对话框会话，不属于每次刷新。
+   另外把 `currentActivator()` 的优先级从「先看焦点」改成「先看点击记录」：`showModal()` 自己接管焦点、关闭时的归还又由 WebKit 决定，所以开对话框那一刻的 `activeElement` 描述的是对话框而不是调用方。
+   证据：`view-smoke.py` 两条新断言（触发元素仍在 → 精确回到 `Export diagnostics…`；触发元素已重建 → 落到活动栏 `Changes`），三次连跑全绿。
+2. **`git ls-files --stage -z` 沿用 64 KB 默认捕获上限，约千级文件即触顶**（真缺陷，已修 + 回归测试）。
+   该命令每条记录约 50 字节加路径，大小随**文件数**而非子模块数增长，却和一次性工具输出共用 `DEFAULT_OUTPUT_LIMIT`。后果：任何约千文件以上的仓库都报 `submodules_list_too_large`，**包括一个子模块都没有的仓库**（那本应得到「没有子模块」这个正常答案），并且每次刷新都弹一条错误 toast。改为 `GITLINK_OUTPUT_LIMIT = runner::STATUS_OUTPUT_LIMIT`（32 MB，与 status 同量级，覆盖几十万文件）。回归测试 `an_index_larger_than_the_default_capture_limit_still_lists` 造 1200 文件的索引，并**断言夹具本身超过旧上限**（否则测试什么也证明不了）；把常量改回旧值该测试确实失败，已验证。修后同一 1200 文件夹具的子模块段显示「No submodules.」、无错误日志。
+3. **`probe::tests` 的 ETXTBSY 单发 flake**（已修，见「已知缺口」第 1 条）。
+4. **启动清扫把 `remove_dir_all` 的失败静默吞掉**（可诊断性缺陷，已修）。`sweep_stale_bridges_in` 用 `.is_ok()` 决定计数，失败时既不计数也不出声；而这个计数是启动时唯一上报的东西，于是「扫不掉」与「本来就没有」在用户看来完全一样。现在失败会 `eprintln!` 出具体目录与错误。
+
 ## 验证清单（本轮实测结果）
 
 | 项目 | 判据 | 结果 |
 | --- | --- | --- |
 | 类型检查与构建 | `tsc --noEmit && vite build` | ✅ 0 error；`index.css 20.83 kB` / `index.js 94.71 kB`（gzip 4.26 / 27.83 kB） |
 | 前端单元 | `npm run test:fixture` | ✅ **18/18**（file-model 9、history-model 5、state 4） |
-| Rust 回归 | `cargo test --locked` | ✅ 292 + 5；22 次全量中 2 次单发失败，20 次全绿（已定位用例，见"已知缺口"） |
+| Rust 回归 | `cargo test --locked` | ✅ **293 + 5**（新增读上限回归测试）；ETXTBSY flake 修复后连续 12 次全量全绿，另有一处 askpass 单发 flake 如实留开（见「已知缺口」） |
 | 格式 | `cargo fmt --check`、`git diff --check` | ✅ 均无输出 |
 | clippy | 存量不增 | ✅ 恒 12 条（7 bin + 5 test-only），`app/src-tauri/` 零改动故必然等同 |
-| 空态契约 | AT-SPI 命中 `Open a repository to list its working copy status.` | ✅ `recovery-checks.sh` 19 断言 fail=0（阶段 A、B） |
+| 空态契约 | AT-SPI 命中 `Open a repository to list its working copy status.` | ✅ `recovery-checks.sh` **20** 断言 fail=0（阶段 A、B） |
 | 损坏索引 | 不得出现 `Working copy is clean.` | ✅ 阶段 C（`fatal:.*\.git/index` 命中 + 负向断言） |
 | 陈旧 index.lock | 只读穿透、绝不写用户的锁 | ✅ 阶段 D（`tracked\.txt` 命中 + 负向断言 + 锁文件 sha256 不变） |
-| 视图标题与可达性 | 活动栏七项各自打开并显示自己的内容 | ✅ `view-smoke.py` 19 断言 fail=0 |
+| 视图标题与可达性 | 活动栏七项各自打开并显示自己的内容 | ✅ `view-smoke.py` **22** 断言 fail=0 |
 | 空仓库时只显欢迎态 | 六个仓库级视图置灰，Settings 可达 | ✅ `view-smoke.py` + `diagnostics-export-check.sh`（后者从 Settings 驱动） |
 | 提交计数 | 历史就绪行 `N commit(s)` 仍可见 | ✅ `bench_run.py --history-pages` 路径（见性能表） |
 | 诊断导出 | 按钮名 `Export diagnostics…`、模态确认 `Export…`、原生 `Save`、落盘内容与脱敏 | ✅ `diagnostics-export-check.sh` 10 断言 fail=0 |
 | 窄窗口 | 340×400 主要动作仍可达 | ✅ `narrow-smoke.py` 9 断言 fail=0（活动栏 7/7、应用栏主动作、分支芯片、提交框、缩放控件、行内 `⋯` 全部在树内且 SHOWING；窗口可复原） |
 | 明暗双主题 | 两套令牌都在、决定可读性的令牌两套都不同；三个选项都能选中并落库 | ✅ `theme-check.py` 17 断言 fail=0 |
 | 模态 | 丢弃预览 → 列出候选 → 取消关闭 → 票据未消费 | ✅ `view-smoke.py`（模态文案、候选清单、`Cancelled; nothing was changed.`、`git status --porcelain` 前后逐字相同） |
-| Toast 不覆盖 | 连续两次失败同时可见 | ⚠️ 运行时无法稳定制造两次**抛出型**失败；改为在 `app/tests/state.mjs` 单测证明栈语义（追加不覆盖、按 id 独立关闭、封顶 4 条丢最旧），抛出型路径的运行时证据沿用 `recovery-checks.sh` 阶段 B/C |
+| 焦点返回 | 触发元素仍在 → 精确回该按钮；触发元素已被重建 → 落到文档化替代点 | ✅ `view-smoke.py` 两条断言 fail=0（第二条即本轮修的缺陷） |
+| Toast 不覆盖 | 多条失败同时可见 | ✅ **运行时已证**：`recovery-checks.sh` 阶段 B 新增断言，从**同一份**可及树快照里同时读到 session / recent / window 三条互不相同的拒绝文案（旧的单告警位只能留住最后一条）。该断言做过反向验证：掺入一条树中永不存在的文案即 fail。另有 `app/tests/state.mjs` 单测证明栈语义（追加不覆盖、按 id 独立关闭、封顶 4 条丢最旧） |
 | History 分页 | 10k 提交夹具点「Load older」无全表重建回退 | ✅ 12 次点击 0.021–0.045 s/页，中位 0.036 s |
-| 打包 | `tauri build --bundles deb,rpm,appimage` 零告警 | ✅ 三件齐出，**无任何 warning 行**（AppImage 需 `APPIMAGE_EXTRACT_AND_RUN=1`） |
+| 打包 | `tauri build --bundles deb,rpm,appimage` 零告警 | ✅ 三件齐出，**无任何 warning 行**（AppImage 需 `APPIMAGE_EXTRACT_AND_RUN=1`）：deb 4,276,308 / rpm 4,276,055 / AppImage 85,535,224 B |
 | rpm 载荷 | 载荷内有可执行的 `usr/bin/guit` | ✅ `bsdtar` 解出 4 图标 + desktop + `usr/bin/guit`（`rpm2cpio`/`rpm` 本机无，记录非失败） |
 | AppImage 冒烟 | 隔离 HOME 启动到 Changes 视图 | ✅ `APPIMAGE_EXTRACT_AND_RUN=1` 下启动，AT-SPI 命中 `Commit message` 与 `Monitor: ` |
 
@@ -139,16 +157,18 @@ History 分页（hist10k，PAGE_SIZE=50，点「Load older」到行数落定）�
 ## 已知缺口（如实记录）
 
 - **Windows/macOS 未实测**（延续 0.1.0 口径）：无运行时验证，仅配置到位。
-- **焦点无法用 AT-SPI 验证。** 实测该宿主的 AT-SPI 桥把 `FOCUSED` 状态**粘住**（点开应用栏 `⋯` 聚焦首项，再点活动栏 History，旧节点仍报 FOCUSED），且 `do_action` 不移动 DOM 焦点。因此焦点返回/取焦的断言全部从 `view-smoke.py` 移除，改为代码层保证（四条关闭路径统一 `leave()`、`openMenu`/应用栏菜单对称还焦、opener 取自激活元素记录）。**焦点行为本轮未经运行时验证**，与 M6 记录的 Wayland 键盘注入缺口同源。
+- ~~焦点无法用 AT-SPI 验证~~ **上一轮的判断是错的，本轮已推翻并补上运行时断言。** 当时据 `probe9` 的读数认定该宿主的 `FOCUSED` 状态粘住；重做对照实验（点活动栏按钮后无任何节点残留 `FOCUSED`）证明状态是可信的，`probe9` 那次读到旧节点是因为 `openMenu` 正在**正确地**把焦点还给它的锚点按钮。真正的缺陷另有其人，见下文「第二轮修复」第 1 条。`view-smoke.py` 现在断言两条路径：触发元素仍在时焦点精确回到该按钮；触发元素已被重建时焦点落到文档约定的替代点（活动栏当前视图项）。
 - **Toast 栈的"不覆盖"只有单测证据**：见验证清单中该行的说明。
-- **`cargo test` 单发 flake（已定位到用例）**：本轮 22 次全量里 2 次 291/292，失败用例是 `probe::tests::unsupported_git_reports_update_guidance`，报错 `git_start_failed: Text file busy (os error 26)`。该用例 `std::fs::write` 写一个 `#!/bin/sh` 假 git 后立刻 `execve` 它，偶发 ETXTBSY（内核在该 inode 上仍见写句柄）。**单独跑该用例 40 次全绿**，只在与全量 292 个用例并发时出现，故属并发/内核时序而非用例逻辑。与 M6-03/M6-06 记录的同类单发画像一致。**未修**：修它要动 `src-tauri/src/probe.rs` 的测试代码，越出 M7「后端零改动」边界；可能的修法（写后 `sync_all` 再 exec、或对 ETXTBSY 做有限重试）留给后续独立议题。
+- **`cargo test` 的两处单发 flake**：
+  1. **已修**：`probe::tests::unsupported_git_reports_update_guidance` 偶发 `git_start_failed: Text file busy (os error 26)`（约 1/10 全量）。该用例写完 `#!/bin/sh` 假 git 立刻 `execve`；`Command::current_dir` 使标准库走 fork 而非 posix_spawn，全量并发时子进程可能在新建 inode 仍带写路径时抵达 `execve`，内核回 ETXTBSY。单独跑该用例 40 次全绿。修法是**在测试层**做有限重试（`probe.rs` 的 `retry_transient_spawn`）：产品代码 exec 的是用户自己的 `git`、从不写它，把重试放进 `git_at` 只会掩盖真实可执行文件的 text busy。重试全部 `git_start_failed` 也不会掩盖任何东西——脚本能启动但行为不对时报的是 `git_version_failed`。同形状的 `timeout_terminates_descendants_holding_output_pipes` 一并收敛。
+  2. **未修，如实留开**：`askpass::tests::the_bridge_sweep_removes_a_socket_file_left_by_a_dead_listener` 偶发返回 0 而非 1（约 1/20 全量；M6-06 已记录过同一用例的单发失败）。已把范围收窄到两个候选：被丢弃的 listener 之后 `connect()` 意外成功（则判为活桥、不扫），或 `remove_dir_all` 失败而计数被 `.is_ok()` 静默吞掉。加了临时诊断（记录 connect 结果与 remove 错误）后**连续 85 次全量未复现**，故无法判定归属，不宣称已修。第二候选的静默吞错本身是真缺陷，已修（见「第二轮修复」第 4 条），但它不是这个 flake 的已证根因。
 - **外部 diff/merge 工具的失败文案走状态栏而非 Toast**：与 0.1.0 逐字一致，也符合 `plan/05`"结果文案走状态栏"；代价是它会被下一次状态更新覆盖。本轮按现状保留，如实记录。
-- **1k/10k 夹具在 `submodules_list_too_large` 上失败**：`git ls-files --stage` 走 `DEFAULT_OUTPUT_LIMIT`（64 KB），约千级文件即触顶，于是该档 Changes 列表为空并弹出该错误。**这是 M7 之前就有的后端读上限**（`app/src-tauri/` 零改动，`known-limitations.md`「Output bounds」已记载），M7 未引入也未修复；因 M7 明确不改后端，本轮不擅动，留作独立议题。1k/10k 两档的 L2 因此命中的是空态占位而非填充列表，与 M6 同。
+- ~~1k/10k 夹具在 `submodules_list_too_large` 上失败，该档 Changes 列表为空~~ **上一轮这条记错了，本轮已更正并修复。** 当时写的是「Changes 列表为空并弹出该错误」——**这是错的**：`submodule_status` 是独立命令、不参与快照，1200 文件的脏夹具实测 Changes 列表完整（`Staged changes (80)`、76 行可见、无 "Working copy is clean."），坏的只有 Worktrees 视图里的子模块段。那两档之所以看起来是空的，真正原因是 `make-repo.sh` 的 `dirty` 在提交前追加（工作副本本来干净），与读上限无关。读上限本身仍是真缺陷且已修，见「第二轮修复」第 2 条。
 - **AppImage 需 `APPIMAGE_EXTRACT_AND_RUN=1`**（见"环境"）。
 - `docs/known-limitations.md` 的「单一错误告警位」条目已改为 M7-03 修复记录。
 
 ## 运行时结果
 
-**全部门槛已在本机实跑。** 逐项命令与数字见上表与性能表；`recovery-checks.sh` 19/19、`diagnostics-export-check.sh` 10/10、`view-smoke.py` 19/19、`narrow-smoke.py` 9/9、`theme-check.py` 17/17 均 fail=0，五套连跑后无残留进程。类型检查、构建、18 个前端单测、292+5 Rust 单测、`fmt --check`、`clippy` 存量、三件打包均通过。
+**全部门槛已在本机实跑。** 逐项命令与数字见上表与性能表；`recovery-checks.sh` 20/20、`diagnostics-export-check.sh` 10/10、`view-smoke.py` 22/22、`narrow-smoke.py` 9/9、`theme-check.py` 17/17 均 fail=0，五套连跑后无残留进程。类型检查、构建、18 个前端单测、293+5 Rust 单测、`fmt --check`、`clippy` 存量、三件打包均通过。
 
 结论：**M7 达成 Linux 已验证出口**；本记录与用户文档处处只作单机结论，不含三平台声明。
