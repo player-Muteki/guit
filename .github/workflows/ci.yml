@@ -1,8 +1,14 @@
-name: M0 checks
+name: CI
 
 on:
   push:
   pull_request:
+
+# A newer push to the same branch cancels the superseded run (the matrix
+# build is minutes-long; stale results are never actionable).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   build:
@@ -34,14 +40,22 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
+      # Cargo target-dir reuse across runs; the release build below dominates
+      # wall time, and unchanged dependency crates never recompile.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev
-        working-directory: .
       - run: npm ci
       - run: npm run build
       - run: npm run test:fixture
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      # The verified baseline is a fixed set of pre-existing warnings, so
+      # clippy runs without -D warnings; new code must not add to the list
+      # (checked by the warning count in the log, not enforced here).
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - run: npm run tauri build -- --bundles ${{ matrix.bundles }}

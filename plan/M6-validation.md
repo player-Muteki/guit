@@ -386,6 +386,14 @@ The lane that *is* unverified (Win/mac, real providers, CI) is enumerated
 above and in user docs. This release is **Linux-verified only** — that
 claim is stated in every document.
 
+Addendum (2026-09-25, after milestone close): the single `m0.yml` was
+split into `ci.yml` (push/PR gates — fmt, clippy, tests, fixtures,
+per-platform bundles, concurrency cancellation) and `release.yml`
+(`v*` tags → three-platform bundles → **draft** GitHub release with the
+verified-scope statement in the body; publication stays human). The CI
+blocker above is unchanged in substance: prepared, **never executed**
+(no remote).
+
 ### M6-07 reproduction
 
 ```sh
