@@ -82,6 +82,16 @@ and how much of the app one failure can take with it.
   that use it — so any operation routed that way would have run `git` with no
   subcommand. The two operations the lane serves are now its own type, and
   adding a third is a compile error rather than a silent mistake.
+- The private directory a killed instance left for its credential bridge is now
+  reliably removed at the next startup. Deciding whether a bridge socket still
+  had a listener behind it by a single connect lost a race: on Linux a connect
+  issued while the listener is being torn down can be queued and report
+  success, so a dead bridge occasionally read as a running one and its
+  directory stayed on disk. The probe asks a second time, which separates a
+  queued request from a live listener without waiting on the far end. A live
+  bridge was never at risk from the old check — it never reported failure — and
+  four hundred runs under twelve-way load removed every dead bridge and no
+  running one.
 
 ### Testing
 

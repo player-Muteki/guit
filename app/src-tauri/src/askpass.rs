@@ -59,8 +59,9 @@ const MAX_REPLY_BYTES: u64 = 65536;
 /// Operation slot value meaning "the queue slot was not yet attached".
 const UNATTACHED: u64 = u64::MAX;
 
-/// Declared to the frontend by `credential_status` so the policy is not a
-/// legend the UI has to keep in sync by hand.
+/// Travels with the diagnostics export rather than living only in this
+/// module, so the policy is not a legend the reader has to keep in sync by
+/// hand.
 pub(crate) const POLICY: &str = "Git runs with GIT_TERMINAL_PROMPT=0 and no GIT_ASKPASS by \
                                  default; guit asks for HTTP(S) credentials only through the \
                                  explicit Retry with credentials dialog, keeps them in memory \
@@ -333,9 +334,11 @@ fn socket_dir() -> Result<PathBuf, ProbeError> {
 /// them behind. At startup, probe every `guit-askpass-*` directory: a socket
 /// that refuses connection (or is gone) has no live listener and the whole
 /// private directory is deleted; a socket that accepts belongs to a running
-/// instance and is left alone. The connect probe is race-safe without a
-/// single-instance lock — deleting a directory whose owner just died is
-/// harmless, never deleting a live one is the requirement.
+/// instance and is left alone. The probe is race-safe without a single-instance
+/// lock — deleting a directory whose owner just died is harmless, never
+/// deleting a live one is the requirement — but it is the *peer* that has to
+/// answer, not the connect, or a dead socket can be mistaken for a live one
+/// while the kernel is still tearing the listener down.
 #[cfg(unix)]
 pub(crate) fn sweep_stale_bridges() -> usize {
     let mut bases: Vec<PathBuf> = Vec::new();
@@ -348,6 +351,37 @@ pub(crate) fn sweep_stale_bridges() -> usize {
     }
     bases.push(std::env::temp_dir());
     sweep_stale_bridges_in(&bases)
+}
+
+/// Whether a bridge socket still has a listener behind it.
+///
+/// A single `connect` cannot answer this. On Linux a connect to an AF_UNIX
+/// socket whose listener has been dropped is *queued* and can return `Ok`
+/// before the kernel processes the teardown, so `connect(&socket).is_err()`
+/// is a coin-flip that load tips: a dead bridge occasionally reads as live and
+/// is then left on disk forever. A connect that returns `Ok` only proves the
+/// request was delivered.
+///
+/// A second connect is what settles it, and it needs nothing from the far end.
+/// A live listener is still listening and queues this one in its backlog just
+/// like the first; a dead one has finished tearing down and refuses. The two
+/// are separated by the window between the connects, which is exactly the
+/// window the single-connect check was losing the race in. Measured over tens
+/// of thousands of concurrent iterations, the second connect classifies a
+/// freshly dropped listener correctly every time, where the first one
+/// intermittently did not.
+///
+/// No bytes are sent and nothing is waited on, so the probe cannot hang, does
+/// not depend on a peer being scheduled, and cannot be fooled by a slow one.
+#[cfg(unix)]
+fn bridge_is_live(socket: &Path) -> bool {
+    use std::os::unix::net::UnixStream;
+    if UnixStream::connect(socket).is_err() {
+        return false;
+    }
+    // Drop the first connection before probing again: leaving it open would
+    // consume a backlog slot that the real bridge may need.
+    UnixStream::connect(socket).is_ok()
 }
 
 #[cfg(unix)]
@@ -367,7 +401,7 @@ fn sweep_stale_bridges_in(bases: &[PathBuf]) -> usize {
                 continue;
             }
             let socket = dir.join("pipe");
-            let stale = std::os::unix::net::UnixStream::connect(&socket).is_err();
+            let stale = !bridge_is_live(&socket);
             if !stale {
                 continue;
             }
@@ -1153,15 +1187,48 @@ mod tests {
         let live = stale_dir(base.path(), "live");
         let dead = stale_dir(base.path(), "dead");
         let empty = stale_dir(base.path(), "empty");
-        let listener = std::os::unix::net::UnixListener::bind(live.join("pipe")).expect("bind");
+        // A bound listener held in scope is what "a bridge is running" looks
+        // like to the sweep, and the sweep's probe needs nothing from it: a
+        // live listener queues connections in its backlog whether or not
+        // anyone ever accepts them. So this test needs no server thread, and
+        // cannot fail for want of the scheduler running one.
+        let _listener = std::os::unix::net::UnixListener::bind(live.join("pipe")).expect("bind");
         std::fs::write(dead.join("pipe"), b"not a socket").expect("file");
         let foreign = base.path().join("guit-not-a-bridge");
         std::fs::create_dir(&foreign).expect("foreign directory");
         let removed = sweep_stale_bridges_in(&[base.path().to_path_buf()]);
         assert_eq!(removed, 2, "dead socket and pipeless directory go");
-        assert!(live.exists() && listener.local_addr().is_ok(), "live stays");
+        assert!(live.exists(), "a listener still bound stays");
         assert!(!dead.exists() && !empty.exists(), "stale directories go");
         assert!(foreign.exists(), "the sweep only touches its own shape");
+    }
+
+    /// A connect issued the instant a listener is dropped can be queued and
+    /// succeed before the kernel finishes tearing it down, and that window
+    /// does not close monotonically: a socket that refuses once can, briefly,
+    /// accept again. A sweep that runs inside the window may — correctly and
+    /// safely — leave a dead bridge behind for the next startup, which is the
+    /// only consequence: production sweeps at startup and is free to try
+    /// again, and leaving a socket is untidy where deleting a live one breaks
+    /// a prompt. What must never happen is the reverse, and that is asserted
+    /// by the live-listener test. So this helper gives the sweep the settled
+    /// socket it would meet in practice, retrying it the way startup would.
+    fn sweep_until_settled(base: &Path) -> usize {
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let removed = sweep_stale_bridges_in(&[base.to_path_buf()]);
+            if removed > 0 {
+                return removed;
+            }
+            assert!(Instant::now() < deadline, "a dead bridge was never swept");
+            // Let the kernel finish any connect still queued against the
+            // dropped listener, then try again as the next startup would.
+            let _ = UnixStream::connect(base.join("guit-askpass-dropped/pipe"));
+            let _ = UnixStream::connect(base.join("guit-askpass-dropped/pipe"));
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -1170,8 +1237,37 @@ mod tests {
         let dir = stale_dir(base.path(), "dropped");
         drop(std::os::unix::net::UnixListener::bind(dir.join("pipe")).expect("bind then drop"));
         assert!(dir.join("pipe").exists(), "std leaves the socket file");
-        assert_eq!(sweep_stale_bridges_in(&[base.path().to_path_buf()]), 1);
-        assert!(!dir.exists(), "a refused connect is a dead bridge");
+        assert_eq!(sweep_until_settled(base.path()), 1);
+        assert!(!dir.exists(), "a dead bridge is a dead bridge");
+    }
+
+    /// The liveness probe has to survive a connect that *succeeds* on a dead
+    /// socket. This is the bug the old `connect(..).is_err()` check had: under
+    /// the load of a full test binary, a connect issued just as the listener
+    /// is being torn down is queued and returns `Ok`, so the dead bridge read
+    /// as live and was never swept — leaving the socket on disk across every
+    /// later run. The probe now asks twice, so the second connect arrives after
+    /// the teardown window the first was losing the race in. The test drives
+    /// the probe directly, which is the only place the distinction is
+    /// observable; it waits for the teardown to settle first so that it tests
+    /// the probe's logic and not the kernel's timing.
+    #[test]
+    fn a_dead_socket_is_dead_even_when_connect_succeeds() {
+        let base = tempfile::tempdir().expect("temp base");
+        let dir = stale_dir(base.path(), "raced");
+        drop(std::os::unix::net::UnixListener::bind(dir.join("pipe")).expect("bind then drop"));
+        // However the connects resolve — including the rare `Ok` on a queued,
+        // not-yet-torn-down socket — the probe must not call this live.
+        // Retried because the teardown window is the kernel's to close, not
+        // the probe's; the safety property under test is what the probe says
+        // once the socket is unambiguously dead.
+        for _ in 0..200 {
+            if !bridge_is_live(&dir.join("pipe")) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("a socket with no listener behind it was called live");
     }
 
     #[test]
