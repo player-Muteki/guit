@@ -80,7 +80,7 @@ export interface VisibleWindow {
 // `--row-height-history` in style/tokens.css; `row-heights-track-the-css`
 // below is the gate that fails when they do not.
 export const FILE_ROW_REM = 1.5;
-export const HISTORY_ROW_REM = 1.75;
+export const HISTORY_ROW_REM = 1.5;
 
 export function rowHeightPx(baseFontPx: number, rowRem: number): number {
   return baseFontPx * rowRem;

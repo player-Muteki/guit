@@ -122,8 +122,8 @@ def main():
     report.check("--row-height is still 1.5rem (fileModel.FILE_ROW_REM)",
                  match is not None and abs(float(match.group(1)) - 1.5) < 1e-9,
                  match.group(1) if match else "missing")
-    report.check("--row-height-history is still 1.75rem (fileModel.HISTORY_ROW_REM)",
-                 history is not None and abs(float(history.group(1)) - 1.75) < 1e-9,
+    report.check("--row-height-history is still 1.5rem (fileModel.HISTORY_ROW_REM)",
+                 history is not None and abs(float(history.group(1)) - 1.5) < 1e-9,
                  history.group(1) if history else "missing")
 
     # 7. Zoom range and the stylesheet's largest fixed text size have to be

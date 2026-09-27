@@ -114,24 +114,30 @@
      short window kept a 40px app bar because the winner was this block, not
      the breakpoint. */
   --row-height: 1.5rem;   /* 24px file rows */
-  --row-height-history: 1.75rem;
+  --row-height-history: 1.5rem;
   /* Commit-graph metrics. `--graph-lane` and `--graph-node` must match
      GRAPH_LANE_REM / GRAPH_NODE_REM in historyModel.ts; a test gates it.
-     rem, not px, so the graph grows with interface zoom. */
-  --graph-lane: 1rem;
-  --graph-node: 0.3125rem;
+     rem, not px, so the graph grows with interface zoom.
+     The lane and the dot are sized against each other: a merge is a ring
+     around the dot, and two rings sitting in neighbouring lanes must not
+     touch, so the dot plus half the ring's stroke has to stay inside half a
+     lane. Shrinking the lane to make the gutter narrower is therefore paid
+     for out of the dot, not out of the spacing. */
+  --graph-lane: 0.8125rem;
+  --graph-node: 0.34375rem;
+  --graph-ring: 0.11rem;
   /* Stroke weights, in rem so the drawing thickens with interface zoom along
      with the lanes and the dots. Three tiers, matching what a row is doing:
      carrying the mainline is a hairline, a lane running past is light, a row
      where the shape of the work changed is full. The underlay beneath each
      stroke is a fixed multiple wider than the line it backs, which is what
      keeps a crossing readable without either line being faded. */
-  --graph-stroke-hairline: 0.09rem;
-  --graph-stroke-lane: 0.105rem;
-  --graph-stroke-strong: 0.14rem;
-  --graph-under-hairline: 0.2rem;
-  --graph-under-lane: 0.26rem;
-  --graph-under-strong: 0.36rem;
+  --graph-stroke-hairline: 0.1rem;
+  --graph-stroke-lane: 0.115rem;
+  --graph-stroke-strong: 0.15rem;
+  --graph-under-hairline: 0.22rem;
+  --graph-under-lane: 0.28rem;
+  --graph-under-strong: 0.38rem;
   /* Commit-row column widths. Fixed so the subject's left edge and the
      author/date columns line up down the whole list. rem, not px, so they
      hold under interface zoom. The refs column gives up its width on a

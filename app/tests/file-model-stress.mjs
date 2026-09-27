@@ -122,7 +122,7 @@ test("rowHeightPx spans the whole zoom range without hitting zero", () => {
     }
   }
   assert.equal(rowHeightPx(16, FILE_ROW_REM), 24);
-  assert.equal(rowHeightPx(16, HISTORY_ROW_REM), 28);
+  assert.equal(rowHeightPx(16, HISTORY_ROW_REM), 24);
   assert.equal(rowHeightPx(0, FILE_ROW_REM), 0);
 });
 

@@ -34,11 +34,12 @@ export function buildHistoryRows(commits: readonly CommitView[]): HistoryRow[] {
 // because the whole point of a zoomable interface is that the graph grows
 // with it. The lane is a full rem wide so a curve leaving the mainline has
 // somewhere to go before it settles into its own column.
-export const GRAPH_LANE_REM = 1;
+export const GRAPH_LANE_REM = 0.8125;
 // The dot has to be findable at a glance down a long list without shouting
-// over the line it sits on. A merge ring is this plus its stroke, and two
-// neighbouring rings still clear each other inside one lane's width.
-export const GRAPH_NODE_REM = 0.3125;
+// over the line it sits on, and it has to leave room for the ring a merge
+// draws around it: two rings in neighbouring lanes must not touch, so the dot
+// plus half the ring's stroke stays inside half a lane.
+export const GRAPH_NODE_REM = 0.34375;
 
 export function graphLanePx(baseFontPx: number): number {
   return baseFontPx * GRAPH_LANE_REM;
