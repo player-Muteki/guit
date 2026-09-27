@@ -65,6 +65,44 @@ and how much of the app one failure can take with it.
 - The commands guit probes at startup no longer describe themselves with an
   internal schedule label.
 
+### Removed
+
+- Two command endpoints that nothing called: one that read the stored window
+  geometry (the backend already reads it directly while restoring the window)
+  and one that reported credential posture (the diagnostics export reads it
+  directly). Both were reachable from the webview and neither was ever used.
+- A graph-layout helper that only its own tests called. Lane assignment now
+  goes through the one function that does the work.
+
+### Fixed
+
+- Staging and unstaging can no longer be given an operation they do not
+  implement. The write lane picked its Git arguments from a table covering
+  every operation, and returned an empty argument list for all but the two
+  that use it — so any operation routed that way would have run `git` with no
+  subcommand. The two operations the lane serves are now its own type, and
+  adding a third is a compile error rather than a silent mistake.
+
+### Testing
+
+- Every command the backend registers is checked against the frontend source,
+  in both directions: an endpoint no view calls and a view calling an endpoint
+  that does not exist both fail the suite. Joining the two halves of the app
+  is done with a string, so neither the compiler nor any existing test
+  covered a rename on either side.
+- The confirmation paths for the two most destructive operations — a hard
+  reset and a force push — are covered for cancellation, for a repository
+  switch, for a partial overwrite list, and for a reported Git failure. Each
+  new test was checked by removing the code it covers and confirming it fails.
+- The five-second polling fallback, promised when a repository exhausts its
+  filesystem watch limit, is now decided by a function that can be tested
+  without an application window, and the mode shown in the window is checked
+  against the mode the diagnostics report reads.
+- The flake-tallying harness no longer reports success for rounds it never
+  ran. It passed its own command through `xargs -I`, which strips the inner
+  quotes, so the redirection and the bookkeeping were lost and every round
+  looked like it had passed.
+
 ## [0.1.0] - 2026-09-25
 
 First feature-complete release. Verified on Linux

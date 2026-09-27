@@ -3685,4 +3685,209 @@ mod tests {
         fsck_clean(&work);
         fsck_clean(&bare);
     }
+
+    /// A force push that is cancelled after the ticket is confirmed but
+    /// before the push starts must not reach the remote, and the ticket is
+    /// spent either way. The lease is already pinned at this point, so the
+    /// only thing standing between a cancel and an overwrite is this gate.
+    #[test]
+    fn a_cancelled_force_push_spends_its_ticket_and_pushes_nothing() {
+        let (root, work) = mirrored();
+        diverged(root.path(), &work);
+        git(&work, &["fetch", "-q", "origin"]);
+        let bare = root.path().join("origin.git");
+        let bare_tip = read(&bare, &["rev-parse", "main"]);
+        let (state, sessions, version) = pull_env(&work);
+        let preview = preview_force_push(&state, &sessions, version).unwrap();
+
+        state.begin().unwrap();
+        state.cancel_flag().store(true, Ordering::SeqCst);
+        let cancelled =
+            run_force_push(&state, &sessions, &preview.nonce, None, &mut |_| {}).unwrap();
+        state.finish();
+        assert_eq!(
+            cancelled.outcome,
+            Outcome::Cancelled,
+            "{}",
+            cancelled.message
+        );
+        assert!(
+            cancelled.message.contains("nothing was pushed"),
+            "{}",
+            cancelled.message
+        );
+        assert_eq!(cancelled.exit_code, None);
+        assert!(
+            cancelled.snapshot.is_some(),
+            "a cancel still re-reads state"
+        );
+        // The remote kept every commit it had: this is the assertion that
+        // matters, because a force push that ran would be unrecoverable.
+        assert_eq!(read(&bare, &["rev-parse", "main"]), bare_tip);
+
+        // The nonce is single-use, so a cancelled force push cannot be
+        // retried by replaying it — the user must preview again.
+        let replay = run_force_push(&state, &sessions, &preview.nonce, None, &mut |_| {}).unwrap();
+        assert_eq!(replay.outcome, Outcome::Rejected, "{}", replay.message);
+        assert!(replay.message.contains("expired"), "{}", replay.message);
+        assert_eq!(read(&bare, &["rev-parse", "main"]), bare_tip);
+    }
+
+    /// The overwrite list is capped, and the cap is disclosed. A user shown
+    /// twenty commits with no "and N more" would read it as the complete set
+    /// of commits a force push destroys, which is the one thing the preview
+    /// exists to prevent them from misjudging.
+    #[test]
+    fn a_force_push_preview_says_how_many_commits_it_did_not_list() {
+        let (root, work) = mirrored();
+        let peer = root.path().join("peer");
+        repo::git_with(
+            root.path(),
+            &[],
+            &[
+                "clone",
+                "-q",
+                "--",
+                &root.path().join("origin.git").to_string_lossy(),
+                &peer.to_string_lossy(),
+            ],
+        );
+        for i in 0..25 {
+            commit(&peer, &format!("remote only {i}"));
+        }
+        git(&peer, &["push", "-q", "origin", "main"]);
+        // Local work so the force push is a real overwrite, and a fetch so
+        // the tracking ref — which is the lease — is current.
+        commit(&work, "local replacement");
+        git(&work, &["fetch", "-q", "origin"]);
+
+        let (state, sessions, version) = pull_env(&work);
+        let preview = preview_force_push(&state, &sessions, version).unwrap();
+        // One summary line, twenty listed commits, one disclosure line.
+        assert_eq!(preview.candidates.len(), FORCE_PUSH_PREVIEW_LIMIT + 2);
+        assert!(
+            preview.candidates[0].contains("25 remote-only commit(s)"),
+            "the headline carries the true count: {:?}",
+            preview.candidates[0]
+        );
+        assert_eq!(
+            preview.candidates.last().unwrap(),
+            "... and 5 more",
+            "the list says it is partial"
+        );
+    }
+
+    /// A pull cancelled before the fetch has not contacted the remote at all,
+    /// so the message says exactly that — and the tracking ref is unchanged,
+    /// which is the only way to tell "never contacted" from "fetched and
+    /// discarded".
+    #[test]
+    fn a_cancelled_pull_contacts_no_remote_and_still_reports_a_snapshot() {
+        let (root, work) = mirrored();
+        advance_via_peer(root.path(), "from peer");
+        let before = branch_of(&work, "main");
+        assert_eq!(before.behind, None, "not fetched yet");
+        let (state, sessions, version) = pull_env(&work);
+        state.begin().unwrap();
+        state.cancel_flag().store(true, Ordering::SeqCst);
+        let cancelled = run_pull(
+            &state,
+            &sessions,
+            version,
+            PullStrategy::Default,
+            None,
+            &mut |_| {},
+        )
+        .unwrap();
+        state.finish();
+        assert_eq!(
+            cancelled.outcome,
+            Outcome::Cancelled,
+            "{}",
+            cancelled.message
+        );
+        assert!(
+            cancelled.message.contains("no remote was contacted"),
+            "{}",
+            cancelled.message
+        );
+        assert_eq!(cancelled.exit_code, None);
+        // origin/main was not advanced by the cancelled pull: the peer pushed
+        // after the clone, so a behind count appearing here would mean the
+        // fetch ran.
+        let after = branch_of(&work, "main");
+        assert_eq!(after.behind, None, "the fetch never ran");
+        assert_eq!(after.ahead, None, "nothing was integrated either");
+        assert!(
+            cancelled.snapshot.is_some(),
+            "a cancel still re-reads state"
+        );
+    }
+
+    /// `git fetch --all` over a repository holding one remote whose name is
+    /// not valid UTF-8 must say that the remote was skipped, not quietly
+    /// fetch the rest. A non-UTF-8 name cannot be put in a `&str` argv slot,
+    /// so it is the one remote that is dropped *before* Git runs rather than
+    /// reported as a failure — and a user who reads "fetched" as "saw
+    /// everything" would be wrong about their own repository.
+    #[test]
+    fn a_remote_whose_name_is_not_utf8_is_reported_as_skipped() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let (_root, work) = mirrored();
+        advance_via_peer(_root.path(), "from peer");
+        assert_eq!(branch_of(&work, "main").behind, None, "not fetched yet");
+        // A remote named with a raw 0xff, which no &str can hold. `git remote
+        // add` is given the bytes through OsStr, so Git stores them verbatim
+        // in the config key; the test then proves the name really is
+        // unaddressable rather than trusting that it is.
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&work)
+            .arg("remote")
+            .arg("add")
+            .arg(OsStr::from_bytes(b"odd\xffx"))
+            .arg(&work)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/nonexistent-guit-test-config")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("LC_ALL", "C")
+            .status()
+            .expect("git");
+        assert!(status.success(), "the lossy remote must be configurable");
+        assert!(
+            remotes::raw_names(&work)
+                .unwrap()
+                .iter()
+                .any(|raw| std::str::from_utf8(raw).is_err()),
+            "the fixture must contain a non-UTF-8 remote name"
+        );
+
+        let (state, sessions, version) = pull_env(&work);
+        let result = run_fetch(
+            &state,
+            &sessions,
+            version,
+            FetchTarget::All,
+            None,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(
+            result
+                .message
+                .contains("1 remote(s) could not be addressed")
+                && result.message.contains("skipped"),
+            "the skipped remote must be reported: {}",
+            result.message
+        );
+        // The addressable remote was still fetched: the sweep is a partial
+        // success, not a blanket failure. The behind count is the evidence —
+        // the message says "all 1", which would be a lie if nothing landed.
+        assert_eq!(
+            branch_of(&work, "main").behind,
+            Some(1),
+            "the addressable remote was still fetched"
+        );
+    }
 }

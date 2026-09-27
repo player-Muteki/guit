@@ -643,4 +643,264 @@ mod tests {
         assert_eq!(stale.outcome, Outcome::Rejected);
         assert!(stale.message.contains("rejected"));
     }
+
+    /// An unborn HEAD is refused by both entries, and neither refusal is an
+    /// `OperationResult`: a hard reset on an empty repository has nothing to
+    /// preview, so the preview must fail rather than offer a ticket.
+    #[test]
+    fn an_unborn_head_is_refused_before_any_target_is_parsed() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        git(dir, &["init", "--quiet", "--initial-branch=main"]);
+        let (writes, sessions, version) = state_and_session(dir);
+        let soft = reset(&writes, &sessions, version, ModeArg::Soft, "main").unwrap();
+        assert_eq!(soft.outcome, Outcome::Rejected);
+        assert!(
+            soft.message.contains("before the first commit"),
+            "{}",
+            soft.message
+        );
+        // The hard entry reports the same fact as an error code, because the
+        // caller has nowhere to show a preview it cannot produce. The refusal
+        // above re-read state, so the next call needs the newer version.
+        let version = soft.snapshot.expect("re-read").version;
+        let error = preview_reset_hard(&writes, &sessions, version, "main").unwrap_err();
+        assert_eq!(error.code, "reset_unborn");
+    }
+
+    /// A cancel that arrives before Git starts is reported as `Cancelled`,
+    /// not as a rejection, and — like every other exit — still hands back a
+    /// freshly read snapshot. The caller refreshes from it either way.
+    #[test]
+    fn a_cancel_before_git_starts_never_reaches_git() {
+        let root = dirty_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let c1 = read(dir, &["rev-parse", "HEAD~1"]);
+        let head = read(dir, &["rev-parse", "HEAD"]);
+        // `reset` takes the queue slot, and taking the slot clears the cancel
+        // flag, so the flag is set inside a held operation — which is also
+        // the only order a real cancellation can arrive in.
+        writes.begin().unwrap();
+        writes.cancel();
+        let result = run_reset(&writes, &sessions, version, ModeArg::Soft, &c1).unwrap();
+        writes.finish();
+        assert_eq!(result.outcome, Outcome::Cancelled);
+        assert!(
+            result.message.contains("before Git ran"),
+            "{}",
+            result.message
+        );
+        assert_eq!(result.exit_code, None);
+        assert_eq!(
+            read(dir, &["rev-parse", "HEAD"]),
+            head,
+            "HEAD must not move"
+        );
+        assert!(
+            result.snapshot.is_some(),
+            "a cancelled reset still re-reads state"
+        );
+    }
+
+    /// The same cancel, one entry later: the hard reset has already spent its
+    /// ticket and re-checked every bound fact, and the cancel flag is the
+    /// last gate before `git reset --hard`. The working copy must survive.
+    #[test]
+    fn a_cancelled_hard_reset_leaves_the_working_copy_alone() {
+        let root = dirty_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let c1 = read(dir, &["rev-parse", "HEAD~1"]);
+        let head = read(dir, &["rev-parse", "HEAD"]);
+        let preview = preview_reset_hard(&writes, &sessions, version, &c1).unwrap();
+        writes.begin().unwrap();
+        writes.cancel();
+        let result = run_reset_hard(&writes, &sessions, &preview.nonce).unwrap();
+        writes.finish();
+        assert_eq!(result.outcome, Outcome::Cancelled);
+        assert!(
+            result.message.contains("before Git ran"),
+            "{}",
+            result.message
+        );
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+            "b changed\n",
+            "a cancelled hard reset must not overwrite anything"
+        );
+        assert!(
+            dir.join("c.txt").exists(),
+            "a cancelled hard reset deletes nothing"
+        );
+    }
+
+    /// More than twenty dropped commits must be summarised with a real
+    /// count, not silently truncated to the display limit. The `… N commits
+    /// in total` line is the only thing telling the user the list is partial.
+    #[test]
+    fn a_long_dropped_history_is_summarised_with_its_true_count() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        git(dir, &["init", "--quiet", "--initial-branch=main"]);
+        git(dir, &["config", "user.name", "guit test"]);
+        git(dir, &["config", "user.email", "test@example.invalid"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", "first"]);
+        let first = read(dir, &["rev-parse", "HEAD"]);
+        for i in 0..25 {
+            git(
+                dir,
+                &["commit", "--allow-empty", "-m", &format!("filler {i}")],
+            );
+        }
+        std::fs::write(dir.join("a.txt"), "dirty\n").unwrap();
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_reset_hard(&writes, &sessions, version, &first).unwrap();
+        // Twenty ids plus the summary line.
+        assert_eq!(preview.dropped.len(), DROPPED_DISPLAY_LIMIT + 1);
+        let summary = preview.dropped.last().unwrap();
+        assert_eq!(summary, "… 25 commits in total", "{summary}");
+        // Every listed id is a real, short commit id — the panel shows these
+        // to the user, so a truncated or padded one would be a lie.
+        for oid in &preview.dropped[..DROPPED_DISPLAY_LIMIT] {
+            assert_eq!(oid.len(), 10, "{oid}");
+            assert!(oid.bytes().all(|b| b.is_ascii_hexdigit()), "{oid}");
+        }
+        assert_eq!(preview.candidates, vec!["a.txt"]);
+    }
+
+    /// Resetting to HEAD drops nothing, so the preview's dropped list is
+    /// empty — the panel must not imply that commits are about to be lost.
+    #[test]
+    fn a_reset_to_head_drops_nothing() {
+        let root = dirty_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let head = read(dir, &["rev-parse", "HEAD"]);
+        let preview = preview_reset_hard(&writes, &sessions, version, &head).unwrap();
+        assert!(preview.dropped.is_empty(), "{:?}", preview.dropped);
+        assert_eq!(preview.target_oid.as_deref(), Some(head.as_str()));
+        let result = reset_hard(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), head);
+    }
+
+    /// The ticket is bound to the repository that produced it. Switching to
+    /// another open repository and then confirming must be refused even
+    /// though the nonce, the target and the dirty set would all still match.
+    #[test]
+    fn a_ticket_does_not_survive_switching_repositories() {
+        let first = dirty_repo();
+        let second = dirty_repo();
+        let (writes, sessions, version) = state_and_session(first.path());
+        let c1 = read(first.path(), &["rev-parse", "HEAD~1"]);
+        let preview = preview_reset_hard(&writes, &sessions, version, &c1).unwrap();
+        // Same shape, same commit ids, same dirty set: only the identity
+        // check can tell these two repositories apart, so the ticket binding
+        // it to a work root is the only thing standing between a preview of
+        // one repository and a reset of another.
+        session::open(&sessions, second.path()).unwrap();
+        let second_head = read(second.path(), &["rev-parse", "HEAD"]);
+        let refused = reset_hard(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(refused.outcome, Outcome::Rejected);
+        assert!(
+            refused.message.contains("different repository"),
+            "{}",
+            refused.message
+        );
+        // The second repository's working copy is untouched, and it is the
+        // *open* one, so a wrong reset here would be the most destructive
+        // bug this module could have.
+        assert_eq!(read(second.path(), &["rev-parse", "HEAD"]), second_head);
+        assert_eq!(
+            std::fs::read_to_string(second.path().join("b.txt")).unwrap(),
+            "b changed\n",
+            "the newly opened repository must be untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(first.path().join("b.txt")).unwrap(),
+            "b changed\n"
+        );
+    }
+
+    /// `git reset --hard` failing is a reported outcome, not an error, and
+    /// the failure Git reports is the one the user is shown. A stale
+    /// `index.lock` is the honest way to make Git itself fail: `git status`
+    /// still reads, so the ticket's own re-checks pass and the failure lands
+    /// on the write, which is the branch under test. Unlike a permission
+    /// change this also fails for a process running as root.
+    #[test]
+    fn a_failing_hard_reset_is_reported_with_its_own_stderr() {
+        let root = dirty_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let c1 = read(dir, &["rev-parse", "HEAD~1"]);
+        let head = read(dir, &["rev-parse", "HEAD"]);
+        let preview = preview_reset_hard(&writes, &sessions, version, &c1).unwrap();
+        let lock = dir.join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let result = reset_hard(&writes, &sessions, preview.nonce).unwrap();
+        std::fs::remove_file(&lock).unwrap();
+
+        assert_eq!(result.outcome, Outcome::Failed, "{}", result.message);
+        assert_eq!(result.exit_code, Some(128), "git's own status, not a guess");
+        assert!(
+            result.message.contains("reported a failure"),
+            "{}",
+            result.message
+        );
+        // The detail is Git's first stderr line, which names index.lock; a
+        // generic "the reset failed" here would leave the user with nothing.
+        let detail = result.details.expect("the first stderr line must be shown");
+        assert!(detail.contains("index.lock"), "{detail}");
+        // A failed reset is still a reason to re-read: the snapshot is what
+        // the user sees next, and it must show the untouched working copy.
+        let snapshot = result
+            .snapshot
+            .expect("a failed reset still re-reads state");
+        assert!(snapshot.files.iter().any(|f| f.display == "b.txt"));
+        // HEAD did not move: the reset failed, so the branch is still where
+        // the preview found it and the working copy still holds the edit.
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+            "b changed\n"
+        );
+    }
+
+    /// A conflicted index is a dirty set in its own right: both sides of the
+    /// conflict belong in the hard-reset candidate list, because a hard reset
+    /// overwrites them.
+    #[test]
+    fn a_conflicted_file_is_listed_as_a_hard_reset_candidate() {
+        let root = crate::sequencer::tests::diverged_repo(false);
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        // A conflict is the state a hard reset is most often wanted for, and
+        // it is the one dirty shape the ordinary tracked/untracked filter
+        // cannot see: both sides of the conflict are in the index, marked
+        // unmerged rather than changed.
+        let started = crate::sequencer::merge_start(&writes, &sessions, version, "side").unwrap();
+        let conflicted = tracked_dirty_set(&sessions).unwrap();
+        let names: Vec<String> = conflicted
+            .iter()
+            .map(|raw| model::display_name(raw))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["base.txt"],
+            "the conflicted path is the candidate"
+        );
+        // The same file is what the whole session reports as a conflict.
+        let view = started.snapshot.expect("in-flight");
+        let entry = view
+            .files
+            .iter()
+            .find(|file| file.display == "base.txt")
+            .expect("the conflicted file is in the snapshot");
+        assert_eq!(entry.group, model::FileGroup::Conflict);
+    }
 }

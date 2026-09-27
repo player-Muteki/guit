@@ -4,8 +4,9 @@
 Covers what recovery-checks.sh and diagnostics-export-check.sh do not: that
 every activity-rail view opens and shows its own content, that a row menu
 works, that the discard ticket's cancel path closes the modal, returns focus to
-the button that opened it and changes nothing on disk, and that a failed
-external tool is surfaced.
+the button that opened it and changes nothing on disk, that a failed external
+tool is surfaced, and that the developer probe's cancel really reaps its
+child.
 
 Landmark rules are the one in atspi_landmark.py, plus three this script needs:
 - a menu item is a `menuitem`, not a `button`, so row and app-bar menus are
@@ -215,6 +216,34 @@ def main():
         report.check("focus returns to the button that opened the dialog",
                      focused_name("ATSPI_ROLE_BUTTON") == "Export diagnostics…",
                      f"focus is on {focused_name('ATSPI_ROLE_BUTTON')!r}")
+
+        # --- the cancellable process probe ---
+        # `git hash-object --stdin` is given no input and its stdin is held
+        # open for three seconds before being closed, so the probe is reliably
+        # still running when the cancel lands a moment later. That is what
+        # makes this a test of the *cancelled* path rather than a race with a
+        # fast completion: the button swap is the only thing asserted, and the
+        # result line has to say the child was reaped.
+        run_probe = A.find_button(name="Run probe")
+        cancel_probe = A.find_button(name="Cancel probe")
+        report.check("the developer probe offers Run and Cancel",
+                     run_probe is not None and cancel_probe is not None)
+        if run_probe is not None and cancel_probe is not None:
+            report.check("Cancel probe starts disabled",
+                         "ATSPI_STATE_ENABLED" not in states(cancel_probe))
+            A.click(run_probe)
+            time.sleep(0.3)
+            # Both buttons are rebuilt by the same handler, so the enabled
+            # state is read again rather than cached from before the click.
+            report.check("Run probe disables itself and enables Cancel probe",
+                         "ATSPI_STATE_ENABLED" not in states(A.find_button(name="Run probe"))
+                         and "ATSPI_STATE_ENABLED" in states(A.find_button(name="Cancel probe")))
+            A.click(cancel_probe)
+            report.check("a cancelled probe reports the child was reaped",
+                         A.wait_for(r"cancelled and reaped", 20) is not None)
+            report.check("Run probe is offered again after a cancelled probe",
+                         "ATSPI_STATE_ENABLED" in states(A.find_button(name="Run probe"))
+                         and "ATSPI_STATE_ENABLED" not in states(A.find_button(name="Cancel probe")))
     finally:
         try:
             os.killpg(os.getpgid(proc.pid), 15)

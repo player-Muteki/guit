@@ -121,17 +121,13 @@ pub struct Node {
 /// column — the mainline never jogs. Extra parents take the lowest free
 /// column to the right, so a merge always flows the same way.
 ///
+/// When `follow_all` is false only each commit's first parent is followed:
+/// the mainline is then a straight line even through merges, because the
+/// branches a merge brought in are not walked.
+///
 /// When the live lane count would exceed `max_lanes`, the whole window is
 /// drawn first-parent and every row is marked `folded`: a graph that does
 /// not fit the gutter must say so rather than draw lanes that collide.
-pub fn assign_lanes(nodes: &[Node], max_lanes: u8) -> Vec<GraphRow> {
-    assign_lanes_with(nodes, max_lanes, true)
-}
-
-/// As `assign_lanes`, but when `follow_all` is false only each commit's first
-/// parent is followed. The mainline is then a straight line even through
-/// merges: a merge commit still says it is a merge, but the branches it
-/// brought in are not walked, because the view asked not to follow them.
 pub fn assign_lanes_with(nodes: &[Node], max_lanes: u8, follow_all: bool) -> Vec<GraphRow> {
     if nodes.is_empty() {
         return Vec::new();
@@ -1128,7 +1124,7 @@ mod tests {
     /// Kept next to the real thing so the boundary test exercises the same
     /// relationship without needing a repository.
     fn rows_for_page(nodes: &[Node], start: usize, max_lanes: u8) -> Vec<GraphRow> {
-        let rows = assign_lanes(nodes, max_lanes);
+        let rows = assign_lanes_with(nodes, max_lanes, true);
         rows.into_iter().skip(start).collect()
     }
 
@@ -1162,7 +1158,7 @@ mod tests {
                 }
             })
             .collect();
-        let rows = assign_lanes(&nodes, MAX_LANES);
+        let rows = assign_lanes_with(&nodes, MAX_LANES, true);
         assert_eq!(rows.len(), 4);
         for (index, row) in rows.iter().enumerate() {
             assert_eq!(row.node, 0, "the mainline never leaves column 0");
@@ -1178,7 +1174,7 @@ mod tests {
     #[test]
     fn a_merge_keeps_the_mainline_straight_and_flows_the_branch_rightward() {
         let nodes = branched_history();
-        let rows = assign_lanes(&nodes, MAX_LANES);
+        let rows = assign_lanes_with(&nodes, MAX_LANES, true);
         let merge = &rows[2];
         assert!(merge.merge);
         assert_eq!(merge.node, 0, "the merge sits on the mainline column");
@@ -1216,7 +1212,7 @@ mod tests {
             node("c", &["base"]),
             node("base", &[]),
         ];
-        let rows = assign_lanes(&nodes, MAX_LANES);
+        let rows = assign_lanes_with(&nodes, MAX_LANES, true);
         let octopus = &rows[1];
         assert!(octopus.merge);
         assert_eq!(
@@ -1238,14 +1234,14 @@ mod tests {
         // is `b`, which is inside the window, so that line does continue into
         // a commit the user can see.
         let nodes = vec![node("a", &["b"]), node("b", &["c"])];
-        let rows = assign_lanes(&nodes, MAX_LANES);
+        let rows = assign_lanes_with(&nodes, MAX_LANES, true);
         assert!(!rows[0].dangling, "a's parent is the next row down");
         assert!(rows[1].dangling, "b's parent is not in the window");
         // Add the missing parent: it is now inside the window, so no line
         // leaves the loaded range.
         let mut full = nodes.clone();
         full.push(node("c", &[]));
-        let rows = assign_lanes(&full, MAX_LANES);
+        let rows = assign_lanes_with(&full, MAX_LANES, true);
         assert!(!rows[0].dangling);
         assert!(!rows[1].dangling);
         assert!(rows[2].root);
@@ -1258,7 +1254,7 @@ mod tests {
         // slicing the rows for the whole history. If this drifts, a line
         // jumps columns the moment the user clicks "Load older".
         let nodes = branched_history();
-        let whole = assign_lanes(&nodes, MAX_LANES);
+        let whole = assign_lanes_with(&nodes, MAX_LANES, true);
         for split in 1..nodes.len() {
             let page = rows_for_page(&nodes[..], split, MAX_LANES);
             for (offset, row) in page.iter().enumerate() {
@@ -1286,7 +1282,7 @@ mod tests {
             node("main", &["base"]),
             node("base", &[]),
         ];
-        let rows = assign_lanes(&nodes, MAX_LANES);
+        let rows = assign_lanes_with(&nodes, MAX_LANES, true);
         let base = &rows[6];
         assert_eq!(
             base.node, 0,
@@ -1318,7 +1314,7 @@ mod tests {
         // The invariant the convergence bug broke, stated over a history with
         // several shared parents in it: the oldest commit closes every lane.
         let nodes = branched_history();
-        let rows = assign_lanes(&nodes, MAX_LANES);
+        let rows = assign_lanes_with(&nodes, MAX_LANES, true);
         let last = rows.last().expect("a history");
         assert!(last.root, "the oldest commit has no parent");
         assert!(
@@ -1343,7 +1339,7 @@ mod tests {
             nodes.push(node(branch, &["base"]));
         }
         nodes.push(node("base", &[]));
-        let rows = assign_lanes(&nodes, MAX_LANES);
+        let rows = assign_lanes_with(&nodes, MAX_LANES, true);
         assert!(
             rows.iter().all(|row| row.folded),
             "an over-wide graph folds"
@@ -1356,8 +1352,8 @@ mod tests {
     #[test]
     fn assignment_is_deterministic_so_a_lane_keeps_its_column() {
         let nodes = branched_history();
-        let first = assign_lanes(&nodes, MAX_LANES);
-        let second = assign_lanes(&nodes, MAX_LANES);
+        let first = assign_lanes_with(&nodes, MAX_LANES, true);
+        let second = assign_lanes_with(&nodes, MAX_LANES, true);
         assert_eq!(first, second, "the same history always draws the same way");
     }
 

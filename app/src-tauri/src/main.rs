@@ -214,7 +214,9 @@ fn write_window_settings(
         .map_err(|error| ProbeError::new("settings_write_failed", error.to_string()))
 }
 
-#[tauri::command]
+/// Reads the stored geometry, if any. Not a command: the only caller is
+/// `restore_window_settings`, which runs before the window exists, so
+/// exposing this over IPC would publish an endpoint with no caller.
 fn load_window_settings(app: tauri::AppHandle) -> Result<Option<WindowSettings>, ProbeError> {
     let path = settings_path(&app)?;
     read_window_settings(&path)
@@ -403,7 +405,7 @@ async fn stage_files(
     snapshot_version: u64,
     file_ids: Vec<u32>,
 ) -> Result<write::OperationResult, ProbeError> {
-    run_write_command(app, snapshot_version, file_ids, write::OperationKind::Stage).await
+    run_write_command(app, snapshot_version, file_ids, write::PathWrite::Stage).await
 }
 
 #[tauri::command]
@@ -412,13 +414,7 @@ async fn unstage_files(
     snapshot_version: u64,
     file_ids: Vec<u32>,
 ) -> Result<write::OperationResult, ProbeError> {
-    run_write_command(
-        app,
-        snapshot_version,
-        file_ids,
-        write::OperationKind::Unstage,
-    )
-    .await
+    run_write_command(app, snapshot_version, file_ids, write::PathWrite::Unstage).await
 }
 
 #[tauri::command]
@@ -441,12 +437,12 @@ async fn run_write_command(
     app: tauri::AppHandle,
     snapshot_version: u64,
     file_ids: Vec<u32>,
-    kind: write::OperationKind,
+    path_write: write::PathWrite,
 ) -> Result<write::OperationResult, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<write::WriteState>();
         let sessions = app.state::<session::SessionState>();
-        write::execute(&state, &sessions, snapshot_version, file_ids, kind)
+        write::execute(&state, &sessions, snapshot_version, file_ids, path_write)
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -1507,16 +1503,6 @@ fn submit_askpass(
     }
 }
 
-#[tauri::command]
-async fn credential_status(app: tauri::AppHandle) -> Result<askpass::CredentialView, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let sessions = app.state::<session::SessionState>();
-        askpass::credential_status(&sessions)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
 /// Writes the fixed diagnostics snapshot to the path the user chose
 /// in the save dialog (the content manifest was confirmed in the UI before
 /// this is ever invoked). The frontend sends only a path; every fact comes
@@ -1652,7 +1638,6 @@ fn main() {
             run_transfer_probe,
             cancel_process_probe,
             save_window_settings,
-            load_window_settings,
             restore_window_settings,
             open_repository,
             restore_repository,
@@ -1724,7 +1709,6 @@ fn main() {
             force_push,
             set_upstream,
             submit_askpass,
-            credential_status,
             export_diagnostics
         ])
         .run(tauri::generate_context!())

@@ -354,56 +354,41 @@ pub enum OperationKind {
     ForcePush,
 }
 
-impl OperationKind {
+/// The write kinds that run as a bare path-scoped `git <prefix> -- <paths>`.
+///
+/// This set is deliberately its own type rather than a match over
+/// `OperationKind` returning an empty prefix for the kinds that own their own
+/// runners. A prefix table that maps 37 kinds to `&[]` compiles fine and then
+/// runs `git` with no subcommand if a kind is ever routed through it, so the
+/// routing decision is made once, here, where adding a variant forces the
+/// author to supply a real prefix or pick a different runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathWrite {
+    Stage,
+    Unstage,
+}
+
+impl PathWrite {
     /// Git argument prefix plus the past-tense verb for the result message.
-    /// Commit, discard, clean, the branch, tag and stash kinds run through
-    /// their own runners, never this plan.
     fn plan(self) -> (&'static [&'static str], &'static str) {
         match self {
-            OperationKind::Stage => (&["add"], "Staged"),
-            OperationKind::Unstage => (&["restore", "--staged"], "Unstaged"),
-            OperationKind::Commit => (&[], "Committed"),
-            OperationKind::Discard => (&["restore", "--worktree"], "Discarded"),
-            OperationKind::Clean => (&[], "Cleaned"),
-            OperationKind::BranchCreate => (&[], "Created"),
-            OperationKind::BranchSwitch => (&[], "Switched"),
-            OperationKind::BranchRename => (&[], "Renamed"),
-            OperationKind::BranchDelete => (&[], "Deleted"),
-            OperationKind::TagCreate => (&[], "Created"),
-            OperationKind::TagDelete => (&[], "Deleted"),
-            OperationKind::StashSave => (&[], "Stashed"),
-            OperationKind::StashApply => (&[], "Applied"),
-            OperationKind::StashPop => (&[], "Popped"),
-            OperationKind::StashDrop => (&[], "Dropped"),
-            OperationKind::Merge => (&[], "Merged"),
-            OperationKind::Rebase => (&[], "Rebased"),
-            OperationKind::CherryPick => (&[], "Cherry-picked"),
-            OperationKind::Revert => (&[], "Reverted"),
-            OperationKind::Continue => (&[], "Continued"),
-            OperationKind::Abort => (&[], "Aborted"),
-            OperationKind::Skip => (&[], "Skipped"),
-            OperationKind::Reset => (&[], "Reset"),
-            OperationKind::ResetHard => (&[], "Hard reset"),
-            OperationKind::WorktreeAdd => (&[], "Added"),
-            OperationKind::WorktreeRemove => (&[], "Removed"),
-            OperationKind::WorktreePrune => (&[], "Pruned"),
-            OperationKind::SubmoduleUpdate => (&[], "Updated"),
-            OperationKind::RemoteAdd => (&[], "Added"),
-            OperationKind::RemoteSetUrl => (&[], "Updated"),
-            OperationKind::RemoteRemove => (&[], "Removed"),
-            OperationKind::Fetch => (&[], "Fetched"),
-            OperationKind::SetUpstream => (&[], "Upstream set"),
-            OperationKind::Pull => (&[], "Pulled"),
-            OperationKind::Push => (&[], "Pushed"),
-            OperationKind::Publish => (&[], "Published"),
-            OperationKind::DeleteRemoteBranch => (&[], "Deleted"),
-            OperationKind::ForcePush => (&[], "Force-pushed"),
+            PathWrite::Stage => (&["add"], "Staged"),
+            PathWrite::Unstage => (&["restore", "--staged"], "Unstaged"),
+        }
+    }
+
+    /// The kind reported back to the frontend, which is the vocabulary it
+    /// already knows; the path-scoped lane is an implementation detail of it.
+    fn kind(self) -> OperationKind {
+        match self {
+            PathWrite::Stage => OperationKind::Stage,
+            PathWrite::Unstage => OperationKind::Unstage,
         }
     }
 
     /// `git restore` only exists from 2.23; staging works on any supported Git.
     fn needs_restore(self) -> bool {
-        matches!(self, OperationKind::Unstage)
+        matches!(self, PathWrite::Unstage)
     }
 }
 
@@ -443,15 +428,19 @@ pub struct OperationResult {
     pub snapshot: Option<session::SnapshotView>,
 }
 
+/// Takes the queue slot and runs one path-scoped write. The only two
+/// operations that reach this lane are staging and unstaging; everything else
+/// has its own runner because it needs a preview ticket, a sequencer or a
+/// network leg.
 pub(crate) fn execute(
     state: &WriteState,
     sessions: &session::SessionState,
     snapshot_version: u64,
     file_ids: Vec<u32>,
-    kind: OperationKind,
+    write: PathWrite,
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_write(state, sessions, snapshot_version, file_ids, kind);
+    let result = run_write(state, sessions, snapshot_version, file_ids, write);
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -466,9 +455,10 @@ pub(crate) fn run_write(
     sessions: &session::SessionState,
     snapshot_version: u64,
     file_ids: Vec<u32>,
-    kind: OperationKind,
+    write: PathWrite,
 ) -> Result<OperationResult, ProbeError> {
-    let (git_prefix, verb) = kind.plan();
+    let kind = write.kind();
+    let (git_prefix, verb) = write.plan();
     let mut outcome = Outcome::Success;
     let mut exit_code = None;
     let message;
@@ -479,7 +469,7 @@ pub(crate) fn run_write(
             message = error.message;
         }
         Ok((work_root, targets)) => {
-            if kind.needs_restore() && !restore_supported(&work_root) {
+            if write.needs_restore() && !restore_supported(&work_root) {
                 outcome = Outcome::Rejected;
                 message =
                     "This Git is too old for unstaging; guit needs git restore (2.23+).".into();
@@ -1149,7 +1139,7 @@ mod tests {
         version: u64,
         ids: Vec<u32>,
     ) -> Result<OperationResult, ProbeError> {
-        execute(state, sessions, version, ids, OperationKind::Stage)
+        execute(state, sessions, version, ids, PathWrite::Stage)
     }
 
     fn run_stage(
@@ -1158,7 +1148,7 @@ mod tests {
         version: u64,
         ids: Vec<u32>,
     ) -> Result<OperationResult, ProbeError> {
-        run_write(state, sessions, version, ids, OperationKind::Stage)
+        run_write(state, sessions, version, ids, PathWrite::Stage)
     }
 
     #[test]
@@ -1663,7 +1653,7 @@ mod tests {
             &sessions,
             view.version,
             vec![file.id.0],
-            OperationKind::Unstage,
+            PathWrite::Unstage,
         )
         .unwrap();
         assert_eq!(
@@ -1689,7 +1679,7 @@ mod tests {
             &sessions,
             snapshot.version,
             vec![file.id.0],
-            OperationKind::Stage,
+            PathWrite::Stage,
         )
         .unwrap();
         assert_eq!(again.outcome, Outcome::Success);
@@ -1730,7 +1720,7 @@ mod tests {
             &sessions,
             view.version,
             vec![file.id.0],
-            OperationKind::Unstage,
+            PathWrite::Unstage,
         )
         .unwrap();
         assert_eq!(result.outcome, Outcome::Success);

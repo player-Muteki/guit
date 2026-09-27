@@ -23,10 +23,29 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// The word the status bar and the diagnostics report both show. These
+    /// two strings are the only evidence a user gets that filesystem events
+    /// are not being watched, so they are part of the contract rather than
+    /// a debug print.
     fn label(self) -> &'static str {
         match self {
             Mode::Watch => "watch",
             Mode::Poll => "poll",
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Mode> {
+        match code {
+            1 => Some(Mode::Watch),
+            2 => Some(Mode::Poll),
+            _ => None,
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Mode::Watch => 1,
+            Mode::Poll => 2,
         }
     }
 }
@@ -165,10 +184,28 @@ pub struct WatchState {
 static LAST_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub(crate) fn last_mode() -> &'static str {
-    match LAST_MODE.load(Ordering::Relaxed) {
-        1 => "watch",
-        2 => "poll",
-        _ => "none",
+    match Mode::from_code(LAST_MODE.load(Ordering::Relaxed)) {
+        Some(mode) => mode.label(),
+        None => "none",
+    }
+}
+
+/// Whether a created watcher will actually deliver events, or whether the
+/// loop has to fall back to polling.
+///
+/// This is the honest-degradation decision the documentation promises, so it
+/// is a function of the watcher's own result rather than something inlined
+/// into the supervisor: the branch that decides "this user is not being
+/// watched" is the one branch in this module that needs a test, and it can
+/// only be tested if it is reachable without an application handle and a
+/// background thread.
+fn choose_mode(watcher: &Result<notify::RecommendedWatcher, notify::Error>) -> Mode {
+    match watcher {
+        Ok(_) => Mode::Watch,
+        Err(error) => {
+            eprintln!("guit [watch]: filesystem events unavailable ({error}); polling instead");
+            Mode::Poll
+        }
     }
 }
 
@@ -178,21 +215,9 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
     // poll mode times out instead of seeing a disconnect.
     let _poll_channel_keeper = tx.clone();
     let watcher = start_watcher(&watch_targets(&identity), tx);
-    let mode = match &watcher {
-        Ok(_) => Mode::Watch,
-        Err(error) => {
-            eprintln!("guit [watch]: filesystem events unavailable ({error}); polling instead");
-            Mode::Poll
-        }
-    };
+    let mode = choose_mode(&watcher);
     let _ = app.emit("watch-status", WatchStatus { mode: mode.label() });
-    LAST_MODE.store(
-        match mode {
-            Mode::Watch => 1,
-            Mode::Poll => 2,
-        },
-        Ordering::Relaxed,
-    );
+    LAST_MODE.store(mode.code(), Ordering::Relaxed);
     let emitter = app.clone();
     run_loop(
         &rx,
@@ -396,5 +421,63 @@ mod tests {
         std::fs::write(directory.path().join("tracked.txt"), b"x").unwrap();
         assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok());
         drop(watcher);
+    }
+
+    /// The promise in the known-limitations record is that a repository whose
+    /// inotify watches are exhausted keeps working on a five-second poll
+    /// rather than going quiet. That promise lives entirely in this branch:
+    /// a watcher that exists but cannot be told to watch anything must become
+    /// `Poll`, and the mode the user is shown must say so.
+    #[test]
+    fn a_watcher_that_cannot_watch_falls_back_to_polling() {
+        // Asking notify to watch a path that does not exist is the portable
+        // way to get the failure real backends produce when the watch limit
+        // is spent; the branch under test is the same one either way. The
+        // receiver is kept alive: dropping it would disconnect the channel
+        // the watcher's callback writes to, which is a different failure.
+        let (tx, _rx) = mpsc::channel();
+        let failed = start_watcher(&[PathBuf::from("/nonexistent/guit-watch-target")], tx);
+        assert!(failed.is_err(), "the fixture must fail to start watching");
+        assert_eq!(choose_mode(&failed), Mode::Poll);
+        assert_eq!(choose_mode(&failed).label(), "poll");
+    }
+
+    #[test]
+    fn a_live_watcher_announces_watch_not_poll() {
+        let directory = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let watcher = start_watcher(&[directory.path().to_path_buf()], tx).unwrap();
+        assert_eq!(choose_mode(&Ok(watcher)), Mode::Watch);
+        // A watcher with nothing to watch is still a watcher, and saying
+        // "poll" here would report a degradation that is not happening.
+        let (tx, _rx) = mpsc::channel();
+        assert_eq!(
+            choose_mode(&Ok(start_watcher(&[], tx).unwrap())).label(),
+            "watch"
+        );
+    }
+
+    /// The diagnostics exporter reads the mode through `last_mode`, which
+    /// cannot see the emitted event. The numeric encoding and the word the
+    /// user reads are two representations of one fact, so a change to either
+    /// without the other would make the diagnostics report claim a mode the
+    /// app never used.
+    #[test]
+    fn the_reported_mode_and_the_announced_mode_are_the_same_word() {
+        for mode in [Mode::Watch, Mode::Poll] {
+            assert_eq!(Mode::from_code(mode.code()), Some(mode));
+            assert_eq!(
+                mode.label(),
+                match mode {
+                    Mode::Watch => "watch",
+                    Mode::Poll => "poll",
+                }
+            );
+        }
+        // 0 is the sentinel for "no supervisor", and must decode to no mode
+        // rather than to watch: reporting a watch that never happened is the
+        // failure this guards.
+        assert_eq!(Mode::from_code(0), None);
+        assert_eq!(Mode::from_code(3), None, "an unknown code is not a mode");
     }
 }
