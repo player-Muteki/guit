@@ -255,15 +255,25 @@ pub(crate) fn preview_reset_hard(
                 &format!("^{target_oid}"),
             ],
         )
-        .map(|stdout| stdout.lines().map(str::to_owned).collect::<Vec<_>>())
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            ProbeError::new(
+                "reset_preview_failed",
+                "Git could not list the commits a hard reset would discard; the reset was refused.",
+            )
+        })?;
+        let listed = listed.lines().map(str::to_owned).collect::<Vec<_>>();
         if listed.len() > DROPPED_DISPLAY_LIMIT {
             let total = read_git(
                 &work_root,
                 &["rev-list", "--count", &head_oid, &format!("^{target_oid}")],
             )
             .and_then(|count| count.parse::<usize>().ok())
-            .unwrap_or(listed.len());
+            .ok_or_else(|| {
+                ProbeError::new(
+                    "reset_preview_failed",
+                    "Git could not count the commits a hard reset would discard; the reset was refused.",
+                )
+            })?;
             dropped.extend(listed[..DROPPED_DISPLAY_LIMIT].iter().map(|oid| short(oid)));
             dropped.push(format!("… {} commits in total", total));
         } else {

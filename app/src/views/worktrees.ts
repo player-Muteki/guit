@@ -96,7 +96,7 @@ export function createWorktreesView(deps: WorktreesDeps): WorktreesView {
     try {
       const result = await invoke<OperationResult>(command, { snapshotVersion: snapshot.version, ...args });
       applySnapshot(result.snapshot);
-      setStatus(result.details ? `${result.message} ${result.details}` : result.message, "success");
+      setStatus(result.details ? `${result.message} ${result.details}` : result.message, result.outcome === "success" ? "success" : "error");
       if (command === "add_worktree" && result.outcome === "success") target.value = "";
     } catch (error) {
       deps.onError(error);

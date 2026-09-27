@@ -169,6 +169,7 @@ fn start_watcher(
 #[serde(rename_all = "camelCase")]
 struct WatchStatus {
     mode: &'static str,
+    failed: bool,
 }
 
 /// Holds the shutdown flag of the one supervisor thread per application run.
@@ -216,9 +217,16 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
     let _poll_channel_keeper = tx.clone();
     let watcher = start_watcher(&watch_targets(&identity), tx);
     let mode = choose_mode(&watcher);
-    let _ = app.emit("watch-status", WatchStatus { mode: mode.label() });
+    let _ = app.emit(
+        "watch-status",
+        WatchStatus {
+            mode: mode.label(),
+            failed: false,
+        },
+    );
     LAST_MODE.store(mode.code(), Ordering::Relaxed);
     let emitter = app.clone();
+    let mut refresh_failed = false;
     run_loop(
         &rx,
         &shutdown,
@@ -230,14 +238,35 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
             let started = Instant::now();
             let outcome = session::refresh(&emitter.state::<SessionState>());
             perf::mark("watch.refresh", started.elapsed());
+            if shutdown.load(Ordering::SeqCst) {
+                return false;
+            }
             match outcome {
                 Ok(Some(snapshot)) => {
                     let _ = emitter.emit("repo-refreshed", snapshot);
+                    if refresh_failed {
+                        refresh_failed = false;
+                        let _ = emitter.emit(
+                            "watch-status",
+                            WatchStatus {
+                                mode: mode.label(),
+                                failed: false,
+                            },
+                        );
+                    }
                     true
                 }
                 Ok(None) => false,
                 Err(error) => {
                     eprintln!("guit [{}]: watcher refresh failed", error.code);
+                    refresh_failed = true;
+                    let _ = emitter.emit(
+                        "watch-status",
+                        WatchStatus {
+                            mode: mode.label(),
+                            failed: true,
+                        },
+                    );
                     true
                 }
             }
@@ -274,7 +303,13 @@ pub fn stop(app: &tauri::AppHandle) {
     if let Some(previous) = crate::util::guard(&state.current).take() {
         previous.store(true, Ordering::SeqCst);
     }
-    let _ = app.emit("watch-status", WatchStatus { mode: "none" });
+    let _ = app.emit(
+        "watch-status",
+        WatchStatus {
+            mode: "none",
+            failed: false,
+        },
+    );
 }
 
 #[cfg(test)]

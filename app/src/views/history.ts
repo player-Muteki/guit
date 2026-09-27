@@ -283,7 +283,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     try {
       const result = await invoke<ToolResult>("open_commit_diff", { oid: selected.oid });
       applySnapshot(result.snapshot);
-      setStatus(result.details ? `${result.message} ${result.details}` : result.message, "success");
+      setStatus(result.details ? `${result.message} ${result.details}` : result.message, result.outcome === "success" ? "success" : "error");
     } catch (error) {
       deps.onError(error);
       setStatus("The commit diff did not run.", "error");
@@ -308,7 +308,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     try {
       const result = await invoke<OperationResult>(command, { snapshotVersion: snapshot.version, ...args });
       applySnapshot(result.snapshot);
-      setStatus(result.details ? `${result.message} ${result.details}` : result.message, "success");
+      setStatus(result.details ? `${result.message} ${result.details}` : result.message, result.outcome === "success" ? "success" : "error");
     } catch (error) {
       deps.onError(error);
       setStatus("The commit operation did not run.", "error");

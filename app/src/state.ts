@@ -152,6 +152,7 @@ let tool = false;
 let preview: PendingPreview | null = null;
 let view: ViewId = "changes";
 let watchMode: "none" | "poll" | "events" = "none";
+let watchFailed = false;
 let status: StatusLine = { kind: "idle", message: "" };
 let nextToastId = 1;
 let toasts: Toast[] = [];
@@ -189,6 +190,7 @@ export const isToolRunning = (): boolean => tool;
 export const pendingPreview = (): PendingPreview | null => preview;
 export const activeView = (): ViewId => view;
 export const watchStatus = (): "none" | "poll" | "events" => watchMode;
+export const isWatchFailed = (): boolean => watchFailed;
 export const statusLine = (): StatusLine => status;
 export const toastStack = (): readonly Toast[] => toasts;
 export const hasCredentialRetry = (): boolean => credentialRetryAction !== null;
@@ -234,6 +236,12 @@ export function setActiveView(next: ViewId): void {
 export function setWatchMode(mode: "none" | "poll" | "events"): void {
   if (watchMode === mode) return;
   watchMode = mode;
+  notify("status");
+}
+
+export function setWatchFailed(value: boolean): void {
+  if (watchFailed === value) return;
+  watchFailed = value;
   notify("status");
 }
 

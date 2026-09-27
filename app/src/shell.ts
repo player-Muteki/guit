@@ -10,6 +10,7 @@ import {
   currentSnapshot,
   isSessionActive,
   isToolRunning,
+  isWatchFailed,
   isWriteRunning,
   setActiveView,
   statusLine,
@@ -318,7 +319,9 @@ export function createShell(actions: ShellActions): Shell {
     const watch = watchStatus();
     // Only touch the text when it changes: a live region re-announces on every
     // mutation, and this line runs for every streamed progress line.
-    const monitor = watch === "none" ? "" : `Monitor: ${watch === "poll" ? "polling" : "filesystem events"}`;
+    const monitor = watch === "none" ? "" : isWatchFailed()
+      ? "Monitor: refresh failed — use Refresh status"
+      : `Monitor: ${watch === "poll" ? "polling" : "filesystem events"}`;
     if (monitorLabel.textContent !== monitor) monitorLabel.textContent = monitor;
   };
 

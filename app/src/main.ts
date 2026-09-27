@@ -20,6 +20,7 @@ import {
   setActiveView,
   setStatus,
   setWatchMode,
+  setWatchFailed,
   setWriteRunning,
   subscribe,
   VIEW_ORDER,
@@ -77,7 +78,9 @@ async function refreshSession(silent: boolean): Promise<void> {
   refreshingSession = true;
   try {
     applySnapshot(await invoke<SnapshotView | null>("refresh_repository"));
+    setWatchFailed(false);
   } catch (error) {
+    setWatchFailed(true);
     if (!silent) showError(error);
   } finally {
     refreshingSession = false;
@@ -284,8 +287,9 @@ async function confirmTicket(
 
 // --- events ---
 void listen<SnapshotView>("repo-refreshed", ({ payload }) => applySnapshot(payload));
-void listen<{ mode: string }>("watch-status", ({ payload }) => {
+void listen<{ mode: string; failed: boolean }>("watch-status", ({ payload }) => {
   setWatchMode(payload.mode === "poll" ? "poll" : payload.mode === "none" ? "none" : "events");
+  setWatchFailed(payload.failed);
 });
 
 // --- keyboard ---

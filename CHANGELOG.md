@@ -30,6 +30,9 @@ and how much of the app one failure can take with it.
 
 ### Fixed
 
+- Write and external-tool failures now use an error status in the window instead of a success status.
+- A hard-reset preview refuses to proceed when Git cannot list or count the commits it would discard.
+- A failed background refresh stays visible in the monitor line until a refresh succeeds, with a prompt to refresh manually.
 - Failures keep each other. They enter a stack of up to four notices, each with
   its own close button, so a second failure no longer replaces the first and a
   watcher refresh can no longer hide one.

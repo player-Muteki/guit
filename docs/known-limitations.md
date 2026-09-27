@@ -89,6 +89,9 @@ These need a human and a second machine, and are honestly outstanding:
   folders), the watcher **falls back to a 5-second poll** and says so in the
   monitor line — you never get silent staleness, but you may get up to 5 s
   latency in that mode.
+- If a background status read fails, the monitor line reports the failed
+  refresh and points to manual Refresh status. The indication clears after
+  a successful refresh.
 - Keyboard injection into the packaged window could not be automated on this
   host (GNOME Wayland drops synthetic keys for unfocused XWayland windows;
   WebKitGTK exposes no EditableText). Typed-input flows (add remote, set

@@ -100,7 +100,7 @@ export function createRemotesView(deps: RemotesDeps): RemotesView {
     try {
       const result = await invoke<OperationResult>(command, { snapshotVersion: snapshot.version, ...args });
       applySnapshot(result.snapshot);
-      setStatus(result.details ? `${result.message} ${result.details}` : result.message, "success");
+      setStatus(result.details ? `${result.message} ${result.details}` : result.message, result.outcome === "success" ? "success" : "error");
       if (result.outcome === "success" && command === "add_remote") {
         nameInput.value = "";
         urlInput.value = "";

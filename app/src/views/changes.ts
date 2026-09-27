@@ -151,7 +151,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
         fileIds,
       });
       applySnapshot(result.snapshot);
-      setStatus(result.details ? `${result.message} ${result.details}` : result.message, "success");
+      setStatus(result.details ? `${result.message} ${result.details}` : result.message, result.outcome === "success" ? "success" : "error");
     } catch (error) {
       deps.onError(error);
       setStatus("The write did not run.", "error");
@@ -179,7 +179,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
         purpose,
       });
       applySnapshot(result.snapshot);
-      setStatus(result.details ? `${result.message} ${result.details}` : result.message);
+      setStatus(result.details ? `${result.message} ${result.details}` : result.message, result.outcome === "success" ? "success" : "error");
     } catch (error) {
       deps.onError(error);
       setStatus("The external tool did not run.", "error");
@@ -207,7 +207,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     try {
       const result = await invoke<OperationResult>(command, { snapshotVersion: snapshot.version });
       applySnapshot(result.snapshot);
-      setStatus(result.details ? `${result.message} ${result.details}` : result.message, "success");
+      setStatus(result.details ? `${result.message} ${result.details}` : result.message, result.outcome === "success" ? "success" : "error");
     } catch (error) {
       deps.onError(error);
       setStatus("The operation step did not run.", "error");
@@ -232,7 +232,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
         amend,
       });
       applySnapshot(result.snapshot);
-      setStatus(result.details ? `${result.message} ${result.details}` : result.message, "success");
+      setStatus(result.details ? `${result.message} ${result.details}` : result.message, result.outcome === "success" ? "success" : "error");
       if (result.outcome === "success") {
         commitMessage.value = "";
         commitAmend.checked = false;
