@@ -119,7 +119,19 @@
      GRAPH_LANE_REM / GRAPH_NODE_REM in historyModel.ts; a test gates it.
      rem, not px, so the graph grows with interface zoom. */
   --graph-lane: 1rem;
-  --graph-node: 0.25rem;
+  --graph-node: 0.3125rem;
+  /* Stroke weights, in rem so the drawing thickens with interface zoom along
+     with the lanes and the dots. Three tiers, matching what a row is doing:
+     carrying the mainline is a hairline, a lane running past is light, a row
+     where the shape of the work changed is full. The underlay beneath each
+     stroke is a fixed multiple wider than the line it backs, which is what
+     keeps a crossing readable without either line being faded. */
+  --graph-stroke-hairline: 0.09rem;
+  --graph-stroke-lane: 0.105rem;
+  --graph-stroke-strong: 0.14rem;
+  --graph-under-hairline: 0.2rem;
+  --graph-under-lane: 0.26rem;
+  --graph-under-strong: 0.36rem;
   /* Commit-row column widths. Fixed so the subject's left edge and the
      author/date columns line up down the whole list. rem, not px, so they
      hold under interface zoom. The refs column gives up its width on a

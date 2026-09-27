@@ -385,7 +385,7 @@ body {
 .btn-quiet.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .find-count { min-width: 4.5rem; text-align: right; font-size: var(--text-xs); color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .find-count[data-state="error"] { color: var(--danger); }
-.history-list { flex: 1 1 45%; min-height: 0; overflow-y: auto; padding-inline: 0.75rem; }
+.history-list { flex: 1 1 45%; min-height: 0; overflow-y: auto; padding-inline: 0.75rem; container-type: inline-size; }
 .commit-row { display: flex; align-items: baseline; gap: 0.4rem; height: var(--row-height-history); padding-inline: 0.3rem; border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-sm); overflow: hidden; }
 .commit-row:hover { background: var(--surface-hover); }
 .commit-row.selected { background: var(--surface-active); }
@@ -406,6 +406,20 @@ body {
 .commit-author { flex: 0 0 var(--commit-author-width); width: var(--commit-author-width); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: var(--text-xs); }
 .commit-date { flex: 0 0 var(--commit-date-width); width: var(--commit-date-width); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: var(--text-xs); text-align: right; }
 .commit-short { flex: 0 0 auto; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-faint); opacity: 0.75; }
+/* A row that is not wide enough for every column drops them from the least
+   useful to the most, and the subject is the last thing standing. The query is
+   in rem against the list's own width, so it fires for a narrow window and for
+   a narrow window at high zoom alike — a pixel threshold would only ever catch
+   one of the two, because a zoomed window is still a wide window in pixels. */
+@container (max-width: 46rem) {
+  .commit-short { display: none; }
+  .commit-author { display: none; }
+  .commit-refs { flex-basis: 6rem; width: 6rem; }
+  .commit-date { flex-basis: 4.5rem; width: 4.5rem; }
+}
+@container (max-width: 32rem) {
+  .commit-date { display: none; }
+}
 
 /* Commit graph. The gutter is a fixed-width SVG the view sizes from the
    lane metrics; it is decorative next to text that already names each
@@ -421,20 +435,22 @@ body {
 /* Thickness carries the rhythm: a row that only carries the mainline is a
    hairline, a lane running past is light, and a row where a branch opens or
    closes is drawn full. Scanning a long history, the eye lands on the rows
-   where the shape of the work changed. */
-.graph-gutter .graph-line[data-weight="hairline"] { stroke-width: 1; }
-.graph-gutter .graph-line[data-weight="lane"] { stroke-width: 1.25; }
-.graph-gutter .graph-line[data-weight="structural"] { stroke-width: 2; }
-.graph-gutter .graph-node[data-weight="hairline"] { stroke-width: 1; }
-.graph-gutter .graph-node[data-weight="lane"] { stroke-width: 1.25; }
-.graph-gutter .graph-node[data-weight="structural"] { stroke-width: 1.5; }
+   where the shape of the work changed. The weights are tokens in rem, so the
+   gutter thickens under interface zoom instead of thinning out against
+   taller rows. */
+.graph-gutter .graph-line[data-weight="hairline"] { stroke-width: var(--graph-stroke-hairline); }
+.graph-gutter .graph-line[data-weight="lane"] { stroke-width: var(--graph-stroke-lane); }
+.graph-gutter .graph-line[data-weight="structural"] { stroke-width: var(--graph-stroke-strong); }
+.graph-gutter .graph-node[data-weight="hairline"] { stroke-width: var(--graph-stroke-hairline); }
+.graph-gutter .graph-node[data-weight="lane"] { stroke-width: var(--graph-stroke-lane); }
+.graph-gutter .graph-node[data-weight="structural"] { stroke-width: var(--graph-stroke-strong); }
 /* The underlay: the same stroke, wider, in the row's own background. It is
    laid down first so that where two branches cross, the one on top carves a
    clean gap through the one below and neither fuses into a single mark. */
 .graph-gutter .graph-shadow { fill: none; stroke: var(--surface-app); stroke-linecap: round; }
-.graph-gutter .graph-shadow[data-weight="hairline"] { stroke-width: 2.5; }
-.graph-gutter .graph-shadow[data-weight="lane"] { stroke-width: 3.5; }
-.graph-gutter .graph-shadow[data-weight="structural"] { stroke-width: 5; }
+.graph-gutter .graph-shadow[data-weight="hairline"] { stroke-width: var(--graph-under-hairline); }
+.graph-gutter .graph-shadow[data-weight="lane"] { stroke-width: var(--graph-under-lane); }
+.graph-gutter .graph-shadow[data-weight="structural"] { stroke-width: var(--graph-under-strong); }
 .graph-gutter .graph-node[data-shape="normal"] { fill: currentColor; stroke: none; }
 /* A merge is a ring and the first commit is a hollow dot, so their shape —
    not only their colour — tells them apart from a plain commit. Neither is
@@ -452,8 +468,8 @@ body {
 /* The graph acknowledges where you are. The checked-out commit's node is a
    heavier ring, and the selected row's node gains a halo, so following the
    eye down the gutter lands on a marked dot rather than on tinted text. */
-.commit-row.head .graph-gutter .graph-node[data-shape="normal"] { fill: none; stroke: currentColor; stroke-width: 2; }
-.commit-row.selected .graph-gutter .graph-node { stroke-width: 2.5; filter: drop-shadow(0 0 2px currentColor); }
+.commit-row.head .graph-gutter .graph-node[data-shape="normal"] { fill: none; stroke: currentColor; stroke-width: var(--graph-stroke-strong); }
+.commit-row.selected .graph-gutter .graph-node { stroke-width: var(--graph-stroke-strong); filter: drop-shadow(0 0 0.1rem currentColor); }
 .splitter { height: var(--splitter-size); flex: 0 0 auto; background: var(--surface-rail); border-block: 1px solid var(--line); cursor: row-resize; }
 .splitter:hover { background: var(--accent-soft); }
 .history-detail { flex: 0 0 auto; min-height: 8rem; overflow-y: auto; padding: 0.5rem 0.75rem; display: flex; flex-direction: column; gap: 0.4rem; }

@@ -184,15 +184,17 @@ test("a merge is a ring and a branch curves out of it into its own lane", () => 
   assert.ok(branch, "a merge draws the curve into the lane it opens");
   // The curve leaves the node's own column at the dot and reaches the branch
   // lane at the *bottom* of the row, where the next row's lane picks it up.
-  // Its control points are pushed most of a row height from each end, so the
-  // step is drawn as a slope through the space between the two rows.
   const numbers = branch.path.match(/-?\d+(?:\.\d+)?/g).map(Number);
   const [x1, y1, cx1, cy1, cx2, cy2, x2, y2] = numbers;
   assert.deepEqual([x1, y1], [5, 14], "it leaves the node at the dot");
   assert.deepEqual([x2, y2], [15, 28], "and settles into the lane at the row's edge");
-  assert.equal(cx1, x1, "the first control point stays in the node's column");
-  assert.equal(cx2, x2, "the second stays in the branch lane's column");
-  assert.ok(cy1 > y2 && cy2 < y1, "the control points overshoot, so the step curves");
+  assert.equal(cx1, x1, "the first control point stays in the node's column, so it leaves straight");
+  assert.equal(cy2, y2, "it arrives level with the row's edge");
+  assert.ok(
+    cx2 > cx1 && cx2 < x2,
+    "the second control point sits back from the lane, on the approach side",
+  );
+  assert.ok(cy1 > y1 && cy1 < y2, "it bends on the way down, between the two rows");
   // The branch lane must not also run full height: that would draw a stub up
   // to a column that was free above.
   assert.equal(
@@ -236,6 +238,39 @@ test("lanes sharing one parent fold into it instead of running past it", () => {
   }
   // None of them continues below: the node's own column is the only line out.
   assert.equal(parts.filter((part) => part.kind === "line" && part.y2 === 28).length, 1);
+});
+
+test("a lane merging into a commit on its left sweeps in, never past it", () => {
+  // The shape that used to look wrong: three lanes fold back into a commit
+  // drawn in column 0, and the curve used to be pulled to the far side of that
+  // commit and double back. A control point must never sit past the end it
+  // points at, in either direction.
+  const { parts } = rowGeometry(
+    graph({ entry: true, exit: true, incoming: [1, 2, 3] }),
+    4,
+    10,
+    28,
+    3,
+  );
+  for (const lane of [1, 2, 3]) {
+    const curve = parts.find((part) => part.kind === "branch" && part.lane === lane);
+    const [x1, y1, cx1, cy1, cx2, cy2, x2, y2] =
+      curve.path.match(/-?\d+(?:\.\d+)?/g).map(Number);
+    const left = Math.min(x1, x2);
+    const right = Math.max(x1, x2);
+    assert.ok(
+      cx1 >= left && cx1 <= right,
+      `lane ${lane}'s first control point stays within the span it crosses`,
+    );
+    assert.ok(
+      cx2 >= left && cx2 <= right,
+      `lane ${lane}'s second control point stays within the span it crosses`,
+    );
+    // It leaves straight down its own lane and arrives level with the node.
+    assert.equal(cx1, x1, `lane ${lane} leaves straight`);
+    assert.equal(cy2, y2, `lane ${lane} arrives level with the node`);
+    assert.ok(cy1 > y1 && cy1 < y2, `lane ${lane} bends on the way in`);
+  }
 });
 
 test("a row's ink weight tracks whether anything structural happens there", () => {

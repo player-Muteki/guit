@@ -35,7 +35,10 @@ export function buildHistoryRows(commits: readonly CommitView[]): HistoryRow[] {
 // with it. The lane is a full rem wide so a curve leaving the mainline has
 // somewhere to go before it settles into its own column.
 export const GRAPH_LANE_REM = 1;
-export const GRAPH_NODE_REM = 0.25;
+// The dot has to be findable at a glance down a long list without shouting
+// over the line it sits on. A merge ring is this plus its stroke, and two
+// neighbouring rings still clear each other inside one lane's width.
+export const GRAPH_NODE_REM = 0.3125;
 
 export function graphLanePx(baseFontPx: number): number {
   return baseFontPx * GRAPH_LANE_REM;
@@ -149,13 +152,19 @@ export function rowGeometry(
   // A curve that changes column is drawn in the space between the two rows it
   // joins: a branch leaves the node at the middle of this row and reaches its
   // lane at the bottom edge, where the next row's lane picks it up; a
-  // converging lane enters at the top edge and arrives at the node. The
-  // control points sit most of a row height from their ends, which is what
-  // turns the step into a slope instead of a right angle.
-  const reach = rowHeight * 0.8;
+  // converging lane enters at the top edge and arrives at the node.
+  //
+  // Each control point is held on the axis it is *not* travelling along: the
+  // first shares the start's column, so the line leaves straight, and the
+  // second shares the end's height, so it arrives level. That is the elbow of
+  // water finding its level. It also means no control point is ever placed
+  // past the end it points at — a lane merging into a commit on its left
+  // sweeps into it, rather than sailing past it and doubling back, which is
+  // what putting every control point on the same side of its end produces.
   const curve = (x1: number, y1: number, x2: number, y2: number): string => {
-    const descending = y2 > y1;
-    return `M ${x1} ${y1} C ${x1} ${y1 + (descending ? reach : -reach)} ${x2} ${y2 + (descending ? -reach : reach)} ${x2} ${y2}`;
+    const across = (x2 - x1) * 0.55;
+    const down = (y2 - y1) * 0.55;
+    return `M ${x1} ${y1} C ${x1} ${y1 + down} ${x2 - across} ${y2} ${x2} ${y2}`;
   };
   for (const lane of graph.branches) {
     parts.push({
