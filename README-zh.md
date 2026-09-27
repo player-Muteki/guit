@@ -28,15 +28,15 @@ helper 和 ssh-agent 的行为和在终端里完全一致，因为底下并没�
 ## 安装（Linux）
 
 ```sh
-sudo dpkg -i guit_0.1.0_amd64.deb     # Debian / Ubuntu
-sudo rpm -i guit-0.1.0-1.x86_64.rpm   # Fedora / openSUSE
+sudo dpkg -i guit_0.0.1_amd64.deb     # Debian / Ubuntu
+sudo rpm -i guit-0.0.1-1.x86_64.rpm   # Fedora / openSUSE
 ```
 
 AppImage 也能跑，但构建和运行都需要设置 `APPIMAGE_EXTRACT_AND_RUN=1`，因为
 `appimagetool` 挂载镜像需要 FUSE：
 
 ```sh
-APPIMAGE_EXTRACT_AND_RUN=1 ./guit_0.1.0_amd64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./guit_0.0.1_amd64.AppImage
 ```
 
 ## 上手

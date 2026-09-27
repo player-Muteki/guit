@@ -67,3 +67,5 @@ jobs:
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - run: npm run tauri build -- --bundles ${{ matrix.bundles }}
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1

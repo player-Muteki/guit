@@ -1,8 +1,8 @@
 # Known limitations
 
-Honest list for the build after v0.1.0 (2026-09-26). Everything below was
-**measured on Linux**; "not verified" is stated explicitly where it applies.
-What changed since v0.1.0 is in `CHANGELOG.md`, not here.
+Honest list for v0.0.1. Everything below was **measured on Linux**;
+"not verified" is stated explicitly where it applies. Changes are recorded
+in `CHANGELOG.md`.
 
 ## Platform coverage
 
@@ -23,9 +23,8 @@ credential retry is refused with guidance to use a `credential.helper`
 platform — ssh-agent is the only supported path.
 
 Continuous integration is configured (`.github/workflows/`) for per-platform
-bundles, but **it has never executed: there is no git remote for this
-project**. No CI pass is claimed anywhere, and none should be inferred from
-the workflow files being present.
+bundles. No CI pass has been confirmed; none should be inferred from the
+workflow files being present.
 
 ## Manual gates still open
 
@@ -64,8 +63,8 @@ These need a human and a second machine, and are honestly outstanding:
   repository's *file* count rather than with its submodule count. It used to
   share the 64 KB bound meant for one-shot tool output, so any repository of
   roughly a thousand files or more reported the submodule list as too large —
-  including repositories with no submodules at all. Fixed since v0.1.0, so a
-  0.1.0 install still has the old behaviour.
+  including repositories with no submodules at all. The larger bound fixes
+  that failure in this release.
 - Extremely large repositories may therefore surface "output too large"
   errors instead of partial listings; manual refresh is always offered.
 
@@ -103,11 +102,9 @@ These need a human and a second machine, and are honestly outstanding:
 - guit shows no file contents, diffs, or editor. Diffs, conflict resolution
   and file opening always leave for external tools
   (see `docs/external-tools.md`).
-- ~~The window has one error alert slot~~ **Fixed since v0.1.0.** Failures now
-  enter a toast stack (top-right, up to four, each with its own close
-  button) instead of a single slot, so a second failure no longer replaces
-  the first and a watcher refresh can no longer hide it. The old limit
-  applied up to v0.1.0.
+- Failures enter a toast stack (top-right, up to four, each with its own close
+  button), so a second failure does not replace the first and a watcher
+  refresh cannot hide it.
 - Force pushes and destructive operations are only possible through the
   preview → recheck → confirm ticket flow; tickets are single-use and die
   with the process (a restart cannot resurrect one).

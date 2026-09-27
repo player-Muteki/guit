@@ -7,9 +7,10 @@ is the record of what is not verified.
 
 ## [Unreleased]
 
-Everything that has landed since 0.1.0. None of it changes what guit can do to
-your repository; it changes the shape of the window, what a failure tells you,
-and how much of the app one failure can take with it.
+## [0.0.1] - 2026-09-27
+
+First public release. Runtime verification is limited to Linux; Windows and
+macOS have build configuration only (see `docs/known-limitations.md`).
 
 ### Changed
 
@@ -116,13 +117,7 @@ and how much of the app one failure can take with it.
   quotes, so the redirection and the bookkeeping were lost and every round
   looked like it had passed.
 
-## [0.1.0] - 2026-09-25
-
-First feature-complete release. Verified on Linux
-(Ubuntu 26.04, Git 2.53); Windows and macOS runtime verification is pending
-(see `docs/known-limitations.md`).
-
-### Added
+### Initial feature set
 
 - Repository session: open a repository (or clone one), persistent recent
   list, automatic restore at startup, live watcher with monitor line and
@@ -160,7 +155,7 @@ First feature-complete release. Verified on Linux
   recent redacted operation records — never tickets, secrets, prompts or
   file contents.
 
-### Changed
+### Packaging
 
 - Installer metadata: publisher, license (MIT) and package descriptions.
 
