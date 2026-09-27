@@ -1,6 +1,6 @@
 use crate::perf;
 use crate::probe::{redact, ProbeError};
-use crate::{repo, runner};
+use crate::{branches, repo, runner};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -44,6 +44,11 @@ pub struct CommitView {
     pub commit_date: String,
     /// Raw `%D` decoration tokens ("HEAD -> main", "tag: v1", "origin/main").
     pub refs: Vec<String>,
+    /// The same decorations, sorted by kind and ready to render. The raw
+    /// tokens are kept because they are exactly what Git said; the labels are
+    /// what the view needs in order to give a branch, a tag and a remote
+    /// track each a shape of their own.
+    pub labels: RefLabels,
     /// This commit's place in the graph, computed by the backend so the
     /// frontend only maps columns to pixels.
     pub graph: GraphRow,
@@ -120,13 +125,21 @@ pub struct Node {
 /// drawn first-parent and every row is marked `folded`: a graph that does
 /// not fit the gutter must say so rather than draw lanes that collide.
 pub fn assign_lanes(nodes: &[Node], max_lanes: u8) -> Vec<GraphRow> {
+    assign_lanes_with(nodes, max_lanes, true)
+}
+
+/// As `assign_lanes`, but when `follow_all` is false only each commit's first
+/// parent is followed. The mainline is then a straight line even through
+/// merges: a merge commit still says it is a merge, but the branches it
+/// brought in are not walked, because the view asked not to follow them.
+pub fn assign_lanes_with(nodes: &[Node], max_lanes: u8, follow_all: bool) -> Vec<GraphRow> {
     if nodes.is_empty() {
         return Vec::new();
     }
     let present: std::collections::HashSet<&str> =
         nodes.iter().map(|node| node.oid.as_str()).collect();
-    let (rows, peak) = layout(nodes, &present);
-    if peak > usize::from(max_lanes) {
+    let (rows, peak) = layout(nodes, &present, follow_all);
+    if follow_all && peak > usize::from(max_lanes) {
         return nodes
             .iter()
             .map(|node| folded_row(node, &present))
@@ -172,7 +185,11 @@ fn take_free(owner: &mut Vec<Option<&str>>, from: usize) -> usize {
 /// Assigns lanes and reports how many columns were ever live at once. The
 /// width is measured from the same pass that draws, so the fold decision can
 /// never be made against a different algorithm than the one that renders.
-fn layout(nodes: &[Node], present: &std::collections::HashSet<&str>) -> (Vec<GraphRow>, usize) {
+fn layout(
+    nodes: &[Node],
+    present: &std::collections::HashSet<&str>,
+    follow_all: bool,
+) -> (Vec<GraphRow>, usize) {
     let mut owner: Vec<Option<&str>> = Vec::new();
     let mut rows = Vec::with_capacity(nodes.len());
     let mut peak = 0usize;
@@ -203,11 +220,14 @@ fn layout(nodes: &[Node], present: &std::collections::HashSet<&str>) -> (Vec<Gra
             if index == 0 {
                 owner[column] = Some(parent);
                 exit = true;
-            } else {
+            } else if follow_all {
                 let branch = take_free(&mut owner, column + 1);
                 owner[branch] = Some(parent);
                 branches.push(branch as u8);
             }
+            // A parent past the first stays in the commit's own parent list, so
+            // `merge` below remains honest; it is simply not followed into a
+            // lane when the view asked for the mainline alone.
         }
         peak = peak.max(owner.iter().filter(|waiting| waiting.is_some()).count());
         let lanes = (0..owner.len())
@@ -226,11 +246,76 @@ fn layout(nodes: &[Node], present: &std::collections::HashSet<&str>) -> (Vec<Gra
             dangling: node
                 .parents
                 .iter()
+                .take(if follow_all { usize::MAX } else { 1 })
                 .any(|parent| !present.contains(parent.as_str())),
             folded: false,
         });
     }
     (rows, peak)
+}
+
+/// The decorations on a commit, taken apart by kind. `%D` hands back one
+/// comma-separated string mixing all three; sorting them here means the view
+/// never has to know Git's decoration vocabulary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefLabels {
+    /// Local branch tips, without the `HEAD ->` prefix.
+    pub branches: Vec<String>,
+    /// Tag names, without the `tag: ` prefix.
+    pub tags: Vec<String>,
+    /// Remote-tracking branches, without the `origin/` prefix.
+    pub remotes: Vec<String>,
+    /// The commit is the one HEAD points at.
+    pub head: bool,
+}
+
+/// The names of the repository's remotes. `%D` abbreviates a remote-tracking
+/// branch to `remote/branch`, which is indistinguishable from a local branch
+/// that happens to be called `origin/main` — so telling the two apart needs
+/// the actual remote names rather than a guess at the spelling.
+fn remote_names(directory: &Path) -> Vec<String> {
+    let Ok(output) = branches::run_git(directory, &["remote"], &AtomicBool::new(false)) else {
+        // No readable remote list is not a reason to fail a page: the labels
+        // fall back to calling every decoration a branch, which is a naming
+        // choice, not a wrong fact.
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Splits one `%D` field into its decorations. Git's own prefixes are the
+/// whole grammar here: `HEAD -> name` marks the checked-out branch, `tag: `
+/// a tag, and anything starting with a known remote's name is that remote's
+/// tracking branch.
+fn parse_labels(raw: &str, remotes: &[String]) -> RefLabels {
+    let mut labels = RefLabels::default();
+    for token in raw.split(", ").filter(|token| !token.is_empty()) {
+        if let Some(name) = token.strip_prefix("HEAD -> ") {
+            labels.head = true;
+            labels.branches.push(name.to_owned());
+        } else if let Some(name) = token.strip_prefix("tag: ") {
+            labels.tags.push(name.to_owned());
+        } else if token == "HEAD" {
+            labels.head = true;
+        } else if remotes
+            .iter()
+            .any(|remote| token.starts_with(&format!("{remote}/")))
+        {
+            labels.remotes.push(token.to_owned());
+        } else {
+            labels.branches.push(token.to_owned());
+        }
+    }
+    labels
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -269,6 +354,7 @@ pub fn parse(
     bytes: &[u8],
     graph: &[GraphRow],
     start: usize,
+    remotes: &[String],
 ) -> Result<Vec<CommitView>, ProbeError> {
     let mut commits = Vec::new();
     for record in bytes.split(|b| *b == RECORD_SEP) {
@@ -308,6 +394,7 @@ pub fn parse(
                 "The history changed while the graph was being drawn; reload to try again.",
             )
         })?;
+        let decorations = lossy(fields[8]);
         commits.push(CommitView {
             oid: lossy(fields[0]),
             parents: lossy(fields[1])
@@ -321,11 +408,12 @@ pub fn parse(
             author_date: lossy(fields[4]),
             committer_name: lossy(fields[5]),
             commit_date: lossy(fields[7]),
-            refs: lossy(fields[8])
+            refs: decorations
                 .split(", ")
                 .filter(|t| !t.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            labels: parse_labels(&decorations, remotes),
             message,
             graph: row.clone(),
         });
@@ -376,7 +464,12 @@ fn parse_topology(bytes: &[u8]) -> Result<Vec<Node>, ProbeError> {
 /// slice the graph is laid out over. Deliberately a separate, cheap call:
 /// it carries no message bytes, so the prefix a deep page needs stays small
 /// enough that the graph can never be the thing that trips the capture bound.
-fn topology(directory: &Path, count: u64, target: Option<&str>) -> Result<Vec<Node>, ProbeError> {
+fn topology(
+    directory: &Path,
+    count: u64,
+    target: Option<&str>,
+    first_parent: bool,
+) -> Result<Vec<Node>, ProbeError> {
     let mut command = repo::user_git_command(directory);
     command.args([
         "log",
@@ -386,6 +479,9 @@ fn topology(directory: &Path, count: u64, target: Option<&str>) -> Result<Vec<No
         "-n",
         &count.to_string(),
     ]);
+    if first_parent {
+        command.arg("--first-parent");
+    }
     if let Some(rev) = target {
         command.arg(rev);
     }
@@ -428,6 +524,7 @@ pub fn page(
     start: u64,
     target: Option<&str>,
     limit: u64,
+    first_parent: bool,
 ) -> Result<HistoryPage, ProbeError> {
     let mut command = repo::user_git_command(directory);
     command.args([
@@ -441,6 +538,11 @@ pub fn page(
         "--skip",
         &start.to_string(),
     ]);
+    // Both reads carry the flag: the graph is laid out over the same history
+    // the page lists, or the lanes would describe commits that are not there.
+    if first_parent {
+        command.arg("--first-parent");
+    }
     if let Some(rev) = target {
         command.arg(rev);
     }
@@ -472,9 +574,11 @@ pub fn page(
         directory,
         start.saturating_add(limit).saturating_add(1),
         target,
+        first_parent,
     )?;
-    let rows = assign_lanes(&nodes, MAX_LANES);
-    let mut commits = parse(&output.stdout, &rows, start as usize)?;
+    let rows = assign_lanes_with(&nodes, MAX_LANES, !first_parent);
+    let remotes = remote_names(directory);
+    let mut commits = parse(&output.stdout, &rows, start as usize, &remotes)?;
     perf::mark("history.graph", graph_start.elapsed());
     perf::mark("history.parse", parse_start.elapsed());
     let has_more = commits.len() as u64 > limit;
@@ -672,7 +776,7 @@ mod tests {
             &repo,
             &["commit", "-q", "--allow-empty", "--no-verify", "-m", body],
         );
-        let page = page(&repo, 0, None, 10).unwrap();
+        let page = page(&repo, 0, None, 10, false).unwrap();
         assert_eq!(page.commits.len(), 1);
         assert_eq!(page.commits[0].message, body);
         assert_eq!(page.commits[0].subject, "subject line");
@@ -693,7 +797,7 @@ mod tests {
         let mut collected = Vec::new();
         let mut start = 0;
         loop {
-            let page = page(&repo, start, None, 3).unwrap();
+            let page = page(&repo, start, None, 3, false).unwrap();
             assert_eq!(page.start, start);
             collected.extend(page.commits.iter().map(|c| c.oid.clone()));
             if !page.has_more {
@@ -703,7 +807,7 @@ mod tests {
         }
         assert_eq!(collected, expected);
         // A second pass over the same cursor returns identical pages.
-        let again = page(&repo, 3, None, 3).unwrap();
+        let again = page(&repo, 3, None, 3, false).unwrap();
         assert_eq!(again.commits.len(), 3);
         assert_eq!(again.commits[0].oid, expected[3]);
     }
@@ -721,7 +825,7 @@ mod tests {
             &repo,
             &["merge", "--no-ff", "-q", "-m", "the merge", "side"],
         );
-        let page = page(&repo, 0, None, 10).unwrap();
+        let page = page(&repo, 0, None, 10, false).unwrap();
         let order: Vec<&str> = page.commits.iter().map(|c| c.oid.as_str()).collect();
         let merge = &page.commits[0];
         assert_eq!(merge.subject, "the merge");
@@ -740,11 +844,11 @@ mod tests {
     #[test]
     fn parsing_rejects_short_records_instead_of_guessing() {
         let broken = b"abc\x1fdef"; // fewer than FIELD_COUNT fields
-        let error = parse(broken, &plain_graph(4), 0).unwrap_err();
+        let error = parse(broken, &plain_graph(4), 0, &[]).unwrap_err();
         assert_eq!(error.code, "history_protocol_error");
         // Empty input and trailing separators parse to zero commits.
-        assert_eq!(parse(&[], &plain_graph(4), 0).unwrap().len(), 0);
-        assert_eq!(parse(b"\x00", &plain_graph(4), 0).unwrap().len(), 0);
+        assert_eq!(parse(&[], &plain_graph(4), 0, &[]).unwrap().len(), 0);
+        assert_eq!(parse(b"\x00", &plain_graph(4), 0, &[]).unwrap().len(), 0);
     }
 
     #[test]
@@ -758,7 +862,7 @@ mod tests {
             "a".repeat(40)
         );
         assert_eq!(
-            parse(one.as_bytes(), &[], 0).unwrap_err().code,
+            parse(one.as_bytes(), &[], 0, &[]).unwrap_err().code,
             "history_graph_mismatch"
         );
     }
@@ -771,13 +875,14 @@ mod tests {
             0,
             Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
             10,
+            false,
         )
         .unwrap_err();
         assert_eq!(error.code, "history_page_failed");
         assert!(!error.message.is_empty());
         // Unborn HEAD: the caller gates on the session branch state, the
         // raw page surfaces Git's refusal without pretending to be empty.
-        let error = page(&repo, 0, None, 10).unwrap_err();
+        let error = page(&repo, 0, None, 10, false).unwrap_err();
         assert_eq!(error.code, "history_page_failed");
     }
 
@@ -799,11 +904,86 @@ mod tests {
         let oid = commit(&repo, "tagged");
         git(&repo, &["tag", "v1"]);
         git(&repo, &["branch", "keep"]);
-        let page = page(&repo, 0, Some(&oid), 10).unwrap();
+        let page = page(&repo, 0, Some(&oid), 10, false).unwrap();
         let refs = &page.commits[0].refs;
         assert!(refs.iter().any(|t| t == "tag: v1"), "{refs:?}");
         assert!(refs.iter().any(|t| t.contains("main")), "{refs:?}");
         assert!(refs.iter().any(|t| t == "keep"), "{refs:?}");
+        // The raw tokens are kept, and the labels sort them by kind.
+        let labels = &page.commits[0].labels;
+        assert!(labels.head, "the fixture is on the commit it just made");
+        assert_eq!(labels.tags, vec!["v1"], "{labels:?}");
+        assert!(labels.branches.contains(&"keep".to_owned()), "{labels:?}");
+    }
+
+    #[test]
+    fn a_decoration_is_a_branch_a_tag_or_a_remote_and_nothing_else() {
+        // Telling a remote-tracking branch from a local one that happens to
+        // be called the same thing needs the real remote names, so the
+        // classification is exercised directly.
+        let remotes = vec!["origin".to_owned(), "up".to_owned()];
+        let labels = parse_labels(
+            "HEAD -> main, tag: v2, origin/main, up/next, solo",
+            &remotes,
+        );
+        assert!(labels.head);
+        assert_eq!(labels.branches, vec!["main", "solo"], "{labels:?}");
+        assert_eq!(labels.tags, vec!["v2"], "{labels:?}");
+        assert_eq!(labels.remotes, vec!["origin/main", "up/next"], "{labels:?}");
+
+        // With no remote list, a name that looks like `remote/branch` is
+        // reported as a branch: a naming choice, never a wrong fact.
+        let unknown = parse_labels("origin/main", &[]);
+        assert_eq!(unknown.branches, vec!["origin/main"]);
+        assert!(unknown.remotes.is_empty());
+
+        // A bare HEAD, and an empty field.
+        assert!(parse_labels("HEAD", &[]).head);
+        assert_eq!(parse_labels("", &[]), RefLabels::default());
+    }
+
+    #[test]
+    fn first_parent_keeps_only_the_mainline_and_its_graph_agrees() {
+        // The flag has to reach *both* reads, or the graph would be laid out
+        // over a history the page is not showing.
+        let (_root, repo) = fixture();
+        let base = commit(&repo, "base");
+        git(&repo, &["branch", "side"]);
+        commit(&repo, "on main");
+        git(&repo, &["switch", "-q", "side"]);
+        commit(&repo, "on side");
+        git(&repo, &["switch", "-q", "main"]);
+        git(
+            &repo,
+            &["merge", "--no-ff", "-q", "-m", "the merge", "side"],
+        );
+
+        let all = page(&repo, 0, None, 20, false).unwrap();
+        assert!(
+            all.commits.iter().any(|c| c.subject == "on side"),
+            "the default keeps every reachable commit"
+        );
+        let first = page(&repo, 0, None, 20, true).unwrap();
+        assert!(
+            !first.commits.iter().any(|c| c.subject == "on side"),
+            "first-parent leaves the side branch out"
+        );
+        assert!(first.commits.iter().any(|c| c.subject == "the merge"));
+        assert!(first.commits.iter().any(|c| c.oid == base));
+        // A first-parent history is a straight line: the merge is still marked
+        // as a merge (it factually is one) but nothing branches off it, and no
+        // lane is left running.
+        for commit in &first.commits {
+            assert!(commit.graph.lanes.is_empty(), "{}", commit.subject);
+            assert!(commit.graph.branches.is_empty(), "{}", commit.subject);
+            assert!(commit.graph.incoming.is_empty(), "{}", commit.subject);
+        }
+        let merge = first
+            .commits
+            .iter()
+            .find(|c| c.subject == "the merge")
+            .unwrap();
+        assert!(merge.graph.merge, "it is still a merge commit by fact");
     }
 
     fn touch(repo: &Path, name: &str, content: &str) {

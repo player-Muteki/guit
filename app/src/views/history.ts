@@ -10,11 +10,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, plural } from "../dom";
 import {
   buildHistoryRows,
+  commitMatches,
+  filterCommits,
+  findError,
   graphColumns,
   graphLanePx,
   graphNodePx,
   historyPageStart,
+  matchPosition,
   rowGeometry,
+  stepMatch,
+  type FindQuery,
 } from "../historyModel";
 import { revealScroll, rowHeightPx, visibleWindow, HISTORY_ROW_REM } from "../fileModel";
 import { currentFontPx } from "../font";
@@ -52,9 +58,50 @@ export interface HistoryView {
 export function createHistoryView(deps: HistoryDeps): HistoryView {
   const element = el("section", { class: "view-body history-view" });
 
+  // The find box and the mainline toggle sit in the list head, above the
+  // graph, because both change what the graph is showing rather than what the
+  // window is.
+  const findInput = el("input", {
+    class: "history-find",
+    type: "search",
+    placeholder: "Find in loaded commits",
+    "aria-label": "Find in loaded commits",
+  }) as HTMLInputElement;
+  const findCase = button("Aa", () => toggleFindCase(), {
+    class: "btn btn-quiet find-mod",
+    ariaLabel: "Match case",
+    title: "Match case",
+  });
+  const findRegex = button(".*", () => toggleFindRegex(), {
+    class: "btn btn-quiet find-mod",
+    ariaLabel: "Use regular expression",
+    title: "Use regular expression",
+  });
+  const findPrev = button("↑", () => void stepFind(-1), {
+    class: "btn btn-quiet find-step",
+    ariaLabel: "Previous match",
+    title: "Previous match (Shift+Enter)",
+  });
+  const findNext = button("↓", () => void stepFind(1), {
+    class: "btn btn-quiet find-step",
+    ariaLabel: "Next match",
+    title: "Next match (Enter)",
+  });
+  const findCount = el("span", { class: "find-count", role: "status" });
+  const findBox = el("div", { class: "history-findbox", hidden: true }, [
+    findInput, findCase, findRegex, findCount, findPrev, findNext,
+  ]);
+  const firstParentToggle = el("input", { type: "checkbox", id: "history-first-parent" }) as HTMLInputElement;
+  const firstParentLabel = el("label", { class: "checkbox", for: "history-first-parent" }, [
+    firstParentToggle, el("span", { text: "Mainline only" }),
+  ]);
+  firstParentLabel.title =
+    "Follow only each commit's first parent: the straight line of the branch, with the branches it merged left out.";
   const moreButton = el("button", { class: "btn", type: "button", text: "Load older", disabled: true });
   const countLabel = el("span", { class: "history-count", role: "status" });
-  const listHead = el("div", { class: "history-list-head" }, [countLabel, el("div", { class: "spacer" }), moreButton]);
+  const listHead = el("div", { class: "history-list-head" }, [
+    countLabel, el("div", { class: "spacer" }), firstParentLabel, findBox, moreButton,
+  ]);
 
   const rowsHost = el("div", { class: "virtual-rows" });
   const virtual = el("div", { class: "virtual" }, [rowsHost]);
@@ -90,6 +137,18 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   let selected: CommitView | null = null;
   let selectedIndex = -1;
   let detailHeight = 240;
+  // Whether the page is the whole history or only each commit's first parent.
+  // This is Git's own notion of a mainline, so the backend decides what it
+  // means; the view only asks for one or the other.
+  let firstParent = false;
+  // The find box searches what is loaded and says so; it never claims to have
+  // searched commits that were never fetched.
+  let find: FindQuery = { text: "", regex: false, caseSensitive: false };
+  // The commits actually shown: the loaded ones, filtered. The graph is laid
+  // out by the backend over everything loaded, and filtering only hides rows,
+  // so a hidden branch is still there in the graph when the box is cleared.
+  let visible: CommitView[] = [];
+  let findOpen = false;
 
   // --- detail rendering ---
   const detailMessage = el("pre", { class: "commit-message" });
@@ -251,6 +310,63 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     }
   };
 
+  // --- finding ---
+  const applyFind = (): void => {
+    visible = filterCommits(commits, find);
+    const error = findError(find);
+    if (error !== null) {
+      findCount.textContent = error;
+      findCount.dataset.state = "error";
+    } else {
+      const { index, total } = matchPosition(commits, find, selected?.oid ?? null);
+      findCount.dataset.state = "ok";
+      findCount.textContent =
+        find.text === "" ? "" : total === 0 ? "No match" : `${index + 1} of ${total}`;
+    }
+    findCase.classList.toggle("active", find.caseSensitive);
+    findRegex.classList.toggle("active", find.regex);
+    // A search with no match is not an empty history, so the rows are kept
+    // and the count is what says so.
+    renderRows();
+  };
+
+  const toggleFindCase = (): void => {
+    find = { ...find, caseSensitive: !find.caseSensitive };
+    applyFind();
+  };
+
+  const toggleFindRegex = (): void => {
+    find = { ...find, regex: !find.regex };
+    applyFind();
+  };
+
+  const openFind = (): void => {
+    findOpen = true;
+    findBox.hidden = false;
+    findInput.focus();
+    findInput.select();
+  };
+
+  const closeFind = (): void => {
+    findOpen = false;
+    findBox.hidden = true;
+    if (find.text !== "") {
+      find = { ...find, text: "" };
+      findInput.value = "";
+      applyFind();
+    }
+    listPane.focus();
+  };
+
+  const stepFind = (delta: 1 | -1): void => {
+    const next = stepMatch(commits, find, selected?.oid ?? null, delta);
+    if (next === null) return;
+    const index = visible.findIndex((commit) => commit.oid === next);
+    if (index < 0) return;
+    listPane.scrollTop = revealScroll(listPane.scrollTop, listPane.clientHeight || 240, index, rowHeight());
+    setSelected(visible[index], index);
+  };
+
   // --- list ---
   const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -341,6 +457,24 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     return svg;
   };
 
+  // The decorations on a commit, each kind given its own shape so a branch, a
+  // tag and a remote-tracking branch can be told apart at a glance. Order is
+  // fixed (branch, tag, remote) so the column does not shuffle between rows.
+  const refChips = (commit: CommitView): HTMLElement[] => {
+    const { labels } = commit;
+    const chips: HTMLElement[] = [];
+    for (const branch of labels.branches) {
+      chips.push(el("span", { class: "commit-ref ref-branch", text: branch, title: `Branch ${branch}` }));
+    }
+    for (const tag of labels.tags) {
+      chips.push(el("span", { class: "commit-ref ref-tag", text: tag, title: `Tag ${tag}` }));
+    }
+    for (const remote of labels.remotes) {
+      chips.push(el("span", { class: "commit-ref ref-remote", text: remote, title: `Remote branch ${remote}` }));
+    }
+    return chips;
+  };
+
   // A commit's kind is a fact about the history, not about the drawing, so it
   // is spelled out for anyone not looking at the gutter.
   const rowDescription = (commit: CommitView): string => {
@@ -356,6 +490,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
 
   const placeholder = (message: string): void => {
     commits = [];
+    visible = [];
     hasMore = false;
     selected = null;
     selectedIndex = -1;
@@ -379,6 +514,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       const page = await invoke<HistoryPage>("history_page", {
         start: historyPageStart(commits.length, reset),
         oid: null,
+        firstParent,
       });
       // The session may have closed or moved on while this request ran.
       if (repoKey !== (currentSnapshot()?.branch?.oid ?? null)) return;
@@ -386,12 +522,14 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       hasMore = page.hasMore;
       gutterColumns = graphColumns(commits);
       graphFolded = commits.some((commit) => commit.graph.folded);
+      visible = filterCommits(commits, find);
       listPane.hidden = false;
       splitter.hidden = false;
       emptyState.hidden = true;
       countLabel.textContent =
         plural(commits.length, "commit") +
         (hasMore ? " so far." : " — all loaded.") +
+        (firstParent ? " on the mainline." : "") +
         // A folded graph is drawn on the first-parent line, so the shape on
         // screen is simpler than the history. Say which it is rather than let
         // the drawing imply a history with no branches in it.
@@ -407,8 +545,8 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   };
 
   const renderRows = (): void => {
-    if (commits.length === 0) return;
-    const rows = buildHistoryRows(commits);
+    if (visible.length === 0) return;
+    const rows = buildHistoryRows(visible);
     const fontPx = currentFontPx();
     const rowHeightNow = rowHeightPx(fontPx, HISTORY_ROW_REM);
     const viewport = listPane.clientHeight || 240;
@@ -430,8 +568,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         // left, so the subject's left edge, the authors and the dates all line
         // up down the list. One reading eye can then scan a column instead of
         // re-finding where each row's text begins.
-        el("span", { class: "commit-refs", "aria-hidden": "true" },
-          commit.refs.map((ref) => el("span", { class: "commit-ref", text: ref }))),
+        el("span", { class: "commit-refs", "aria-hidden": "true" }, refChips(commit)),
         el("span", { class: "commit-subject", text: commit.subject, title: commit.subject }),
         el("span", { class: "commit-author", text: commit.authorName, title: commit.authorName }),
         el("span", { class: "commit-date", text: commit.authorDate.slice(0, 10) }),
@@ -472,31 +609,57 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
 
   // --- events ---
   moreButton.addEventListener("click", () => void loadPage(false));
+  firstParentToggle.addEventListener("change", () => {
+    firstParent = firstParentToggle.checked;
+    // A different history entirely, so the pages loaded under the old
+    // question no longer apply; page zero is read again.
+    void loadPage(true);
+  });
+  findInput.addEventListener("input", () => {
+    find = { ...find, text: findInput.value };
+    applyFind();
+  });
+  findInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      stepFind(event.shiftKey ? -1 : 1);
+      event.preventDefault();
+    } else if (event.key === "Escape") {
+      closeFind();
+      event.preventDefault();
+    }
+  });
   listPane.addEventListener("scroll", () => {
-    if (commits.length > 0) renderRows();
+    if (visible.length > 0) renderRows();
   }, { passive: true });
   window.addEventListener("resize", () => {
-    if (commits.length > 0) renderRows();
+    if (visible.length > 0) renderRows();
   });
   listPane.addEventListener("keydown", (event) => {
-    if (commits.length === 0) return;
+    if (visible.length === 0) return;
     const viewport = listPane.clientHeight || 240;
     let target = -2;
     switch (event.key) {
-      case "ArrowDown": target = selectedIndex < 0 ? 0 : Math.min(selectedIndex + 1, commits.length - 1); break;
+      case "ArrowDown": target = selectedIndex < 0 ? 0 : Math.min(selectedIndex + 1, visible.length - 1); break;
       case "ArrowUp": target = selectedIndex < 0 ? 0 : Math.max(selectedIndex - 1, 0); break;
       case "Home": target = 0; break;
-      case "End": target = commits.length - 1; break;
+      case "End": target = visible.length - 1; break;
       case "Enter":
-        if (selectedIndex >= 0) setSelected(commits[selectedIndex], selectedIndex);
+        if (selectedIndex >= 0) setSelected(visible[selectedIndex], selectedIndex);
         event.preventDefault();
+        return;
+      case "/":
+        openFind();
+        event.preventDefault();
+        return;
+      case "Escape":
+        if (findOpen) closeFind();
         return;
       default: return;
     }
     event.preventDefault();
     if (target < 0) return;
     listPane.scrollTop = revealScroll(listPane.scrollTop, viewport, target, rowHeight());
-    setSelected(commits[target], target);
+    setSelected(visible[target], target);
   });
 
   // --- lifecycle ---

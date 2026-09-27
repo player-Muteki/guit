@@ -217,6 +217,16 @@ export type GraphRow = {
   folded: boolean;
 };
 
+// The decorations on a commit, taken apart by kind by the backend. The view
+// never parses Git's decoration vocabulary; it just gives each kind its own
+// shape.
+export type RefLabels = {
+  branches: string[];
+  tags: string[];
+  remotes: string[];
+  head: boolean;
+};
+
 export type CommitView = {
   oid: string;
   parents: string[];
@@ -228,6 +238,7 @@ export type CommitView = {
   committerName: string;
   commitDate: string;
   refs: string[];
+  labels: RefLabels;
   graph: GraphRow;
 };
 

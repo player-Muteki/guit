@@ -540,6 +540,7 @@ async fn history_page(
     app: tauri::AppHandle,
     start: u64,
     oid: Option<String>,
+    first_parent: Option<bool>,
 ) -> Result<history::HistoryPage, ProbeError> {
     if let Some(target) = &oid {
         if !history::valid_oid(target) {
@@ -574,7 +575,13 @@ async fn history_page(
                 has_more: false,
             });
         }
-        history::page(directory, start, oid.as_deref(), history::PAGE_SIZE)
+        history::page(
+            directory,
+            start,
+            oid.as_deref(),
+            history::PAGE_SIZE,
+            first_parent.unwrap_or(false),
+        )
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?

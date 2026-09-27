@@ -358,7 +358,23 @@ body {
 /* --- history view --- */
 .history-view { padding: 0; }
 .history-list-head { display: flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.75rem; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
-.history-count { font-size: var(--text-sm); color: var(--text-muted); }
+.history-count { font-size: var(--text-sm); color: var(--text-muted); white-space: nowrap; }
+.history-list-head .btn, .history-list-head .checkbox { flex: 0 0 auto; white-space: nowrap; }
+/* The find box takes the room the head has left and gives it back when it
+   closes, so opening it never squeezes the count or the Load-older button
+   into wrapping. */
+/* The find box searches what is loaded and says so; it never claims to have
+   searched commits that were never fetched. `[hidden]` is restated because a
+   flex rule would otherwise beat the browser's own `display: none`. */
+.history-findbox { display: flex; align-items: center; gap: 0.2rem; }
+.history-findbox[hidden] { display: none; }
+.history-find { min-width: 6rem; max-width: 16rem; flex: 1 1 auto; padding: 0.15rem 0.35rem; font: inherit; font-size: var(--text-sm); color: var(--text); background: var(--surface-input); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); }
+.history-find:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.btn-quiet { padding: 0.1rem 0.35rem; font-size: var(--text-xs); color: var(--text-muted); background: transparent; border: 1px solid transparent; }
+.btn-quiet:hover { background: var(--surface-hover); }
+.btn-quiet.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.find-count { min-width: 4.5rem; text-align: right; font-size: var(--text-xs); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.find-count[data-state="error"] { color: var(--danger); }
 .history-list { flex: 1 1 45%; min-height: 0; overflow-y: auto; padding-inline: 0.75rem; }
 .commit-row { display: flex; align-items: baseline; gap: 0.4rem; height: var(--row-height-history); padding-inline: 0.3rem; border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-sm); overflow: hidden; }
 .commit-row:hover { background: var(--surface-hover); }
@@ -369,6 +385,13 @@ body {
    not px, so the columns hold under interface zoom. */
 .commit-refs { flex: 0 0 var(--commit-refs-width); width: var(--commit-refs-width); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--status-renamed); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-ref + .commit-ref { margin-left: 0.3rem; }
+/* Each kind of decoration gets its own colour and weight, all drawn from the
+   status family so they stay in the palette. A branch tip is the thing a
+   reader is most often looking for, so it leads and reads strongest. */
+.commit-ref { border-radius: var(--radius-sm); padding-inline: 0.15rem; }
+.ref-branch { color: var(--status-renamed); font-weight: 600; }
+.ref-tag { color: var(--status-added); }
+.ref-remote { color: var(--text-faint); }
 .commit-subject { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-author { flex: 0 0 var(--commit-author-width); width: var(--commit-author-width); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: var(--text-xs); }
 .commit-date { flex: 0 0 var(--commit-date-width); width: var(--commit-date-width); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: var(--text-xs); text-align: right; }

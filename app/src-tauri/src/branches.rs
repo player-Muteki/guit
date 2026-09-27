@@ -827,7 +827,7 @@ mod tests {
         assert_eq!(preview.candidates, vec!["main".to_owned()]);
 
         // History follows the detached HEAD, not any branch.
-        let page = history::page(dir, 0, None, history::PAGE_SIZE).unwrap();
+        let page = history::page(dir, 0, None, history::PAGE_SIZE, false).unwrap();
         assert_eq!(page.commits.len(), 2);
         assert_eq!(page.commits[0].oid, head(dir));
 
@@ -879,7 +879,7 @@ mod tests {
         // `git log` would error on an unborn HEAD — guit's command layer
         // gates this on head_state, and the module keeps the structured
         // failure for anything that does reach Git.
-        let error = history::page(dir, 0, None, history::PAGE_SIZE).unwrap_err();
+        let error = history::page(dir, 0, None, history::PAGE_SIZE, false).unwrap_err();
         assert_eq!(error.code, "history_page_failed");
 
         // A commit made in an external terminal must flip the snapshot and
@@ -892,7 +892,7 @@ mod tests {
             .expect("session still open");
         assert!(after.version > version);
         assert_eq!(after.branch.clone().unwrap().head_state, HeadState::Branch);
-        let page = history::page(dir, 0, None, history::PAGE_SIZE).unwrap();
+        let page = history::page(dir, 0, None, history::PAGE_SIZE, false).unwrap();
         assert_eq!(page.commits.len(), 1);
         let listing = refs::list(dir).unwrap();
         assert!(listing.branches.iter().any(|b| b.name == "main" && b.head));
@@ -941,7 +941,7 @@ mod tests {
         assert_ne!(gone.oid, main.oid);
         assert!(gone.head && !main.head);
         assert!(!listing.branches.iter().any(|b| b.name == "feature"));
-        let page = history::page(dir, 0, None, history::PAGE_SIZE).unwrap();
+        let page = history::page(dir, 0, None, history::PAGE_SIZE, false).unwrap();
         assert_eq!(page.commits.len(), 1);
         assert_eq!(page.commits[0].oid, gone.oid);
     }

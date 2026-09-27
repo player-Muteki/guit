@@ -4,12 +4,17 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   buildHistoryRows,
+  commitMatches,
+  filterCommits,
+  findError,
   graphColumns,
   graphLanePx,
   graphNodePx,
   graphWidth,
   historyPageStart,
+  matchPosition,
   rowGeometry,
+  stepMatch,
   GRAPH_LANE_REM,
   GRAPH_NODE_REM,
 } from "../src/historyModel.ts";
@@ -290,4 +295,61 @@ test("buildHistoryRows carries the graph through without touching it", () => {
   const g = graph({ merge: true, lanes: [1], branches: [1], dangling: true });
   const [row] = buildHistoryRows([commit(1, { graph: g })]);
   assert.equal(row.commit.graph, g, "the row hands the backend's graph on unchanged");
+});
+
+// --- finding a commit ---
+
+const find = (text, extra = {}) => ({ text, regex: false, caseSensitive: false, ...extra });
+const history = () => [
+  commit(1, { subject: "Fix the parser", authorName: "Ada" }),
+  commit(2, { subject: "add tests", authorName: "Grace" }),
+  commit(3, { subject: "Fix the reader", authorName: "ada" }),
+];
+
+test("a find matches the subject, the author and the object id", () => {
+  assert.ok(commitMatches(history()[0], find("parser")));
+  assert.ok(commitMatches(history()[0], find("Ada")), "an author matches");
+  assert.ok(
+    commitMatches(history()[0], find(history()[0].oid)),
+    "an id pasted from a bug report finds its commit",
+  );
+  assert.equal(commitMatches(history()[1], find("parser")), false);
+});
+
+test("a find is case-insensitive unless asked otherwise", () => {
+  assert.ok(commitMatches(history()[2], find("ADA")));
+  assert.equal(commitMatches(history()[2], find("ADA", { caseSensitive: true })), false);
+  assert.ok(commitMatches(history()[2], find("ada", { caseSensitive: true })));
+});
+
+test("a regular expression find is a real regular expression", () => {
+  assert.ok(commitMatches(history()[0], find("^Fix", { regex: true })));
+  assert.equal(commitMatches(history()[1], find("^Fix", { regex: true })), false);
+  assert.ok(commitMatches(history()[0], find("f(i|x)x", { regex: true })));
+  // An expression that does not compile matches nothing and is reported,
+  // rather than throwing at the reader mid-keystroke.
+  const broken = find("Fix (", { regex: true });
+  assert.equal(commitMatches(history()[0], broken), false);
+  assert.equal(findError(broken), "Not a valid regular expression.");
+  assert.equal(findError(find("Fix (")), null, "a substring is never a broken expression");
+});
+
+test("filtering keeps the loaded order, because a graph only reads downward", () => {
+  const kept = filterCommits(history(), find("Fix"));
+  assert.deepEqual(kept.map((c) => c.subject), ["Fix the parser", "Fix the reader"]);
+  assert.equal(filterCommits(history(), find("")).length, 3, "an empty query keeps everything");
+  assert.equal(filterCommits(history(), find("nothing here")).length, 0);
+});
+
+test("stepping through the matches wraps at both ends", () => {
+  const commits = history();
+  const query = find("Fix");
+  // Stepping into an empty selection starts at the first match.
+  assert.equal(stepMatch(commits, query, null, 1), commits[0].oid);
+  assert.equal(stepMatch(commits, query, commits[0].oid, 1), commits[2].oid);
+  assert.equal(stepMatch(commits, query, commits[2].oid, 1), commits[0].oid, "wraps forward");
+  assert.equal(stepMatch(commits, query, commits[0].oid, -1), commits[2].oid, "wraps back");
+  assert.equal(stepMatch(commits, find("absent"), null, 1), null, "no matches, no step");
+  assert.deepEqual(matchPosition(commits, query, commits[2].oid), { index: 1, total: 2 });
+  assert.deepEqual(matchPosition(commits, query, null), { index: -1, total: 2 });
 });

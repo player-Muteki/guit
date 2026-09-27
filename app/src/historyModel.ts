@@ -208,3 +208,81 @@ export function rowGeometry(
 export function graphWidth(columns: number, laneWidth: number): number {
   return Math.max(columns, 1) * laneWidth;
 }
+
+// --- finding a commit in what is loaded ---
+
+// What the find box matches against, and how. A plain string is matched as a
+// substring, case-insensitively; a `/.../ ` turns on a real regular
+// expression, because "find the commit that mentions ^Fix" is a thing people
+// actually want and a substring search cannot answer it.
+export interface FindQuery {
+  text: string;
+  regex: boolean;
+  caseSensitive: boolean;
+}
+
+/// Whether one commit matches. The subject, the author and the full object
+/// id are all searched, because a reader who pastes an id from a bug report
+/// should find the commit by it.
+export function commitMatches(commit: CommitView, query: FindQuery): boolean {
+  if (query.text === "") return true;
+  const needle = query.caseSensitive ? query.text : query.text.toLowerCase();
+  const haystacks = [commit.subject, commit.authorName, commit.oid];
+  if (query.regex) {
+    let pattern: RegExp;
+    try {
+      pattern = new RegExp(query.text, query.caseSensitive ? "" : "i");
+    } catch {
+      // An expression that does not compile matches nothing rather than
+      // throwing at the reader mid-keystroke; the box reports it separately.
+      return false;
+    }
+    return haystacks.some((field) => pattern.test(field));
+  }
+  return haystacks.some((field) =>
+    (query.caseSensitive ? field : field.toLowerCase()).includes(needle),
+  );
+}
+
+/// The commits a query keeps, in the order they were loaded. Filtering never
+/// reorders: the graph only makes sense top to bottom.
+export function filterCommits(commits: readonly CommitView[], query: FindQuery): CommitView[] {
+  return commits.filter((commit) => commitMatches(commit, query));
+}
+
+/// Whether a query is one the reader could have got wrong — a regular
+/// expression that does not compile — so the box can say so instead of
+/// silently matching nothing.
+export function findError(query: FindQuery): string | null {
+  if (!query.regex || query.text === "") return null;
+  try {
+    new RegExp(query.text);
+  } catch {
+    return "Not a valid regular expression.";
+  }
+  return null;
+}
+
+/// Where the reader is among the matches: the index of the current one, and
+/// how many there are. `current` is -1 when nothing matches yet.
+export function matchPosition(commits: readonly CommitView[], query: FindQuery, currentOid: string | null): { index: number; total: number } {
+  const matches = filterCommits(commits, query);
+  const index = currentOid === null ? -1 : matches.findIndex((commit) => commit.oid === currentOid);
+  return { index, total: matches.length };
+}
+
+/// The next match's object id, wrapping at both ends, or null when there are
+/// none. Stepping past the end comes back to the first, so holding the key
+/// cycles rather than sticking.
+export function stepMatch(
+  commits: readonly CommitView[],
+  query: FindQuery,
+  currentOid: string | null,
+  delta: 1 | -1,
+): string | null {
+  const matches = filterCommits(commits, query);
+  if (matches.length === 0) return null;
+  const at = currentOid === null ? -1 : matches.findIndex((commit) => commit.oid === currentOid);
+  const next = (at + delta + matches.length) % matches.length;
+  return matches[at === -1 ? (delta === 1 ? 0 : matches.length - 1) : next].oid;
+}
