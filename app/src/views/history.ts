@@ -8,7 +8,14 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, plural } from "../dom";
-import { buildHistoryRows, historyPageStart } from "../historyModel";
+import {
+  buildHistoryRows,
+  graphColumns,
+  graphLanePx,
+  graphNodePx,
+  historyPageStart,
+  rowGeometry,
+} from "../historyModel";
 import { revealScroll, rowHeightPx, visibleWindow, HISTORY_ROW_REM } from "../fileModel";
 import { currentFontPx } from "../font";
 import {
@@ -68,6 +75,15 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   let commits: CommitView[] = [];
   let hasMore = false;
   let loading = false;
+  // The gutter is as wide as the widest lane in the whole loaded history, so
+  // it is measured from the loaded commits rather than from the rows on
+  // screen: sizing it to what is visible would slide the subject text
+  // sideways every time a wider part of the graph scrolled into view.
+  let gutterColumns = 1;
+  // Set when the backend had to draw the history first-parent because the
+  // live lane count would not fit the gutter. It is said in words, because a
+  // silently linearised graph would claim a shape the history does not have.
+  let graphFolded = false;
   // undefined = no session; null = session without commits (unborn HEAD or
   // bare repo); a string = the HEAD oid the loaded pages belong to.
   let repoKey: string | null | undefined;
@@ -236,6 +252,76 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   };
 
   // --- list ---
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  /// Draws one row's graph. The geometry comes from the pure model, so this
+  /// only turns parts into SVG nodes; a row is drawn from its own columns
+  /// alone, which is what lets the list stay virtualised.
+  const graphSvg = (commit: CommitView, height: number, fontPx: number): SVGSVGElement => {
+    const geometry = rowGeometry(
+      commit.graph,
+      gutterColumns,
+      graphLanePx(fontPx),
+      height,
+      graphNodePx(fontPx),
+    );
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "graph-gutter");
+    svg.setAttribute("width", String(geometry.width));
+    svg.setAttribute("height", String(geometry.height));
+    svg.setAttribute("viewBox", `0 0 ${geometry.width} ${geometry.height}`);
+    // The row's own text already names the commit and its kind; announcing
+    // the drawing as well would say the same thing twice.
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    for (const part of geometry.parts) {
+      // Column 0 is the mainline and keeps the quiet colour; every other
+      // column is a side lane and cycles through the five hues. The mapping
+      // is a function of the column alone, so a lane keeps its hue down the
+      // whole history.
+      const laneClass = part.lane === 0 ? "0" : String(1 + ((part.lane - 1) % 5));
+      if (part.kind === "line") {
+        const line = document.createElementNS(SVG_NS, "line");
+        line.setAttribute("class", "graph-line");
+        line.setAttribute("data-lane", laneClass);
+        line.setAttribute("x1", String(part.x));
+        line.setAttribute("x2", String(part.x));
+        line.setAttribute("y1", String(part.y1));
+        line.setAttribute("y2", String(part.y2));
+        if (part.dashed) line.setAttribute("data-dash", "true");
+        svg.appendChild(line);
+      } else if (part.kind === "branch") {
+        const path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("class", "graph-line");
+        path.setAttribute("data-lane", laneClass);
+        path.setAttribute("d", part.path);
+        svg.appendChild(path);
+      } else {
+        const dot = document.createElementNS(SVG_NS, "circle");
+        dot.setAttribute("class", "graph-node");
+        dot.setAttribute("data-lane", laneClass);
+        dot.setAttribute("data-shape", part.shape);
+        dot.setAttribute("cx", String(part.cx));
+        dot.setAttribute("cy", String(part.cy));
+        dot.setAttribute("r", String(part.r));
+        svg.appendChild(dot);
+      }
+    }
+    return svg;
+  };
+
+  // A commit's kind is a fact about the history, not about the drawing, so it
+  // is spelled out for anyone not looking at the gutter.
+  const rowDescription = (commit: CommitView): string => {
+    const kind = commit.graph.root
+      ? "First commit. "
+      : commit.graph.merge
+        ? `Merge commit, ${commit.parents.length} parents. `
+        : "";
+    const beyond = commit.graph.dangling ? " More history is below what is loaded." : "";
+    return `${kind}${commit.subject} — ${commit.authorName}, ${commit.authorDate.slice(0, 10)}.${beyond}`;
+  };
+
   const placeholder = (message: string): void => {
     commits = [];
     hasMore = false;
@@ -266,10 +352,18 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       if (repoKey !== (currentSnapshot()?.branch?.oid ?? null)) return;
       commits = reset ? page.commits : commits.concat(page.commits);
       hasMore = page.hasMore;
+      gutterColumns = graphColumns(commits);
+      graphFolded = commits.some((commit) => commit.graph.folded);
       listPane.hidden = false;
       splitter.hidden = false;
       emptyState.hidden = true;
-      countLabel.textContent = plural(commits.length, "commit") + (hasMore ? " so far." : " — all loaded.");
+      countLabel.textContent =
+        plural(commits.length, "commit") +
+        (hasMore ? " so far." : " — all loaded.") +
+        // A folded graph is drawn on the first-parent line, so the shape on
+        // screen is simpler than the history. Say which it is rather than let
+        // the drawing imply a history with no branches in it.
+        (graphFolded ? " Branches are not drawn: this history has more lines open at once than the graph has room for." : "");
       renderRows();
     } catch (error) {
       deps.onError(error);
@@ -283,8 +377,10 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   const renderRows = (): void => {
     if (commits.length === 0) return;
     const rows = buildHistoryRows(commits);
+    const fontPx = currentFontPx();
+    const rowHeightNow = rowHeightPx(fontPx, HISTORY_ROW_REM);
     const viewport = listPane.clientHeight || 240;
-    const slice = visibleWindow(rows.length, listPane.scrollTop, viewport, rowHeight(), OVERSCAN);
+    const slice = visibleWindow(rows.length, listPane.scrollTop, viewport, rowHeightNow, OVERSCAN);
     virtual.style.height = `${slice.totalHeight}px`;
     rowsHost.style.transform = `translateY(${slice.offsetY}px)`;
     const fragment = document.createDocumentFragment();
@@ -295,6 +391,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         class: `commit-row${index === selectedIndex ? " selected" : ""}`,
         role: "option",
         "aria-selected": String(index === selectedIndex),
+        "aria-label": rowDescription(commit),
       }, [
         el("span", { class: "commit-subject", text: commit.subject, title: commit.subject }),
         // Author and date are two fields, not one sentence: a separator between
@@ -309,6 +406,10 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         element.prepend(el("span", { class: "commit-refs" },
           commit.refs.map((ref) => el("span", { class: "commit-ref", text: ref }))));
       }
+      // The graph leads the row, so it is prepended last: `prepend` puts the
+      // element at the very front, and the gutter belongs left of the refs
+      // chips and the subject.
+      element.prepend(graphSvg(commit, rowHeightNow, fontPx));
       element.addEventListener("click", () => setSelected(commit, index));
       element.addEventListener("dblclick", () => void runCommitDiff());
       fragment.append(element);

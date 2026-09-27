@@ -363,6 +363,32 @@ body {
 .commit-row { display: flex; align-items: baseline; gap: 0.4rem; height: var(--row-height-history); padding-inline: 0.3rem; border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-sm); overflow: hidden; }
 .commit-row:hover { background: var(--surface-hover); }
 .commit-row.selected { background: var(--surface-active); }
+
+/* Commit graph. The gutter is a fixed-width SVG the view sizes from the
+   lane metrics; it is decorative next to text that already names each
+   commit, so it is hidden from assistive tech rather than read twice. The
+   row keeps baseline alignment for its text, so the gutter centres itself
+   and fills exactly one row's height. */
+.graph-gutter { flex: 0 0 auto; align-self: center; display: block; }
+/* One `color` per lane and everything else follows it, so a lane's line,
+   its branch curve and its dot can never disagree about which lane they
+   belong to. */
+.graph-gutter .graph-line { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.graph-gutter .graph-node { stroke: currentColor; stroke-width: 1.5; }
+.graph-gutter .graph-node[data-shape="normal"] { fill: currentColor; stroke: none; }
+/* A merge is a ring and the first commit is a hollow dot, so their shape —
+   not only their colour — tells them apart from a plain commit. Neither is
+   filled: what shows through is whatever the row is painted with, which keeps
+   them right on hover and selection too. */
+.graph-gutter .graph-node[data-shape="merge"] { fill: none; stroke-width: 2; }
+.graph-gutter .graph-node[data-shape="root"] { fill: none; }
+.graph-gutter .graph-line[data-dash="true"] { stroke-dasharray: 2 2; }
+.graph-gutter [data-lane="0"] { color: var(--graph-line); }
+.graph-gutter [data-lane="1"] { color: var(--graph-lane-1); }
+.graph-gutter [data-lane="2"] { color: var(--graph-lane-2); }
+.graph-gutter [data-lane="3"] { color: var(--graph-lane-3); }
+.graph-gutter [data-lane="4"] { color: var(--graph-lane-4); }
+.graph-gutter [data-lane="5"] { color: var(--graph-lane-5); }
 .commit-refs { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--status-renamed); flex: 0 0 auto; max-width: 30%; overflow: hidden; text-overflow: ellipsis; }
 .commit-ref + .commit-ref { margin-left: 0.4rem; }
 .commit-subject { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

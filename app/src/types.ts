@@ -200,6 +200,23 @@ export type TagDetail = {
 
 // --- history ------------------------------------------------------
 
+// One row of the commit graph, computed by the backend. `node` is the column
+// of this commit's dot; `lanes` are the other columns a line crosses on this
+// row; `branches` are the extra parent lanes that start at this node. A
+// renderer needs no other row to draw this one.
+export type GraphRow = {
+  node: number;
+  entry: boolean;
+  exit: boolean;
+  merge: boolean;
+  root: boolean;
+  lanes: number[];
+  branches: number[];
+  incoming: number[];
+  dangling: boolean;
+  folded: boolean;
+};
+
 export type CommitView = {
   oid: string;
   parents: string[];
@@ -211,6 +228,7 @@ export type CommitView = {
   committerName: string;
   commitDate: string;
   refs: string[];
+  graph: GraphRow;
 };
 
 export type HistoryPage = { start: number; commits: CommitView[]; hasMore: boolean };

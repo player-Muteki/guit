@@ -84,6 +84,20 @@
   --status-staged: #2f7d59;
   --status-ignored: #7e7487;
 
+  /* Commit graph. The mainline is the quietest thing on the row — it is
+     structure, not news — and each side lane borrows a hue from the status
+     family so the gutter belongs to the same palette as the rest of the
+     window. A lane keeps its colour for the whole loaded history, so a hue
+     means "the same line of work" all the way down. The hues are literal
+     values, not var() aliases, because the contrast gate resolves tokens
+     without following indirection. */
+  --graph-line: #706579;
+  --graph-lane-1: #8559ac;
+  --graph-lane-2: #2f7d59;
+  --graph-lane-3: #9a6a1f;
+  --graph-lane-4: #a03f9c;
+  --graph-lane-5: #bd4165;
+
 
   /* typography */
   --font-ui: system-ui, -apple-system, "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
@@ -101,6 +115,11 @@
      the breakpoint. */
   --row-height: 1.5rem;   /* 24px file rows */
   --row-height-history: 1.75rem;
+  /* Commit-graph metrics. `--graph-lane` and `--graph-node` must match
+     GRAPH_LANE_REM / GRAPH_NODE_REM in historyModel.ts; a test gates it.
+     rem, not px, so the graph grows with interface zoom. */
+  --graph-lane: 0.75rem;
+  --graph-node: 0.1875rem;
   --radius: 0.375rem;
   --radius-sm: 0.25rem;
   --transition: 120ms ease;
@@ -148,6 +167,13 @@
     --status-untracked: #a99fb4;
     --status-staged: #7ec9a2;
     --status-ignored: #8d8399;
+
+    --graph-line: #a79db4;
+    --graph-lane-1: #c7a9ea;
+    --graph-lane-2: #8fd4ae;
+    --graph-lane-3: #e3c27a;
+    --graph-lane-4: #e59ad6;
+    --graph-lane-5: #f0a3b4;
 
     --focus-ring: 0 0 0 2px var(--surface-panel), 0 0 0 4px var(--accent);
   }
@@ -210,6 +236,13 @@
   --status-untracked: #a99fb4;
   --status-staged: #7ec9a2;
   --status-ignored: #8d8399;
+
+  --graph-line: #a79db4;
+  --graph-lane-1: #c7a9ea;
+  --graph-lane-2: #8fd4ae;
+  --graph-lane-3: #e3c27a;
+  --graph-lane-4: #e59ad6;
+  --graph-lane-5: #f0a3b4;
 }
 
 /* An explicit override always beats the system preference, so these two
@@ -250,6 +283,13 @@
     --status-untracked: #8a8093;
     --status-staged: #2f7d59;
     --status-ignored: #7e7487;
+
+    --graph-line: #706579;
+    --graph-lane-1: #8559ac;
+    --graph-lane-2: #2f7d59;
+    --graph-lane-3: #9a6a1f;
+    --graph-lane-4: #a03f9c;
+    --graph-lane-5: #bd4165;
   }
 }
 
