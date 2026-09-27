@@ -7,7 +7,6 @@ import test from "node:test";
 import {
   buildHistoryRows,
   historyPageStart,
-  historyRowLabel,
 } from "../src/historyModel.ts";
 import { mulberry32, randomInt } from "./helpers/rng.mjs";
 import { visibleWindow } from "../src/fileModel.ts";
@@ -50,35 +49,29 @@ test("buildHistoryRows on empty and single-element lists", () => {
   assert.equal(buildHistoryRows([commit(1)]).length, 1);
 });
 
-test("historyRowLabel: exact format with and without decorations", () => {
-  const plain = commit(0, { oid: "abcdef1234567890".repeat(2) + "ab" });
-  assert.equal(historyRowLabel(plain), "commit 0  ·  abcdef12");
-  const decorated = commit(1, { oid: "beefcafe" + "0".repeat(32), refs: ["HEAD -> main", "origin/main", "v1.0"] });
-  assert.equal(
-    historyRowLabel(decorated),
-    "commit 1  ·  beefcafe  HEAD -> main · origin/main · v1.0",
-  );
-});
-
-test("historyRowLabel: hostile but possible subjects survive verbatim", () => {
+test("buildHistoryRows: hostile but possible subjects survive verbatim", () => {
+  // The row is written with `textContent`, so escaping is the platform's job;
+  // what this module owns is that it does not touch the string on the way.
   const cases = [
-    ["", ""],
-    ["   ", "   "],
-    ["trailing spaces   ", "trailing spaces   "],
-    ["ünïcödé 中文 🎸", "ünïcödé 中文 🎸"],
-    ["contains · separator", "contains · separator"],
-    ["<img src=x onerror=alert(1)>", "<img src=x onerror=alert(1)>"],
-    ["0123456789".repeat(30), "0123456789".repeat(30)],
+    "",
+    "   ",
+    "trailing spaces   ",
+    "ünïcödé 中文 🎸",
+    "contains · separator",
+    "<img src=x onerror=alert(1)>",
+    "0123456789".repeat(30),
   ];
-  for (const [subject, expected] of cases) {
-    const line = historyRowLabel(commit(2, { subject }));
-    assert.ok(line.startsWith(`${expected}  ·  `), `subject ${JSON.stringify(subject)} must be verbatim`);
+  for (const subject of cases) {
+    const [row] = buildHistoryRows([commit(2, { subject })]);
+    assert.equal(row.commit.subject, subject, `subject ${JSON.stringify(subject)} must be verbatim`);
   }
 });
 
-test("historyRowLabel: short oids do not crash", () => {
-  assert.equal(historyRowLabel(commit(0, { oid: "abc" })), "commit 0  ·  abc");
-  assert.equal(historyRowLabel(commit(0, { oid: "" })), "commit 0  ·  ");
+test("buildHistoryRows: a short or empty oid is carried, not repaired", () => {
+  const [short] = buildHistoryRows([commit(0, { oid: "abc" })]);
+  assert.equal(short.commit.oid, "abc");
+  const [empty] = buildHistoryRows([commit(0, { oid: "" })]);
+  assert.equal(empty.commit.oid, "");
 });
 
 test("10k labels and a bounded window across a paging session", () => {
@@ -98,6 +91,6 @@ test("10k labels and a bounded window across a paging session", () => {
     const w = visibleWindow(rows.length, scrollTop, 600, rowHeight, 6);
     assert.ok(w.endIndex - w.startIndex <= Math.ceil(600 / rowHeight) + 2 * 6 + 1);
     assert.equal(w.totalHeight, rows.length * rowHeight);
-    rows.forEach((row) => assert.ok(historyRowLabel(row.commit).length > 0));
+    rows.forEach((row) => assert.ok(row.commit.subject.length + row.commit.oid.length > 0));
   }
 });

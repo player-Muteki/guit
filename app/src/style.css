@@ -83,7 +83,6 @@ body {
 .icon-btn:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
 .icon-btn:disabled { opacity: 0.4; cursor: default; }
 .icon-btn.active { color: var(--accent); background: var(--accent-soft); }
-.icon-btn.tiny { width: 1.25rem; height: 1.25rem; }
 .icon .icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
 /* --- buttons --- */
@@ -100,7 +99,9 @@ body {
 }
 .btn:hover:not(:disabled) { background: var(--surface-hover); }
 .btn:disabled { opacity: 0.45; cursor: default; }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* A filled accent button takes the inverse text token rather than a literal,
+   so the dark scheme's choice comes from the same place as everything else. */
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--text-inverse); }
 .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn-danger { background: var(--danger); border-color: var(--danger); color: var(--danger-text); }
 .btn-danger:hover:not(:disabled) { background: var(--danger-hover); border-color: var(--danger-hover); }
@@ -229,7 +230,11 @@ body {
    theirs, while every accessibility assertion still passed. */
 .view-body.document-view { overflow-y: auto; }
 .view-body.document-view > .view-block { flex: 0 0 auto; }
-.block-title { display: flex; align-items: center; gap: 0.35rem; margin: 0; font-size: var(--text-sm); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+/* Sentence case, not a tracked-out uppercase eyebrow: the weight and the
+   muted colour already separate a section from the rows under it, and the
+   uppercase-plus-tracking treatment is the one thing every generated settings
+   panel wears. */
+.block-title { display: flex; align-items: center; gap: 0.35rem; margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--text-muted); }
 .view-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
 .view-tools .input { flex: 1 1 8rem; }
 .view-status { font-size: var(--text-sm); color: var(--text-muted); min-height: 1.1em; }
@@ -246,7 +251,7 @@ body {
 .welcome-actions { margin-bottom: 1rem; }
 .welcome-block { display: flex; flex-direction: column; gap: 0.35rem; max-width: 34rem; margin-bottom: 1rem; }
 .welcome-block[hidden] { display: none; }
-.welcome-label { display: flex; align-items: center; gap: 0.35rem; margin: 0; font-size: var(--text-sm); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.welcome-label { display: flex; align-items: center; gap: 0.35rem; margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--text-muted); }
 .clone-row { display: flex; flex-wrap: wrap; gap: 0.35rem; }
 .clone-row .input { flex: 1 1 12rem; }
 .welcome-clone-status { margin: 0; font-size: var(--text-sm); color: var(--text-muted); overflow-wrap: anywhere; }
@@ -281,7 +286,7 @@ body {
    while printing the whole URL next to it. */
 .file-name, .ref-name { flex: 0 1 auto; min-width: 8ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ref-meta { flex: 1 1 auto; min-width: 0; margin-left: auto; padding-left: 0.5rem; color: var(--text-faint); font-family: var(--font-mono); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ref-heading { padding: 0.35rem 0.4rem 0.15rem; color: var(--text-faint); font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+.ref-heading { padding: 0.35rem 0.4rem 0.15rem; color: var(--text-faint); font-size: var(--text-xs); font-weight: 600; }
 .inert-ref { color: var(--text-faint); font-style: italic; }
 
 /* Signature element: the 2px status rail on the left edge of a file row. */
@@ -359,8 +364,12 @@ body {
 .commit-row:hover { background: var(--surface-hover); }
 .commit-row.selected { background: var(--surface-active); }
 .commit-refs { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--status-renamed); flex: 0 0 auto; max-width: 30%; overflow: hidden; text-overflow: ellipsis; }
+.commit-ref + .commit-ref { margin-left: 0.4rem; }
 .commit-subject { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-meta { flex: 0 0 auto; color: var(--text-faint); font-size: var(--text-xs); }
+/* A wider gap than the row's own, so the two fields of a commit's meta read as
+   columns rather than as the ends of one phrase. */
+.commit-date { margin-left: 0.6rem; }
 .splitter { height: var(--splitter-size); flex: 0 0 auto; background: var(--surface-rail); border-block: 1px solid var(--line); cursor: row-resize; }
 .splitter:hover { background: var(--accent-soft); }
 .history-detail { flex: 0 0 auto; min-height: 8rem; overflow-y: auto; padding: 0.5rem 0.75rem; display: flex; flex-direction: column; gap: 0.4rem; }
@@ -368,6 +377,9 @@ body {
 .detail-meta { display: grid; grid-template-columns: minmax(4rem, 6rem) 1fr; gap: 0.2rem 0.6rem; margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
 .detail-meta dt { color: var(--text-muted); }
 .detail-meta dd { margin: 0; }
+/* One fact per line: an author's name, their address and the date are three
+   things a reader scans for separately, not one sentence. */
+.detail-line { display: block; }
 .detail-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.1rem; font-size: var(--text-sm); max-height: var(--detail-cap); overflow-y: auto; }
 .detail-files li { display: flex; gap: 0.4rem; align-items: baseline; overflow-wrap: anywhere; }
 .commit-message { margin: 0; padding: 0.4rem 0.5rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--text); font: inherit; font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; max-height: var(--detail-cap); overflow-y: auto; }
@@ -418,8 +430,9 @@ body {
 .status-text[data-kind="success"] { color: var(--status-added); }
 .status-cancel { border: none; background: transparent; color: var(--accent); font: inherit; font-size: var(--text-xs); cursor: pointer; }
 .status-cancel[hidden] { display: none; }
-.status-monitor { font-family: var(--font-mono); }
-.status-zoom { font-family: var(--font-mono); min-width: 2.5ch; text-align: center; }
+/* "Monitor: polling" is a sentence, not a value, so it takes the body face.
+   The data face is reserved for things that are actually data — porcelain
+   codes, object ids, branch and ref names, a zoom pixel count. */
 
 /* --- dialogs --- */
 .dialog {
@@ -446,9 +459,14 @@ body {
 
 /* --- toasts --- */
 .toast-layer { position: fixed; top: 0.5rem; right: 0.5rem; z-index: 60; display: flex; flex-direction: column; gap: 0.35rem; max-width: min(24rem, 90vw); }
-.toast { display: flex; align-items: flex-start; gap: 0.4rem; padding: 0.45rem 0.55rem; border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: var(--radius-sm); background: var(--surface-raised); font-size: var(--text-sm); }
-.toast-warning { border-left-color: var(--status-modified); }
-.toast-info { border-left-color: var(--accent); }
+/* The level is carried by a tinted surface and a full border, not by a heavier
+   left edge: the left edge of a row is the 2px Git status rail, and a second
+   meaning on the same edge would spend the one thing this window is loud
+   about. */
+.toast { display: flex; align-items: flex-start; gap: 0.4rem; padding: 0.45rem 0.55rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-raised); font-size: var(--text-sm); }
+.toast-error { border-color: var(--danger); background: var(--danger-soft); }
+.toast-warning { border-color: var(--status-modified); }
+.toast-info { border-color: var(--accent); }
 .toast-message { flex: 1 1 auto; overflow-wrap: anywhere; }
 .toast-action { border: none; background: transparent; color: var(--accent); font: inherit; font-size: var(--text-xs); cursor: pointer; }
 .toast-close { border: none; background: transparent; color: var(--text-faint); cursor: pointer; padding: 0; display: inline-flex; }
@@ -535,7 +553,11 @@ body {
     padding-inline: max(var(--gutter), calc((100% - 78rem) / 2));
   }
   .ref-list > .virtual, .file-list > .virtual { margin-inline: auto; max-width: 78rem; }
-  .detail-meta, .setting-facts, .commit-message, .detail-files { max-width: 64rem; }
+  /* A commit body is running prose, so it gets a reading measure; the label and
+     value lists around it stay wide, because a long object id or a URL is one
+     value rather than a sentence. */
+  .detail-meta, .setting-facts, .detail-files { max-width: 64rem; }
+  .commit-message { max-width: 46rem; }
 }
 
 /* A window that is both very wide and very short is the letterbox case: there

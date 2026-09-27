@@ -30,7 +30,7 @@ export const VIEW_ICONS: Record<ViewId, IconName> = {
   settings: "settings",
 };
 
-export const viewShortcut = (id: ViewId, order: readonly ViewId[]): string =>
+const viewShortcut = (id: ViewId, order: readonly ViewId[]): string =>
   `Ctrl+${order.indexOf(id) + 1}`;
 
 // A greyed rail item is the honest signal that its view has nothing to show

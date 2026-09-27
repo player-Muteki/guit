@@ -279,9 +279,9 @@ export function setForcePushReady(value: boolean): void {
   renderNow();
 }
 
-// Interface zoom repaints everything: the status-bar readout shows the new
-// size, and the virtual lists derive their row height from the same root font
-// size, so a stale render would scroll against the wrong geometry.
+// Interface zoom repaints everything: the virtual lists derive their row height
+// from the root font size, so a stale render would scroll against the wrong
+// geometry, and Settings' own size readout only updates on a repaint.
 export function notifyLayoutChange(): void {
   renderNow();
 }

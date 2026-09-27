@@ -22,7 +22,7 @@ import {
 import type { FileView, PreviewCopy, PreviewKindKey, PreviewResult } from "../types";
 import { createConfirmDialog, type ConfirmDialog } from "./confirm";
 
-export const previewCopy: Record<PreviewKindKey, PreviewCopy> = {
+const previewCopy: Record<PreviewKindKey, PreviewCopy> = {
   discard: {
     warning: "Discarding reverts these files in the working copy. The uncommitted work-tree changes cannot be recovered.",
     confirm: "Discard",
@@ -90,7 +90,7 @@ export const previewCopy: Record<PreviewKindKey, PreviewCopy> = {
   },
 };
 
-export const branchForceCopy: PreviewCopy = {
+const branchForceCopy: PreviewCopy = {
   warning:
     "This branch is not fully merged. Force-deleting makes its unique commits unreachable, and Git may garbage-collect them. This cannot be undone from guit.",
   confirm: "Force delete branch",

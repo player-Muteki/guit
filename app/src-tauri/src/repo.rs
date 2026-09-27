@@ -11,9 +11,9 @@ pub struct RepoIdentity {
     pub candidate: PathBuf,
     pub work_root: Option<PathBuf>,
     pub git_dir: PathBuf,
-    /// Watched alongside `git_dir`: a linked worktree that moves a shared
-    /// branch changes this directory, and the status has to follow.
-    #[allow(dead_code)]
+    /// Shared metadata directory, watched alongside `git_dir`: a linked
+    /// worktree that moves a shared branch changes this directory, and the
+    /// status has to follow. Read by `watch::watch_targets`.
     pub common_dir: PathBuf,
     pub is_bare: bool,
     pub linked_worktree: bool,

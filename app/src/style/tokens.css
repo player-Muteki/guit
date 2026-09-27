@@ -9,9 +9,14 @@
    lavender, and the accent is a deep lilac rather than the pale lilac a
    macaron palette would suggest for a button.
 
-   The dark scheme inverts the rule rather than the hues: its surfaces go deep
-   aubergine and its accents come *up* into the macaron range, because a pastel
-   on a near-black ground is a legible pastel while a deep lilac is not.
+   Both schemes carry an elevation ladder: the grounds sit far enough apart
+   that a button reads as lifted off the window and the app bar reads as
+   chrome above the view. The dark scheme gets there by inverting the rule
+   rather than the hues — its surfaces go deep aubergine and its accents come
+   *up* into the macaron range, because a pastel on a near-black ground is a
+   legible pastel while a deep lilac is not. The light scheme has to buy the
+   same step out of its own text weights, because there a deeper ground lowers
+   contrast rather than raising it; the cost is written at the token.
 
    Every ratio below is asserted by `tools/bench/color-contrast.py` in both
    schemes: >= 4.5:1 for anything that carries text, >= 3:1 for the status
@@ -26,12 +31,20 @@
 :root {
   color-scheme: light dark;
 
-  /* surfaces — the macaron part: pistachio cream and warm paper */
-  --surface-app: #fbf7f4;
-  --surface-rail: #f2e9f0;
+  /* surfaces — the macaron part: pistachio cream and warm paper.
+     The three grounds are told apart by lightness, because that is the one
+     axis a low-contrast pastel cannot spend. The app background sits a
+     measured 0.09 below the panels, which is about twice the step it used
+     to be: the app bar and status bar now read as chrome standing above the
+     view instead of as more rows of the list. `--text-faint` was pulled one
+     step darker to pay for it — it is the binding constraint here, sitting
+     at 4.95:1 against this background with 0.45 to spare, and it is safe to
+     deepen the ground only as far as that number allows. */
+  --surface-app: #f8f2ef;
+  --surface-rail: #efe2ec;
   --surface-panel: #fffdfb;
   --surface-raised: #ffffff;
-  --surface-sunken: #f5efea;
+  --surface-sunken: #efe7e2;
   --surface-hover: rgba(96, 62, 110, 0.07);
   --surface-active: rgba(138, 95, 176, 0.13);
   --surface-input: #fffdfb;
@@ -43,7 +56,7 @@
   /* text — deep plum, not pastel: this is what carries the reading */
   --text: #3a3340;
   --text-muted: #6b6070;
-  --text-faint: #786d82;
+  --text-faint: #706579;
   --text-inverse: #ffffff;
 
   /* accents */
@@ -52,7 +65,12 @@
   --accent-soft: rgba(133, 89, 172, 0.13);
   --danger: #b33859;
   --danger-hover: #a53859;
-  --danger-soft: rgba(189, 65, 101, 0.11);
+  /* A wash, and it is measured as one: the colour-contrast gate composites it
+     over `--surface-app` and requires `--danger` to stay legible on the
+     result. It was thinned to 0.06 when the app background was deepened to
+     pay for the elevation ladder, because a wash keeps only as much of the
+     surface as it gives back. Re-run the gate before touching either. */
+  --danger-soft: rgba(189, 65, 101, 0.06);
   --danger-text: #ffffff;
 
   /* git status — each a deep macaron sibling, so the five hues stay
@@ -97,11 +115,11 @@
    --text-faint at 3.77:1, which is the real defect this replaces. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --surface-app: #1a1620;
-    --surface-rail: #16121b;
+    --surface-app: #15111c;
+    --surface-rail: #110e17;
     --surface-panel: #1e1a24;
     --surface-raised: #272130;
-    --surface-sunken: #15111a;
+    --surface-sunken: #100d14;
     --surface-hover: rgba(224, 205, 240, 0.09);
     --surface-active: rgba(213, 159, 224, 0.18);
     --surface-input: #1e1a24;
@@ -159,11 +177,11 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --surface-app: #1a1620;
-  --surface-rail: #16121b;
+  --surface-app: #15111c;
+  --surface-rail: #110e17;
   --surface-panel: #1e1a24;
   --surface-raised: #272130;
-  --surface-sunken: #15111a;
+  --surface-sunken: #100d14;
   --surface-hover: rgba(224, 205, 240, 0.09);
   --surface-active: rgba(213, 159, 224, 0.18);
   --surface-input: #1e1a24;
@@ -199,11 +217,11 @@
 @media (prefers-color-scheme: dark) {
   :root[data-theme="light"] {
     color-scheme: light;
-    --surface-app: #fbf7f4;
-    --surface-rail: #f2e9f0;
+    --surface-app: #f8f2ef;
+    --surface-rail: #efe2ec;
     --surface-panel: #fffdfb;
     --surface-raised: #ffffff;
-    --surface-sunken: #f5efea;
+    --surface-sunken: #efe7e2;
     --surface-hover: rgba(96, 62, 110, 0.07);
     --surface-active: rgba(138, 95, 176, 0.13);
     --surface-input: #fffdfb;
@@ -213,7 +231,7 @@
 
     --text: #3a3340;
     --text-muted: #6b6070;
-    --text-faint: #786d82;
+    --text-faint: #706579;
     --text-inverse: #ffffff;
 
     --accent: #8559ac;
@@ -221,7 +239,7 @@
     --accent-soft: rgba(133, 89, 172, 0.13);
     --danger: #b33859;
     --danger-hover: #a53859;
-    --danger-soft: rgba(189, 65, 101, 0.11);
+    --danger-soft: rgba(189, 65, 101, 0.06);
     --danger-text: #ffffff;
 
     --status-added: #2f7d59;
@@ -238,11 +256,11 @@
 @media (prefers-color-scheme: light) {
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --surface-app: #1a1620;
-    --surface-rail: #16121b;
+    --surface-app: #15111c;
+    --surface-rail: #110e17;
     --surface-panel: #1e1a24;
     --surface-raised: #272130;
-    --surface-sunken: #15111a;
+    --surface-sunken: #100d14;
     --surface-hover: rgba(224, 205, 240, 0.09);
     --surface-active: rgba(213, 159, 224, 0.18);
     --surface-input: #1e1a24;

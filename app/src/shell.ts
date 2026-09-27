@@ -20,7 +20,6 @@ import {
 import type { BranchView } from "./types";
 import { railHint, VIEW_ICONS, VIEW_TITLES } from "./railModel";
 import { VIEW_HINTS } from "./viewHints";
-import { currentFontPx, applyFontPx, FONT_DEFAULT } from "./font";
 import { isAlwaysOnTop, setAlwaysOnTop } from "./window";
 
 export interface ViewDescriptor {
@@ -283,27 +282,21 @@ export function createShell(actions: ShellActions): Shell {
   // when it falls back to polling, and a user who cannot tell those two apart
   // cannot tell whether an outside edit will show up on its own.
   const monitorLabel = el("span", { class: "status-monitor", role: "status" });
-  const zoomOut = el("button", { class: "icon-btn tiny", type: "button", "aria-label": "Zoom out" }, [icon("minus", 12)]);
-  const zoomLevel = el("span", { class: "status-zoom", "aria-label": "Interface zoom" });
-  const zoomIn = el("button", { class: "icon-btn tiny", type: "button", "aria-label": "Zoom in" }, [icon("plus", 12)]);
-  const zoomReset = el("button", { class: "icon-btn tiny", type: "button", "aria-label": "Reset zoom" }, [icon("refresh", 12)]);
+  // Interface zoom lives in Settings → General, and the keyboard shortcuts in
+  // main.ts still reach it. A permanent cluster of four controls in the status
+  // bar duplicated a setting touched twice a year and spent the width that a
+  // streaming progress line needs on exactly the narrow windows where that
+  // line has the least of it.
   const statusbar = el("footer", { class: "statusbar" }, [
     statusText,
     cancelButton,
     el("div", { class: "spacer" }),
     monitorLabel,
-    zoomOut,
-    zoomLevel,
-    zoomIn,
-    zoomReset,
   ]);
   cancelButton.addEventListener("click", () => {
     if (isToolRunning()) actions.cancelTool();
     else actions.cancelWrite();
   });
-  zoomOut.addEventListener("click", () => applyFontPx(currentFontPx() - 1));
-  zoomIn.addEventListener("click", () => applyFontPx(currentFontPx() + 1));
-  zoomReset.addEventListener("click", () => applyFontPx(FONT_DEFAULT));
 
   // --- view containers ---
   // "welcome" is a pseudo-view: it has no rail slot and stands in for every
@@ -327,8 +320,6 @@ export function createShell(actions: ShellActions): Shell {
     // mutation, and this line runs for every streamed progress line.
     const monitor = watch === "none" ? "" : `Monitor: ${watch === "poll" ? "polling" : "filesystem events"}`;
     if (monitorLabel.textContent !== monitor) monitorLabel.textContent = monitor;
-    const zoom = `${currentFontPx()}px`;
-    if (zoomLevel.textContent !== zoom) zoomLevel.textContent = zoom;
   };
 
   const render = (): void => {

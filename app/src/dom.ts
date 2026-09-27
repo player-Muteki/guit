@@ -125,6 +125,11 @@ export function icon(name: keyof typeof ICONS, size = 16): SVGSVGElement {
 
 // 16x16 stroke paths on a 24-unit grid feel cramped; these are drawn on a
 // 16-unit grid with 1.25px strokes, matching the codicon weight.
+//
+// Only the glyphs the views actually draw. An icon nothing calls is a
+// drawing that has to be kept correct and re-checked against the stylesheet
+// for nothing, so an action that reads better as a word -- Open, Discard,
+// Diff -- carries the word.
 const ICONS = {
   changes: ["M2 4h5v5H2z", "M9 4h5v5H9z", "M2 11h5v3H2z", "M9 11h5v3H9z"],
   history: ["M8 3a5 5 0 1 1-4.6 3", "M3 3v3h3", "M8 5.5V8l2 1.5"],
@@ -134,26 +139,15 @@ const ICONS = {
   worktrees: ["M2 3h5v10H2z", "M9 3h5v4H9z", "M9 9h5v4H9z"],
   settings: ["M8 5.5A2.5 2.5 0 1 0 8 10.5 2.5 2.5 0 0 0 8 5.5z", "M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4"],
   branch: ["M4 3.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z", "M4 9.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z", "M12 3.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z", "M4 6v6", "M5.5 5h5a1 1 0 0 1 1 1v0"],
-  tag: ["M2 2h5l7 7-5 5-7-7z", "M5 5h.01"],
   folder: ["M2 4h4l1.5 2H14v7H2z"],
   clone: ["M5 2h7l3 3v7h-3", "M5 2v10h7", "M2 6v8h7"],
   refresh: ["M13 8a5 5 0 1 1-1.6-3.7", "M13 2v3h-3"],
   sync: ["M3 8a5 5 0 0 1 9-3.5", "M13 2v3h-3", "M13 8a5 5 0 0 1-9 3.5", "M3 14v-3h3"],
-  commit: ["M8 6.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z", "M1.5 8h5M9.5 8h5"],
   pin: ["M8 1.5 9.5 6 14 7.5 9.5 9 8 13.5 6.5 9 2 7.5 6.5 6z"],
-  pinFilled: ["M8 1.5 9.5 6 14 7.5 9.5 9 8 13.5 6.5 9 2 7.5 6.5 6z"],
   more: ["M3.5 8h.01", "M8 8h.01", "M12.5 8h.01"],
   close: ["M3.5 3.5l9 9", "M12.5 3.5l-9 9"],
-  chevronDown: ["M3.5 6l4.5 4.5L12.5 6"],
-  chevronRight: ["M6 3.5 10.5 8 6 12.5"],
   warning: ["M8 1.5 15 14H1z", "M8 6v4", "M8 11.5v.01"],
   check: ["M2.5 8.5 6.5 12.5 13.5 3.5"],
-  external: ["M9 2.5h4.5V7", "M13.5 2.5 7 9", "M12 9.5V13H3V4h3.5"],
-  trash: ["M2.5 4h11", "M6 4V2.5h4V4", "M3.5 4l1 9.5h7l1-9.5", "M6.5 6.5v5M9.5 6.5v5"],
-  plus: ["M8 2.5v11", "M2.5 8h11"],
-  minus: ["M2.5 8h11"],
-  open: ["M2 12.5V4h4l1.5 2H14v6.5z"],
-  file: ["M4 1.5h5l3 3v10H4z", "M9 1.5v3h3"],
 } as const;
 
 export type IconName = keyof typeof ICONS;

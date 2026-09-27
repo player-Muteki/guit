@@ -128,16 +128,16 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     detail.hidden = false;
     detail.style.height = `${detailHeight}px`;
     detailMessage.textContent = commit.message;
-    const meta: Array<[string, string]> = [
-      ["Commit", commit.oid],
-      ["Author", `${commit.authorName} <${commit.authorEmail}> · ${commit.authorDate}`],
-      ["Committer", `${commit.committerName} · ${commit.commitDate}`],
+    const meta: Array<[string, string[]]> = [
+      ["Commit", [commit.oid]],
+      ["Author", [commit.authorName, `<${commit.authorEmail}>`, commit.authorDate]],
+      ["Committer", [commit.committerName, commit.commitDate]],
     ];
-    if (commit.refs.length > 0) meta.push(["Refs", commit.refs.join(", ")]);
+    if (commit.refs.length > 0) meta.push(["Refs", commit.refs]);
     detailMeta.replaceChildren(
-      ...meta.flatMap(([term, value]) => {
+      ...meta.flatMap(([term, lines]) => {
         const dt = el("dt", { text: term });
-        const dd = el("dd", { text: value });
+        const dd = el("dd", {}, lines.map((line) => el("span", { class: "detail-line", text: line })));
         return [dt, dd];
       }),
     );
@@ -289,9 +289,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     rowsHost.style.transform = `translateY(${slice.offsetY}px)`;
     const fragment = document.createDocumentFragment();
     for (let index = slice.startIndex; index < slice.endIndex; index++) {
-      const row = rows[index];
-      if (row.kind !== "commit") continue;
-      const commit = row.commit;
+      const commit = rows[index].commit;
       const element = el("div", {
         id: `commit-row-${index}`,
         class: `commit-row${index === selectedIndex ? " selected" : ""}`,
@@ -299,10 +297,17 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         "aria-selected": String(index === selectedIndex),
       }, [
         el("span", { class: "commit-subject", text: commit.subject, title: commit.subject }),
-        el("span", { class: "commit-meta", text: `${commit.authorName} · ${commit.authorDate.slice(0, 10)}` }),
+        // Author and date are two fields, not one sentence: a separator between
+        // them welded them into a phrase and cost the reader the fact that
+        // they could be scanned apart.
+        el("span", { class: "commit-meta" }, [
+          el("span", { text: commit.authorName }),
+          el("span", { class: "commit-date", text: commit.authorDate.slice(0, 10) }),
+        ]),
       ]);
       if (commit.refs.length > 0) {
-        element.prepend(el("span", { class: "commit-refs", text: commit.refs.join(" · ") }));
+        element.prepend(el("span", { class: "commit-refs" },
+          commit.refs.map((ref) => el("span", { class: "commit-ref", text: ref }))));
       }
       element.addEventListener("click", () => setSelected(commit, index));
       element.addEventListener("dblclick", () => void runCommitDiff());

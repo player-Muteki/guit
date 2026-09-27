@@ -89,13 +89,17 @@ def main():
         time.sleep(1.2)
         narrow = showing_names()
         report.check("the commit box survives 340x400", "Commit message" in narrow)
-        report.check("the status bar's zoom controls survive 340x400", ZOOM <= narrow,
-                     ",".join(sorted(ZOOM - narrow)))
         report.check("a file row's actions survive 340x400",
                      any(name.startswith("More actions for ") for name in narrow))
 
         A.click(A.find_button(name="Settings"))
-        time.sleep(1.0)
+        time.sleep(1.2)
+        narrow = showing_names()
+        # Interface zoom lives in Settings, not in a permanent status-bar
+        # cluster. Same rule as the Commit button above: the affordance has to
+        # survive, not both copies of it, so it is checked where it lives.
+        report.check("the interface zoom controls survive 340x400", ZOOM <= narrow,
+                     ",".join(sorted(ZOOM - narrow)))
         A.click(A.find_button(name="Restore window size"))
         time.sleep(2.0)
         # Still on Settings, so the landmark is Settings' own content.

@@ -6,9 +6,7 @@
 
 import type { CommitView } from "./types";
 
-export type HistoryRow =
-  | { kind: "commit"; commit: CommitView }
-  | { kind: "placeholder"; message: string };
+export type HistoryRow = { kind: "commit"; commit: CommitView };
 
 // The offset asked of the backend for the next page. A reset re-reads page
 // zero of a *new* HEAD, so it must not reuse the number of commits the old
@@ -18,10 +16,5 @@ export function historyPageStart(loaded: number, reset: boolean): number {
 }
 
 export function buildHistoryRows(commits: readonly CommitView[]): HistoryRow[] {
-  return commits.map((commit) => ({ kind: "commit", commit }) as const);
-}
-
-export function historyRowLabel(commit: CommitView): string {
-  const refs = commit.refs.length > 0 ? `  ${commit.refs.join(" · ")}` : "";
-  return `${commit.subject}  ·  ${commit.oid.slice(0, 8)}${refs}`;
+  return commits.map((commit) => ({ kind: "commit", commit } as const));
 }
