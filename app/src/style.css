@@ -452,11 +452,12 @@ body {
 .graph-gutter .graph-shadow[data-weight="lane"] { stroke-width: var(--graph-under-lane); }
 .graph-gutter .graph-shadow[data-weight="structural"] { stroke-width: var(--graph-under-strong); }
 .graph-gutter .graph-node[data-shape="normal"] { fill: currentColor; stroke: none; }
-/* A merge is a ring and the first commit is a hollow dot, so their shape —
-   not only their colour — tells them apart from a plain commit. Neither is
-   filled: what shows through is whatever the row is painted with, which keeps
-   them right on hover and selection too. */
-.graph-gutter .graph-node[data-shape="merge"] { fill: none; }
+/* A merge is a ring with a filled dot inside it — a join, not a hollow
+   commit — and the first commit is a hollow dot, so both are told apart by
+   shape and not only by colour. Neither is filled with the surface: what
+   shows through is whatever the row is painted with, which keeps them right
+   on hover and selection too. */
+.graph-gutter .graph-node[data-shape="merge"] { fill: none; stroke-width: var(--graph-stroke-strong); }
 .graph-gutter .graph-node[data-shape="root"] { fill: none; }
 .graph-gutter .graph-line[data-dash="true"] { stroke-dasharray: 2 2; }
 .graph-gutter [data-lane="0"] { color: var(--graph-line); }

@@ -149,44 +149,45 @@ export function rowGeometry(
       weight: "lane",
     });
   }
-  // A line that changes column turns once and runs straight the rest of the
-  // way: a branch leaves the node sideways and then runs down its own lane; a
-  // lane folding into a commit runs down and then turns in. A right angle with
-  // a small rounded corner is the shape a reader can trace with their eye, and
-  // it is what every other commit graph draws — a curve stretched across one
-  // row's height is a smear across a wide span rather than a connection, and
-  // a flat step in the middle of a row reads as a circuit diagram.
+  // A line that changes column runs vertically for almost the whole row and
+  // turns once, close to the end, through a small quarter-round — the shape
+  // the reference graph uses and the one that reads as a lane stepping from
+  // one column to the next. A long diagonal across the row is what made a fan
+  // look like a smear and a convergence look like a bracket; a flat step at
+  // the node's own height made it a circuit diagram.
   //
-  // The corner is kept clear of both ends so a short hop between neighbouring
-  // lanes still has a straight run left to draw on.
-  const turn = (from: number, to: number): number =>
-    Math.min(rowHeight * 0.28, Math.abs(to - from) / 2, rowHeight / 4);
+  // The corner is bounded by the row's own height, not by the distance it has
+  // to travel: a lane three columns away turns just as tightly as a lane one
+  // column away, and spends the extra width as a straight run rather than as a
+  // shallower slope. That is why a fan reads as several lines rather than as
+  // one line smeared wide.
+  const corner = Math.min(rowHeight * 0.3, Math.abs(at(1) - at(0)) / 2, rowHeight / 2);
   for (const lane of graph.branches) {
     const target = at(lane);
-    const corner = turn(at(graph.node), target);
+    const radius = Math.min(corner, Math.abs(target - at(graph.node)) / 2);
     parts.push({
       kind: "branch",
       lane,
-      // Out of the node, across, then down the lane to the row's edge — where
-      // the next row's lane picks it up.
+      // Out of the node, a short run across, the quarter-round, then straight
+      // down the lane to the row's edge where the next row's lane continues.
       path:
-        `M ${at(graph.node)} ${mid} L ${target - corner} ${mid} ` +
-        `A ${corner} ${corner} 0 0 1 ${target} ${mid + corner} L ${target} ${rowHeight}`,
+        `M ${at(graph.node)} ${mid} L ${target - radius} ${mid} ` +
+        `A ${radius} ${radius} 0 0 1 ${target} ${mid + radius} L ${target} ${rowHeight}`,
       weight: "structural",
     });
   }
   for (const lane of graph.incoming) {
     const source = at(lane);
-    const corner = turn(source, at(graph.node));
+    const radius = Math.min(corner, Math.abs(source - at(graph.node)) / 2);
     parts.push({
       kind: "branch",
       lane,
-      // Down the lane from the row's top edge, then one turn into the node.
-      // The turn happens above the dot rather than at its height, so the line
-      // does not cut across the ones already arriving beside it.
+      // The mirror: straight down the lane, the same quarter-round, then level
+      // into the node. Each lane arrives from its own column, so a set of them
+      // folding into one commit stays legible instead of piling onto it.
       path:
-        `M ${source} 0 L ${source} ${mid - corner} ` +
-        `A ${corner} ${corner} 0 0 1 ${source - corner} ${mid} L ${at(graph.node)} ${mid}`,
+        `M ${source} 0 L ${source} ${mid - radius} ` +
+        `A ${radius} ${radius} 0 0 1 ${source - radius} ${mid} L ${at(graph.node)} ${mid}`,
       weight: "structural",
     });
   }
@@ -217,6 +218,21 @@ export function rowGeometry(
     shape: graph.root ? "root" : graph.merge ? "merge" : "normal",
     weight,
   });
+  // A merge is drawn as a ring with a filled dot inside it, so it reads as a
+  // join rather than as a plain commit that happens to be drawn hollow. The
+  // inner dot is a second part so the shape lives in the drawing rather than
+  // in a stylesheet that would have to know what a merge is.
+  if (graph.merge) {
+    parts.push({
+      kind: "node",
+      lane: graph.node,
+      cx: at(graph.node),
+      cy: mid,
+      r: nodeRadius * 0.42,
+      shape: "normal",
+      weight,
+    });
+  }
   return { width: columns * laneWidth, height: rowHeight, parts };
 }
 
