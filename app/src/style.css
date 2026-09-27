@@ -368,6 +368,16 @@ body {
    flex rule would otherwise beat the browser's own `display: none`. */
 .history-findbox { display: flex; align-items: center; gap: 0.2rem; }
 .history-findbox[hidden] { display: none; }
+/* A row that has just been jumped to flashes once, so the eye can find where
+   a find step or a write landed in a long list. Respects reduced motion. */
+.commit-row.flash { animation: row-flash 0.9s ease-out; }
+@keyframes row-flash {
+  0% { background: var(--accent-soft); }
+  100% { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .commit-row.flash { animation: none; outline: 2px solid var(--accent); outline-offset: -2px; }
+}
 .history-find { min-width: 6rem; max-width: 16rem; flex: 1 1 auto; padding: 0.15rem 0.35rem; font: inherit; font-size: var(--text-sm); color: var(--text); background: var(--surface-input); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); }
 .history-find:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .btn-quiet { padding: 0.1rem 0.35rem; font-size: var(--text-xs); color: var(--text-muted); background: transparent; border: 1px solid transparent; }
@@ -395,6 +405,7 @@ body {
 .commit-subject { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-author { flex: 0 0 var(--commit-author-width); width: var(--commit-author-width); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: var(--text-xs); }
 .commit-date { flex: 0 0 var(--commit-date-width); width: var(--commit-date-width); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: var(--text-xs); text-align: right; }
+.commit-short { flex: 0 0 auto; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-faint); opacity: 0.75; }
 
 /* Commit graph. The gutter is a fixed-width SVG the view sizes from the
    lane metrics; it is decorative next to text that already names each
@@ -657,6 +668,7 @@ body {
   .commit-author { display: none; }
   .commit-refs { flex-basis: 6rem; width: 6rem; }
   .commit-date { flex-basis: 4.5rem; width: 4.5rem; }
+  .commit-short { display: none; }
 }
 
 /* Content that is intrinsically one long unbreakable string — a remote URL, an

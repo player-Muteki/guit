@@ -149,6 +149,14 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // so a hidden branch is still there in the graph when the box is cleared.
   let visible: CommitView[] = [];
   let findOpen = false;
+  // A row to flash on the next paint — used to show where a find step or a
+  // write landed in a long list. Cleared once applied.
+  let flashIndex = -1;
+
+  const flashRowAt = (index: number): void => {
+    flashIndex = index;
+    renderRows();
+  };
 
   // --- detail rendering ---
   const detailMessage = el("pre", { class: "commit-message" });
@@ -365,6 +373,9 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     if (index < 0) return;
     listPane.scrollTop = revealScroll(listPane.scrollTop, listPane.clientHeight || 240, index, rowHeight());
     setSelected(visible[index], index);
+    // Each step flashes, so stepping through hits in a long list is visible
+    // rather than a silent jump.
+    flashRowAt(index);
   };
 
   // --- list ---
@@ -397,7 +408,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("focusable", "false");
 
-    const element = (name: "line" | "path" | "circle"): SVGElement =>
+    const element = (name: "line" | "path" | "circle" | "title"): SVGElement =>
       document.createElementNS(SVG_NS, name);
     // Column 0 is the mainline and keeps the quiet colour; every other column
     // is a side lane and cycles through the hues. The mapping is a function
@@ -448,6 +459,12 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         dot.setAttribute("cx", String(part.cx));
         dot.setAttribute("cy", String(part.cy));
         dot.setAttribute("r", String(part.r));
+        // A native tooltip on hover: who wrote this and when, without opening
+        // the detail pane. The gutter is hidden from assistive tech, so this
+        // is a convenience for a mouse, never the only way to the fact.
+        const title = element("title");
+        title.textContent = `${commit.authorName} — ${commit.subject}`;
+        dot.appendChild(title);
         dots.push(dot);
       }
     }
@@ -559,7 +576,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       const commit = rows[index].commit;
       const element = el("div", {
         id: `commit-row-${index}`,
-        class: `commit-row${index === selectedIndex ? " selected" : ""}${commit.oid === headOid ? " head" : ""}`,
+        class: `commit-row${index === selectedIndex ? " selected" : ""}${commit.oid === headOid ? " head" : ""}${index === flashIndex ? " flash" : ""}`,
         role: "option",
         "aria-selected": String(index === selectedIndex),
         "aria-label": rowDescription(commit),
@@ -572,6 +589,9 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         el("span", { class: "commit-subject", text: commit.subject, title: commit.subject }),
         el("span", { class: "commit-author", text: commit.authorName, title: commit.authorName }),
         el("span", { class: "commit-date", text: commit.authorDate.slice(0, 10) }),
+        // The short id is here so a commit can be named out loud from the
+        // list; the full one is a click away in the detail pane.
+        el("span", { class: "commit-short", "aria-hidden": "true", text: commit.oid.slice(0, 7) }),
       ]);
       // The graph leads the row, so it is prepended last: `prepend` puts the
       // element at the very front, and the gutter belongs left of the refs
@@ -582,6 +602,13 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       fragment.append(element);
     }
     rowsHost.replaceChildren(fragment);
+    if (flashIndex >= 0) {
+      // The flash is a one-shot: drop the class after it has played so a
+      // later re-render (a scroll, a resize) does not replay it.
+      const flashed = flashIndex;
+      flashIndex = -1;
+      window.setTimeout(() => rowsHost.querySelector(`#commit-row-${flashed}`)?.classList.remove("flash"), 950);
+    }
     if (selectedIndex >= slice.startIndex && selectedIndex < slice.endIndex) {
       listPane.setAttribute("aria-activedescendant", `commit-row-${selectedIndex}`);
     } else {

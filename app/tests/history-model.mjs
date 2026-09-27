@@ -54,6 +54,7 @@ const commit = (n, extra = {}) => ({
     dangling: false,
     folded: false,
   },
+  labels: { branches: [], tags: [], remotes: [], head: false },
   ...extra,
 });
 
@@ -306,13 +307,16 @@ const history = () => [
   commit(3, { subject: "Fix the reader", authorName: "ada" }),
 ];
 
-test("a find matches the subject, the author and the object id", () => {
+test("a find matches the subject, the author, the object id and the ref names", () => {
   assert.ok(commitMatches(history()[0], find("parser")));
   assert.ok(commitMatches(history()[0], find("Ada")), "an author matches");
   assert.ok(
     commitMatches(history()[0], find(history()[0].oid)),
     "an id pasted from a bug report finds its commit",
   );
+  // Typing a branch or tag name finds the commit that name points at.
+  const labelled = commit(9, { subject: "nothing alike", labels: { branches: ["release-1.0"], tags: [], remotes: [], head: false } });
+  assert.ok(commitMatches(labelled, find("release-1.0")), "a branch name matches");
   assert.equal(commitMatches(history()[1], find("parser")), false);
 });
 

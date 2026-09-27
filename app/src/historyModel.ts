@@ -221,13 +221,21 @@ export interface FindQuery {
   caseSensitive: boolean;
 }
 
-/// Whether one commit matches. The subject, the author and the full object
-/// id are all searched, because a reader who pastes an id from a bug report
-/// should find the commit by it.
+/// Whether one commit matches. The subject, the author, the object id and
+/// the names of the refs sitting on it are all searched, because a reader
+/// typing a branch name wants the commits that name points at, and a reader
+/// pasting an id from a bug report wants that commit.
 export function commitMatches(commit: CommitView, query: FindQuery): boolean {
   if (query.text === "") return true;
   const needle = query.caseSensitive ? query.text : query.text.toLowerCase();
-  const haystacks = [commit.subject, commit.authorName, commit.oid];
+  const haystacks = [
+    commit.subject,
+    commit.authorName,
+    commit.oid,
+    ...commit.labels.branches,
+    ...commit.labels.tags,
+    ...commit.labels.remotes,
+  ];
   if (query.regex) {
     let pattern: RegExp;
     try {
