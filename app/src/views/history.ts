@@ -349,8 +349,9 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       : commit.graph.merge
         ? `Merge commit, ${commit.parents.length} parents. `
         : "";
+    const head = commit.oid === (currentSnapshot()?.branch?.oid ?? null) ? "Checked out. " : "";
     const beyond = commit.graph.dangling ? " More history is below what is loaded." : "";
-    return `${kind}${commit.subject} — ${commit.authorName}, ${commit.authorDate.slice(0, 10)}.${beyond}`;
+    return `${head}${kind}${commit.subject} — ${commit.authorName}, ${commit.authorDate.slice(0, 10)}.${beyond}`;
   };
 
   const placeholder = (message: string): void => {
@@ -415,28 +416,26 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     virtual.style.height = `${slice.totalHeight}px`;
     rowsHost.style.transform = `translateY(${slice.offsetY}px)`;
     const fragment = document.createDocumentFragment();
+    const headOid = currentSnapshot()?.branch?.oid ?? null;
     for (let index = slice.startIndex; index < slice.endIndex; index++) {
       const commit = rows[index].commit;
       const element = el("div", {
         id: `commit-row-${index}`,
-        class: `commit-row${index === selectedIndex ? " selected" : ""}`,
+        class: `commit-row${index === selectedIndex ? " selected" : ""}${commit.oid === headOid ? " head" : ""}`,
         role: "option",
         "aria-selected": String(index === selectedIndex),
         "aria-label": rowDescription(commit),
       }, [
+        // Each field is its own fixed-width cell and the subject takes what is
+        // left, so the subject's left edge, the authors and the dates all line
+        // up down the list. One reading eye can then scan a column instead of
+        // re-finding where each row's text begins.
+        el("span", { class: "commit-refs", "aria-hidden": "true" },
+          commit.refs.map((ref) => el("span", { class: "commit-ref", text: ref }))),
         el("span", { class: "commit-subject", text: commit.subject, title: commit.subject }),
-        // Author and date are two fields, not one sentence: a separator between
-        // them welded them into a phrase and cost the reader the fact that
-        // they could be scanned apart.
-        el("span", { class: "commit-meta" }, [
-          el("span", { text: commit.authorName }),
-          el("span", { class: "commit-date", text: commit.authorDate.slice(0, 10) }),
-        ]),
+        el("span", { class: "commit-author", text: commit.authorName, title: commit.authorName }),
+        el("span", { class: "commit-date", text: commit.authorDate.slice(0, 10) }),
       ]);
-      if (commit.refs.length > 0) {
-        element.prepend(el("span", { class: "commit-refs" },
-          commit.refs.map((ref) => el("span", { class: "commit-ref", text: ref }))));
-      }
       // The graph leads the row, so it is prepended last: `prepend` puts the
       // element at the very front, and the gutter belongs left of the refs
       // chips and the subject.

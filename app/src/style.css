@@ -363,6 +363,15 @@ body {
 .commit-row { display: flex; align-items: baseline; gap: 0.4rem; height: var(--row-height-history); padding-inline: 0.3rem; border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-sm); overflow: hidden; }
 .commit-row:hover { background: var(--surface-hover); }
 .commit-row.selected { background: var(--surface-active); }
+/* Each cell is a fixed width and the subject flexes, so the subject's left
+   edge and the author/date columns all line up down the whole list. A reader
+   can scan a column instead of re-finding where each row's text begins. rem,
+   not px, so the columns hold under interface zoom. */
+.commit-refs { flex: 0 0 var(--commit-refs-width); width: var(--commit-refs-width); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--status-renamed); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.commit-ref + .commit-ref { margin-left: 0.3rem; }
+.commit-subject { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.commit-author { flex: 0 0 var(--commit-author-width); width: var(--commit-author-width); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: var(--text-xs); }
+.commit-date { flex: 0 0 var(--commit-date-width); width: var(--commit-date-width); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: var(--text-xs); text-align: right; }
 
 /* Commit graph. The gutter is a fixed-width SVG the view sizes from the
    lane metrics; it is decorative next to text that already names each
@@ -406,13 +415,11 @@ body {
 .graph-gutter [data-lane="3"] { color: var(--graph-lane-3); }
 .graph-gutter [data-lane="4"] { color: var(--graph-lane-4); }
 .graph-gutter [data-lane="5"] { color: var(--graph-lane-5); }
-.commit-refs { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--status-renamed); flex: 0 0 auto; max-width: 30%; overflow: hidden; text-overflow: ellipsis; }
-.commit-ref + .commit-ref { margin-left: 0.4rem; }
-.commit-subject { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.commit-meta { flex: 0 0 auto; color: var(--text-faint); font-size: var(--text-xs); }
-/* A wider gap than the row's own, so the two fields of a commit's meta read as
-   columns rather than as the ends of one phrase. */
-.commit-date { margin-left: 0.6rem; }
+/* The graph acknowledges where you are. The checked-out commit's node is a
+   heavier ring, and the selected row's node gains a halo, so following the
+   eye down the gutter lands on a marked dot rather than on tinted text. */
+.commit-row.head .graph-gutter .graph-node[data-shape="normal"] { fill: none; stroke: currentColor; stroke-width: 2; }
+.commit-row.selected .graph-gutter .graph-node { stroke-width: 2.5; filter: drop-shadow(0 0 2px currentColor); }
 .splitter { height: var(--splitter-size); flex: 0 0 auto; background: var(--surface-rail); border-block: 1px solid var(--line); cursor: row-resize; }
 .splitter:hover { background: var(--accent-soft); }
 .history-detail { flex: 0 0 auto; min-height: 8rem; overflow-y: auto; padding: 0.5rem 0.75rem; display: flex; flex-direction: column; gap: 0.4rem; }
@@ -620,6 +627,13 @@ body {
   .appbar .icon-btn { width: 1.5rem; height: 1.5rem; }
   .file-status { min-width: 2.25ch; }
   .file-name, .ref-name { min-width: 6ch; }
+  /* At this width the fixed columns would leave the subject — the one field
+     worth reading — almost nothing, so the author gives up its cell and the
+     rest give up some width. The subject keeps the largest share at every
+     size. */
+  .commit-author { display: none; }
+  .commit-refs { flex-basis: 6rem; width: 6rem; }
+  .commit-date { flex-basis: 4.5rem; width: 4.5rem; }
 }
 
 /* Content that is intrinsically one long unbreakable string — a remote URL, an
