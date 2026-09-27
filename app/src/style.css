@@ -373,14 +373,31 @@ body {
 /* One `color` per lane and everything else follows it, so a lane's line,
    its branch curve and its dot can never disagree about which lane they
    belong to. */
-.graph-gutter .graph-line { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
-.graph-gutter .graph-node { stroke: currentColor; stroke-width: 1.5; }
+.graph-gutter .graph-line { fill: none; stroke: currentColor; stroke-linecap: round; }
+.graph-gutter .graph-node { stroke: currentColor; }
+/* Thickness carries the rhythm: a row that only carries the mainline is a
+   hairline, a lane running past is light, and a row where a branch opens or
+   closes is drawn full. Scanning a long history, the eye lands on the rows
+   where the shape of the work changed. */
+.graph-gutter .graph-line[data-weight="hairline"] { stroke-width: 1; }
+.graph-gutter .graph-line[data-weight="lane"] { stroke-width: 1.25; }
+.graph-gutter .graph-line[data-weight="structural"] { stroke-width: 2; }
+.graph-gutter .graph-node[data-weight="hairline"] { stroke-width: 1; }
+.graph-gutter .graph-node[data-weight="lane"] { stroke-width: 1.25; }
+.graph-gutter .graph-node[data-weight="structural"] { stroke-width: 1.5; }
+/* The underlay: the same stroke, wider, in the row's own background. It is
+   laid down first so that where two branches cross, the one on top carves a
+   clean gap through the one below and neither fuses into a single mark. */
+.graph-gutter .graph-shadow { fill: none; stroke: var(--surface-app); stroke-linecap: round; }
+.graph-gutter .graph-shadow[data-weight="hairline"] { stroke-width: 2.5; }
+.graph-gutter .graph-shadow[data-weight="lane"] { stroke-width: 3.5; }
+.graph-gutter .graph-shadow[data-weight="structural"] { stroke-width: 5; }
 .graph-gutter .graph-node[data-shape="normal"] { fill: currentColor; stroke: none; }
 /* A merge is a ring and the first commit is a hollow dot, so their shape —
    not only their colour — tells them apart from a plain commit. Neither is
    filled: what shows through is whatever the row is painted with, which keeps
    them right on hover and selection too. */
-.graph-gutter .graph-node[data-shape="merge"] { fill: none; stroke-width: 2; }
+.graph-gutter .graph-node[data-shape="merge"] { fill: none; }
 .graph-gutter .graph-node[data-shape="root"] { fill: none; }
 .graph-gutter .graph-line[data-dash="true"] { stroke-dasharray: 2 2; }
 .graph-gutter [data-lane="0"] { color: var(--graph-line); }

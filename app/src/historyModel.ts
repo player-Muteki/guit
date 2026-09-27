@@ -32,9 +32,10 @@ export function buildHistoryRows(commits: readonly CommitView[]): HistoryRow[] {
 // first two must match `--graph-lane` and `--graph-node` in style/tokens.css;
 // `graph-tracks-the-css` is the gate that fails when they drift. rem, not px,
 // because the whole point of a zoomable interface is that the graph grows
-// with it.
-export const GRAPH_LANE_REM = 0.75;
-export const GRAPH_NODE_REM = 0.1875; // 3px at the default 16px root
+// with it. The lane is a full rem wide so a curve leaving the mainline has
+// somewhere to go before it settles into its own column.
+export const GRAPH_LANE_REM = 1;
+export const GRAPH_NODE_REM = 0.25;
 
 export function graphLanePx(baseFontPx: number): number {
   return baseFontPx * GRAPH_LANE_REM;
@@ -65,22 +66,53 @@ export function graphColumns(commits: readonly CommitView[]): number {
 
 // One primitive of a row's drawing, in pixels. The view turns each into an
 // SVG child; nothing here touches the DOM.
+//
+// `weight` is the line's thickness tier. A commit that is only carrying the
+// mainline is drawn hairline-thin; one where a branch opens, closes or merges
+// is drawn full. That difference is the whole rhythm of the gutter: scanning
+// a long history, the eye should land on the rows where the shape of the work
+// actually changed, not on every straight run between them.
 export type GraphPart =
   // A vertical line in one lane. `lane` is the column, so the view can colour
   // a lane the same way everywhere it appears.
-  | { kind: "line"; lane: number; x: number; y1: number; y2: number; dashed: boolean }
+  | { kind: "line"; lane: number; x: number; y1: number; y2: number; dashed: boolean; weight: GraphWeight }
   // The commit's own dot. `shape` is the fact the dot carries, so colour is
   // never the only thing telling a merge from a plain commit.
-  | { kind: "node"; lane: number; cx: number; cy: number; r: number; shape: "normal" | "merge" | "root"; dashed: boolean }
+  | { kind: "node"; lane: number; cx: number; cy: number; r: number; shape: "normal" | "merge" | "root"; weight: GraphWeight }
   // The one non-orthogonal line in the graph: a branch peeling out of its
-  // merge and running down its own lane, and the mirror of it, a set of lanes
-  // folding back into the commit they all share.
-  | { kind: "branch"; lane: number; path: string };
+  // merge and running down to the next row in its own lane, and the mirror of
+  // it, a set of lanes folding back into the commit they all share. The
+  // control points are pushed most of a row height from their ends, so the
+  // curve is drawn in the space *between* two rows and reads as a slope
+  // rather than as a right angle.
+  | { kind: "branch"; lane: number; path: string; weight: GraphWeight };
+
+export type GraphWeight = "hairline" | "lane" | "structural";
 
 export interface RowGeometry {
   width: number;
   height: number;
   parts: GraphPart[];
+}
+
+// A row is only "structural" — worth full-strength ink — when something
+// happens to the shape of the history at it: a branch opens, a set of lanes
+// folds in, or the commit is a merge or the first one. Everything else is
+// the mainline being carried, and is drawn quiet.
+function rowWeight(graph: GraphRow): GraphWeight {
+  if (
+    graph.merge ||
+    graph.root ||
+    graph.branches.length > 0 ||
+    graph.incoming.length > 0 ||
+    graph.dangling
+  ) {
+    return "structural";
+  }
+  if (graph.lanes.length > 0) {
+    return "lane";
+  }
+  return "hairline";
 }
 
 /// The drawing of one commit row. Every coordinate is in pixels measured from
@@ -95,43 +127,56 @@ export function rowGeometry(
 ): RowGeometry {
   const mid = rowHeight / 2;
   const at = (column: number): number => (column + 0.5) * laneWidth;
+  const weight = rowWeight(graph);
   const parts: GraphPart[] = [];
-  // A branch lane starts at the curve, not at the top of the row: drawing it
-  // full height would leave a stub running up to a column that was free above.
+
+  // A lane this row merely passes through runs the full height, so it joins
+  // the identical lane in the rows above and below it. A lane this row
+  // *opens* does not: its curve is the connection, and a vertical here too
+  // would leave a stub running up to a lane that was free above.
   for (const lane of graph.lanes) {
-    const starts = graph.branches.includes(lane);
+    if (graph.branches.includes(lane)) continue;
     parts.push({
       kind: "line",
       lane,
       x: at(lane),
-      y1: starts ? mid : 0,
+      y1: 0,
       y2: rowHeight,
       dashed: false,
+      weight: "lane",
     });
   }
-  // Lanes that converge on this commit arrive from above and bend into it.
-  // They are drawn before the node so the dot sits on top of their ends.
-  for (const lane of graph.incoming) {
-    parts.push({ kind: "line", lane, x: at(lane), y1: 0, y2: mid, dashed: false });
-  }
-  const step = (from: number, to: number): string => {
-    // A smooth step across, so the graph reads as water finding its level
-    // rather than as a circuit diagram. It is the only curve here on purpose:
-    // a line changing column is the one moment in a commit graph that means
-    // something, and it should be the one thing that is not a right angle.
-    const reach = (to - from) / 2;
-    return `M ${from} ${mid} C ${from + reach} ${mid} ${to - reach} ${mid} ${to} ${mid}`;
+  // A curve that changes column is drawn in the space between the two rows it
+  // joins: a branch leaves the node at the middle of this row and reaches its
+  // lane at the bottom edge, where the next row's lane picks it up; a
+  // converging lane enters at the top edge and arrives at the node. The
+  // control points sit most of a row height from their ends, which is what
+  // turns the step into a slope instead of a right angle.
+  const reach = rowHeight * 0.8;
+  const curve = (x1: number, y1: number, x2: number, y2: number): string => {
+    const descending = y2 > y1;
+    return `M ${x1} ${y1} C ${x1} ${y1 + (descending ? reach : -reach)} ${x2} ${y2 + (descending ? -reach : reach)} ${x2} ${y2}`;
   };
   for (const lane of graph.branches) {
-    parts.push({ kind: "branch", lane, path: step(at(graph.node), at(lane)) });
+    parts.push({
+      kind: "branch",
+      lane,
+      path: curve(at(graph.node), mid, at(lane), rowHeight),
+      weight: "structural",
+    });
   }
   for (const lane of graph.incoming) {
-    parts.push({ kind: "branch", lane, path: step(at(lane), at(graph.node)) });
+    parts.push({
+      kind: "branch",
+      lane,
+      path: curve(at(lane), 0, at(graph.node), mid),
+      weight: "structural",
+    });
   }
   // The node's own column: a line arrives from above and one leaves below,
   // with the dot bridging the two.
   if (graph.entry) {
-    parts.push({ kind: "line", lane: graph.node, x: at(graph.node), y1: 0, y2: mid, dashed: false });
+    parts.push({ kind: "line", lane: graph.node, x: at(graph.node), y1: 0, y2: mid, dashed: false, weight });
   }
   if (graph.exit) {
     parts.push({
@@ -143,6 +188,7 @@ export function rowGeometry(
       // A line whose parent is below the loaded window is drawn dashed: it
       // leaves the list rather than ending as though the history stopped.
       dashed: graph.dangling,
+      weight,
     });
   }
   parts.push({
@@ -152,7 +198,7 @@ export function rowGeometry(
     cy: mid,
     r: nodeRadius,
     shape: graph.root ? "root" : graph.merge ? "merge" : "normal",
-    dashed: false,
+    weight,
   });
   return { width: columns * laneWidth, height: rowHeight, parts };
 }

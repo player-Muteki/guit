@@ -176,14 +176,24 @@ test("a merge is a ring and a branch curves out of it into its own lane", () => 
   assert.equal(parts.find((part) => part.kind === "node").shape, "merge");
   const branch = parts.find((part) => part.kind === "branch");
   assert.ok(branch, "a merge draws the curve into the lane it opens");
-  // The curve starts at the node's column and ends at the branch lane's.
-  assert.match(branch.path, /^M 5 14 C /, "it leaves the node's own column");
-  assert.match(branch.path, / 15 14$/, "and arrives at the branch lane");
+  // The curve leaves the node's own column at the dot and reaches the branch
+  // lane at the *bottom* of the row, where the next row's lane picks it up.
+  // Its control points are pushed most of a row height from each end, so the
+  // step is drawn as a slope through the space between the two rows.
+  const numbers = branch.path.match(/-?\d+(?:\.\d+)?/g).map(Number);
+  const [x1, y1, cx1, cy1, cx2, cy2, x2, y2] = numbers;
+  assert.deepEqual([x1, y1], [5, 14], "it leaves the node at the dot");
+  assert.deepEqual([x2, y2], [15, 28], "and settles into the lane at the row's edge");
+  assert.equal(cx1, x1, "the first control point stays in the node's column");
+  assert.equal(cx2, x2, "the second stays in the branch lane's column");
+  assert.ok(cy1 > y2 && cy2 < y1, "the control points overshoot, so the step curves");
   // The branch lane must not also run full height: that would draw a stub up
   // to a column that was free above.
-  const branchLine = parts.find((part) => part.kind === "line" && part.lane === 1);
-  assert.equal(branchLine.y1, 14, "the opened lane starts at the curve, not at the top");
-  assert.equal(branchLine.y2, 28);
+  assert.equal(
+    parts.filter((part) => part.kind === "line" && part.lane === 1).length,
+    0,
+    "the opened lane is drawn by the curve, not by a vertical",
+  );
 });
 
 test("a lane the row merely passes through runs the full height", () => {
@@ -204,17 +214,38 @@ test("lanes sharing one parent fold into it instead of running past it", () => {
     3,
   );
   for (const lane of [1, 2, 3]) {
-    const arriving = parts.find((part) => part.kind === "line" && part.lane === lane);
-    assert.equal(arriving.y1, 0, `lane ${lane} arrives from above`);
-    assert.equal(arriving.y2, 14, `lane ${lane} stops at the node's height`);
     const curve = parts.find((part) => part.kind === "branch" && part.lane === lane);
     assert.ok(curve, `lane ${lane} bends into the node`);
-    // The curve runs from the lane's own column back to the node's column 0.
-    assert.match(curve.path, new RegExp(`^M ${lane * 10 + 5} 14 C `));
-    assert.match(curve.path, / 5 14$/);
+    // The curve enters at the *top* of the row in the lane's own column and
+    // settles into the node at column 0 — the mirror of a branch leaving.
+    const numbers = curve.path.match(/-?\d+(?:\.\d+)?/g).map(Number);
+    assert.deepEqual([numbers[0], numbers[1]], [lane * 10 + 5, 0], `lane ${lane} enters from the top`);
+    assert.deepEqual([numbers[6], numbers[7]], [5, 14], `lane ${lane} arrives at the node`);
+    // No vertical stub: the curve is the whole connection.
+    assert.equal(
+      parts.filter((part) => part.kind === "line" && part.lane === lane).length,
+      0,
+      `lane ${lane} has no vertical of its own`,
+    );
   }
   // None of them continues below: the node's own column is the only line out.
   assert.equal(parts.filter((part) => part.kind === "line" && part.y2 === 28).length, 1);
+});
+
+test("a row's ink weight tracks whether anything structural happens there", () => {
+  // The rhythm of the gutter: a straight run of the mainline is a hairline,
+  // a row carrying a lane is a lane, and a row that opens, closes or merges
+  // is drawn full. This is what makes a long history scannable.
+  const weightOf = (extra) =>
+    rowGeometry(graph({ entry: true, exit: true, ...extra }), 2, 10, 28, 3).parts
+      .find((part) => part.kind === "node").weight;
+  assert.equal(weightOf({}), "hairline", "the mainline being carried is quiet");
+  assert.equal(weightOf({ lanes: [1] }), "lane", "a lane running past is light");
+  assert.equal(weightOf({ merge: true }), "structural", "a merge is full");
+  assert.equal(weightOf({ root: true }), "structural", "the first commit is full");
+  assert.equal(weightOf({ branches: [1] }), "structural", "a branch opening is full");
+  assert.equal(weightOf({ incoming: [1] }), "structural", "lanes folding in is full");
+  assert.equal(weightOf({ dangling: true }), "structural", "a line leaving the window is full");
 });
 
 test("a line whose parent is below the loaded window is dashed, not ended", () => {

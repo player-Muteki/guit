@@ -257,6 +257,12 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   /// Draws one row's graph. The geometry comes from the pure model, so this
   /// only turns parts into SVG nodes; a row is drawn from its own columns
   /// alone, which is what lets the list stay virtualised.
+  ///
+  /// Each stroke is laid down twice: first a wider underlay in the row's own
+  /// background, then the coloured line on top. Where two branches cross,
+  /// the underlay is what stops them fusing into one thick mark — the line
+  /// that passes over gets a clean gap around it, so every crossing stays
+  /// readable without any of them being dashed or faded.
   const graphSvg = (commit: CommitView, height: number, fontPx: number): SVGSVGElement => {
     const geometry = rowGeometry(
       commit.graph,
@@ -274,39 +280,64 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     // the drawing as well would say the same thing twice.
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("focusable", "false");
+
+    const element = (name: "line" | "path" | "circle"): SVGElement =>
+      document.createElementNS(SVG_NS, name);
+    // Column 0 is the mainline and keeps the quiet colour; every other column
+    // is a side lane and cycles through the hues. The mapping is a function
+    // of the column alone, so a lane keeps its hue down the whole history.
+    const laneClass = (lane: number): string => (lane === 0 ? "0" : String(1 + ((lane - 1) % 5)));
+
+    const shadows: SVGElement[] = [];
+    const strokes: SVGElement[] = [];
+    const dots: SVGElement[] = [];
     for (const part of geometry.parts) {
-      // Column 0 is the mainline and keeps the quiet colour; every other
-      // column is a side lane and cycles through the five hues. The mapping
-      // is a function of the column alone, so a lane keeps its hue down the
-      // whole history.
-      const laneClass = part.lane === 0 ? "0" : String(1 + ((part.lane - 1) % 5));
       if (part.kind === "line") {
-        const line = document.createElementNS(SVG_NS, "line");
+        const shadow = element("line");
+        shadow.setAttribute("class", "graph-shadow");
+        shadow.setAttribute("data-weight", part.weight);
+        shadow.setAttribute("x1", String(part.x));
+        shadow.setAttribute("x2", String(part.x));
+        shadow.setAttribute("y1", String(part.y1));
+        shadow.setAttribute("y2", String(part.y2));
+        shadows.push(shadow);
+        const line = element("line");
         line.setAttribute("class", "graph-line");
-        line.setAttribute("data-lane", laneClass);
+        line.setAttribute("data-lane", laneClass(part.lane));
+        line.setAttribute("data-weight", part.weight);
         line.setAttribute("x1", String(part.x));
         line.setAttribute("x2", String(part.x));
         line.setAttribute("y1", String(part.y1));
         line.setAttribute("y2", String(part.y2));
         if (part.dashed) line.setAttribute("data-dash", "true");
-        svg.appendChild(line);
+        strokes.push(line);
       } else if (part.kind === "branch") {
-        const path = document.createElementNS(SVG_NS, "path");
+        const shadow = element("path");
+        shadow.setAttribute("class", "graph-shadow");
+        shadow.setAttribute("data-weight", part.weight);
+        shadow.setAttribute("d", part.path);
+        shadows.push(shadow);
+        const path = element("path");
         path.setAttribute("class", "graph-line");
-        path.setAttribute("data-lane", laneClass);
+        path.setAttribute("data-lane", laneClass(part.lane));
+        path.setAttribute("data-weight", part.weight);
         path.setAttribute("d", part.path);
-        svg.appendChild(path);
+        strokes.push(path);
       } else {
-        const dot = document.createElementNS(SVG_NS, "circle");
+        const dot = element("circle");
         dot.setAttribute("class", "graph-node");
-        dot.setAttribute("data-lane", laneClass);
+        dot.setAttribute("data-lane", laneClass(part.lane));
         dot.setAttribute("data-shape", part.shape);
+        dot.setAttribute("data-weight", part.weight);
         dot.setAttribute("cx", String(part.cx));
         dot.setAttribute("cy", String(part.cy));
         dot.setAttribute("r", String(part.r));
-        svg.appendChild(dot);
+        dots.push(dot);
       }
     }
+    // Underlays first, then the coloured strokes, then the nodes on top of
+    // both, so a dot always sits cleanly over whatever lines meet at it.
+    svg.append(...shadows, ...strokes, ...dots);
     return svg;
   };
 
