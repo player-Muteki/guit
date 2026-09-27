@@ -171,7 +171,7 @@ test("the top of the history has nothing above it and a root nothing below", () 
   assert.equal(root.parts.find((part) => part.kind === "node").shape, "root");
 });
 
-test("a merge is a ring and a branch curves out of it into its own lane", () => {
+test("a merge is a ring and a branch turns once out of it into its own lane", () => {
   const { parts } = rowGeometry(
     graph({ entry: true, exit: true, merge: true, lanes: [1], branches: [1] }),
     2,
@@ -181,26 +181,25 @@ test("a merge is a ring and a branch curves out of it into its own lane", () => 
   );
   assert.equal(parts.find((part) => part.kind === "node").shape, "merge");
   const branch = parts.find((part) => part.kind === "branch");
-  assert.ok(branch, "a merge draws the curve into the lane it opens");
-  // The curve leaves the node's own column at the dot and reaches the branch
-  // lane at the *bottom* of the row, where the next row's lane picks it up.
-  const numbers = branch.path.match(/-?\d+(?:\.\d+)?/g).map(Number);
-  const [x1, y1, cx1, cy1, cx2, cy2, x2, y2] = numbers;
-  assert.deepEqual([x1, y1], [5, 14], "it leaves the node at the dot");
-  assert.deepEqual([x2, y2], [15, 28], "and settles into the lane at the row's edge");
-  assert.equal(cx1, x1, "the first control point stays in the node's column, so it leaves straight");
-  assert.equal(cy2, y2, "it arrives level with the row's edge");
-  assert.ok(
-    cx2 > cx1 && cx2 < x2,
-    "the second control point sits back from the lane, on the approach side",
+  assert.ok(branch, "a merge draws the turn into the lane it opens");
+  // One turn, not a smear: out of the dot, across, a small rounded corner,
+  // then straight down the lane to the row's edge where the next row picks
+  // it up. The path is exactly M(node) L(corner) A L(lane, edge) — the two
+  // columns it uses and nothing else.
+  assert.equal(
+    branch.path,
+    "M 5 14 L 10 14 A 5 5 0 0 1 15 19 L 15 28",
+    "out of the node, across, one quarter turn, then down to the row's edge",
   );
-  assert.ok(cy1 > y1 && cy1 < y2, "it bends on the way down, between the two rows");
+  const radius = Number(branch.path.match(/A ([\d.]+)/)[1]);
+  assert.equal(radius, 5, "the corner is a quarter circle: each axis is one radius");
+  assert.ok(radius > 0 && radius <= 28 / 4, `a sane radius: ${radius}`);
   // The branch lane must not also run full height: that would draw a stub up
   // to a column that was free above.
   assert.equal(
     parts.filter((part) => part.kind === "line" && part.lane === 1).length,
     0,
-    "the opened lane is drawn by the curve, not by a vertical",
+    "the opened lane is drawn by the turn, not by a vertical",
   );
 });
 
@@ -222,14 +221,22 @@ test("lanes sharing one parent fold into it instead of running past it", () => {
     3,
   );
   for (const lane of [1, 2, 3]) {
-    const curve = parts.find((part) => part.kind === "branch" && part.lane === lane);
-    assert.ok(curve, `lane ${lane} bends into the node`);
-    // The curve enters at the *top* of the row in the lane's own column and
-    // settles into the node at column 0 — the mirror of a branch leaving.
-    const numbers = curve.path.match(/-?\d+(?:\.\d+)?/g).map(Number);
-    assert.deepEqual([numbers[0], numbers[1]], [lane * 10 + 5, 0], `lane ${lane} enters from the top`);
-    assert.deepEqual([numbers[6], numbers[7]], [5, 14], `lane ${lane} arrives at the node`);
-    // No vertical stub: the curve is the whole connection.
+    const turn = parts.find((part) => part.kind === "branch" && part.lane === lane);
+    assert.ok(turn, `lane ${lane} turns in to the node`);
+    // The mirror of a branch leaving: down the lane from the top of the row,
+    // one rounded corner, then level into the node at column 0. The corner's
+    // radius shrinks as the lane sits further out, so no turn is wider than
+    // the hop it has to make.
+    assert.match(
+      turn.path,
+      new RegExp(`^M ${lane * 10 + 5} 0 L ${lane * 10 + 5} \\d+(\\.\\d+)? A `),
+      `lane ${lane} comes straight down its own column`,
+    );
+    assert.ok(
+      turn.path.endsWith("L 5 14"),
+      `lane ${lane} arrives level with the node: ${turn.path}`,
+    );
+    // No vertical stub: the turn is the whole connection.
     assert.equal(
       parts.filter((part) => part.kind === "line" && part.lane === lane).length,
       0,
@@ -240,11 +247,11 @@ test("lanes sharing one parent fold into it instead of running past it", () => {
   assert.equal(parts.filter((part) => part.kind === "line" && part.y2 === 28).length, 1);
 });
 
-test("a lane merging into a commit on its left sweeps in, never past it", () => {
+test("a lane merging into a commit on its left turns in, never past it", () => {
   // The shape that used to look wrong: three lanes fold back into a commit
-  // drawn in column 0, and the curve used to be pulled to the far side of that
-  // commit and double back. A control point must never sit past the end it
-  // points at, in either direction.
+  // drawn in column 0, and the line used to be pulled to the far side of that
+  // commit and double back. Nothing a turn draws may sit outside the two
+  // columns it joins.
   const { parts } = rowGeometry(
     graph({ entry: true, exit: true, incoming: [1, 2, 3] }),
     4,
@@ -253,23 +260,23 @@ test("a lane merging into a commit on its left sweeps in, never past it", () => 
     3,
   );
   for (const lane of [1, 2, 3]) {
-    const curve = parts.find((part) => part.kind === "branch" && part.lane === lane);
-    const [x1, y1, cx1, cy1, cx2, cy2, x2, y2] =
-      curve.path.match(/-?\d+(?:\.\d+)?/g).map(Number);
-    const left = Math.min(x1, x2);
-    const right = Math.max(x1, x2);
-    assert.ok(
-      cx1 >= left && cx1 <= right,
-      `lane ${lane}'s first control point stays within the span it crosses`,
-    );
-    assert.ok(
-      cx2 >= left && cx2 <= right,
-      `lane ${lane}'s second control point stays within the span it crosses`,
-    );
-    // It leaves straight down its own lane and arrives level with the node.
-    assert.equal(cx1, x1, `lane ${lane} leaves straight`);
-    assert.equal(cy2, y2, `lane ${lane} arrives level with the node`);
-    assert.ok(cy1 > y1 && cy1 < y2, `lane ${lane} bends on the way in`);
+    const turn = parts.find((part) => part.kind === "branch" && part.lane === lane);
+    // Every x the turn draws is the node's column, the lane's, or the corner
+    // between them. The bug this guards pulled the line to the *left* of the
+    // node and folded it back, so the node's column is the floor. Only the
+    // coordinates of M, L and A's endpoint are positions; the arc's radius
+    // and flags are not.
+    const points = [...turn.path.matchAll(/[MLA] (-?[\d.]+) (-?[\d.]+)/g)].map((m) => Number(m[1]));
+    const arcEnd = Number(turn.path.match(/A [\d.]+ [\d.]+ 0 0 1 (-?[\d.]+)/)[1]);
+    for (const x of [...points, arcEnd]) {
+      assert.ok(
+        x >= 5,
+        `lane ${lane} never draws left of the node it joins: x=${x} in ${turn.path}`,
+      );
+    }
+    // And the corner grows with the hop it has to make, up to the bound.
+    const radius = Number(turn.path.match(/A ([\d.]+)/)[1]);
+    assert.ok(radius > 0 && radius <= 7, `lane ${lane}'s corner radius: ${radius}`);
   }
 });
 

@@ -149,36 +149,44 @@ export function rowGeometry(
       weight: "lane",
     });
   }
-  // A curve that changes column is drawn in the space between the two rows it
-  // joins: a branch leaves the node at the middle of this row and reaches its
-  // lane at the bottom edge, where the next row's lane picks it up; a
-  // converging lane enters at the top edge and arrives at the node.
+  // A line that changes column turns once and runs straight the rest of the
+  // way: a branch leaves the node sideways and then runs down its own lane; a
+  // lane folding into a commit runs down and then turns in. A right angle with
+  // a small rounded corner is the shape a reader can trace with their eye, and
+  // it is what every other commit graph draws — a curve stretched across one
+  // row's height is a smear across a wide span rather than a connection, and
+  // a flat step in the middle of a row reads as a circuit diagram.
   //
-  // Each control point is held on the axis it is *not* travelling along: the
-  // first shares the start's column, so the line leaves straight, and the
-  // second shares the end's height, so it arrives level. That is the elbow of
-  // water finding its level. It also means no control point is ever placed
-  // past the end it points at — a lane merging into a commit on its left
-  // sweeps into it, rather than sailing past it and doubling back, which is
-  // what putting every control point on the same side of its end produces.
-  const curve = (x1: number, y1: number, x2: number, y2: number): string => {
-    const across = (x2 - x1) * 0.55;
-    const down = (y2 - y1) * 0.55;
-    return `M ${x1} ${y1} C ${x1} ${y1 + down} ${x2 - across} ${y2} ${x2} ${y2}`;
-  };
+  // The corner is kept clear of both ends so a short hop between neighbouring
+  // lanes still has a straight run left to draw on.
+  const turn = (from: number, to: number): number =>
+    Math.min(rowHeight * 0.28, Math.abs(to - from) / 2, rowHeight / 4);
   for (const lane of graph.branches) {
+    const target = at(lane);
+    const corner = turn(at(graph.node), target);
     parts.push({
       kind: "branch",
       lane,
-      path: curve(at(graph.node), mid, at(lane), rowHeight),
+      // Out of the node, across, then down the lane to the row's edge — where
+      // the next row's lane picks it up.
+      path:
+        `M ${at(graph.node)} ${mid} L ${target - corner} ${mid} ` +
+        `A ${corner} ${corner} 0 0 1 ${target} ${mid + corner} L ${target} ${rowHeight}`,
       weight: "structural",
     });
   }
   for (const lane of graph.incoming) {
+    const source = at(lane);
+    const corner = turn(source, at(graph.node));
     parts.push({
       kind: "branch",
       lane,
-      path: curve(at(lane), 0, at(graph.node), mid),
+      // Down the lane from the row's top edge, then one turn into the node.
+      // The turn happens above the dot rather than at its height, so the line
+      // does not cut across the ones already arriving beside it.
+      path:
+        `M ${source} 0 L ${source} ${mid - corner} ` +
+        `A ${corner} ${corner} 0 0 1 ${source - corner} ${mid} L ${at(graph.node)} ${mid}`,
       weight: "structural",
     });
   }
