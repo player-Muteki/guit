@@ -126,18 +126,21 @@
   --graph-lane: 0.8125rem;
   --graph-node: 0.34375rem;
   --graph-ring: 0.11rem;
-  /* Stroke weights, in rem so the drawing thickens with interface zoom along
-     with the lanes and the dots. Three tiers, matching what a row is doing:
-     carrying the mainline is a hairline, a lane running past is light, a row
-     where the shape of the work changed is full. The underlay beneath each
-     stroke is a fixed multiple wider than the line it backs, which is what
-     keeps a crossing readable without either line being faded. */
-  --graph-stroke-hairline: 0.1rem;
-  --graph-stroke-lane: 0.115rem;
-  --graph-stroke-strong: 0.15rem;
-  --graph-under-hairline: 0.22rem;
-  --graph-under-lane: 0.28rem;
-  --graph-under-strong: 0.38rem;
+  /* Stroke weight. One width for every line in the graph, straight or
+     turning: a lane that changes thickness along its own length reads as a
+     caterpillar, and a corner drawn heavier than the straight run it joins
+     reads as a swelling. What marks a row as worth looking at is its node's
+     shape, not the weight of its line. rem, so the drawing thickens under
+     interface zoom along with the rows it sits in.
+
+     The underlay beneath each stroke is only a hair wider than the line it
+     backs — enough to keep a crossing readable where one line passes behind
+     another, and no more. A wide underlay is right for lines that cross but
+     wrong for lines that merely run side by side: in a fan the curves are
+     parallel and close, and a broad halo behind each of them merges into one
+     solid block instead of separating anything. */
+  --graph-stroke: 0.115rem;
+  --graph-under: 0.16rem;
   /* Commit-row column widths. Fixed so the subject's left edge and the
      author/date columns line up down the whole list. rem, not px, so they
      hold under interface zoom. The refs column gives up its width on a

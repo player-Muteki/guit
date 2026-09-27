@@ -422,7 +422,6 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       if (part.kind === "line") {
         const shadow = element("line");
         shadow.setAttribute("class", "graph-shadow");
-        shadow.setAttribute("data-weight", part.weight);
         shadow.setAttribute("x1", String(part.x));
         shadow.setAttribute("x2", String(part.x));
         shadow.setAttribute("y1", String(part.y1));
@@ -431,7 +430,6 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         const line = element("line");
         line.setAttribute("class", "graph-line");
         line.setAttribute("data-lane", laneClass(part.lane));
-        line.setAttribute("data-weight", part.weight);
         line.setAttribute("x1", String(part.x));
         line.setAttribute("x2", String(part.x));
         line.setAttribute("y1", String(part.y1));
@@ -441,13 +439,11 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       } else if (part.kind === "branch") {
         const shadow = element("path");
         shadow.setAttribute("class", "graph-shadow");
-        shadow.setAttribute("data-weight", part.weight);
         shadow.setAttribute("d", part.path);
         shadows.push(shadow);
         const path = element("path");
         path.setAttribute("class", "graph-line");
         path.setAttribute("data-lane", laneClass(part.lane));
-        path.setAttribute("data-weight", part.weight);
         path.setAttribute("d", part.path);
         strokes.push(path);
       } else {
@@ -455,7 +451,6 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         dot.setAttribute("class", "graph-node");
         dot.setAttribute("data-lane", laneClass(part.lane));
         dot.setAttribute("data-shape", part.shape);
-        dot.setAttribute("data-weight", part.weight);
         dot.setAttribute("cx", String(part.cx));
         dot.setAttribute("cy", String(part.cy));
         dot.setAttribute("r", String(part.r));

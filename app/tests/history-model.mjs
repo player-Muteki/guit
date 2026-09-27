@@ -195,17 +195,17 @@ test("a merge is a ring and a branch turns once out of it into its own lane", ()
 
   const branch = parts.find((part) => part.kind === "branch");
   assert.ok(branch, "a merge draws the turn into the lane it opens");
-  // A short run out of the node, one tight quarter-round, then straight down
-  // the lane for the rest of the row: the line is vertical almost all the way
-  // and only turns once, close to the end.
-  assert.equal(
-    branch.path,
-    "M 5 14 L 10 14 A 5 5 0 0 1 15 19 L 15 28",
-    "out of the node, one quarter turn, then down to the row's edge",
-  );
+  // The line leaves the node, runs straight across what is left of the gap,
+  // turns once through a quarter-round, then runs straight down the lane to
+  // the row's edge. It is vertical for most of the row and turns only once.
+  assert.match(branch.path, /^M 5 14 L 5(\.\d+)? 14 A /, "out of the node, then one turn");
+  assert.ok(branch.path.endsWith("L 15 28"), "and straight down to the row's edge");
+  assert.equal(branch.path.match(/ A /g).length, 1, "exactly one corner");
   const radius = Number(branch.path.match(/A ([\d.]+)/)[1]);
-  assert.equal(radius, 5, "the corner is a quarter circle");
-  assert.ok(radius <= 28 * 0.3, `the corner is bounded by the row: ${radius}`);
+  const gap = 10;
+  assert.ok(radius <= gap, `the corner stays within the gap it crosses: ${radius} <= ${gap}`);
+  assert.ok(radius <= 28 / 2, `and leaves a straight run to arrive on: ${radius}`);
+  assert.ok(radius > 0, "and it is a real corner");
   // The branch lane must not also run full height: that would draw a stub up
   // to a column that was free above.
   assert.equal(
@@ -213,6 +213,33 @@ test("a merge is a ring and a branch turns once out of it into its own lane", ()
     0,
     "the opened lane is drawn by the turn, not by a vertical",
   );
+});
+
+test("a turn to a neighbouring lane is as round as one to a distant lane", () => {
+  // The radius used to be capped at half the *narrowest* gap in the graph, so
+  // every corner in every history was as tight as the tightest one. A turn
+  // only has to stay between the two columns it joins, so a one-column hop may
+  // be as roundy as a three-column one. Measured at the metrics that ship, so
+  // this is the corner a reader actually sees.
+  const LANE = 13;
+  const ROW = 24;
+  const radiusFor = (columns) => {
+    const { parts } = rowGeometry(
+      graph({ entry: true, exit: true, branches: [columns] }),
+      columns + 1,
+      LANE,
+      ROW,
+      3,
+    );
+    return Number(parts.find((part) => part.kind === "branch").path.match(/A ([\d.]+)/)[1]);
+  };
+  const near = radiusFor(1);
+  const far = radiusFor(3);
+  assert.equal(near, far, "the same corner either way — the gap is not the limit");
+  assert.ok(near > 0 && near <= ROW / 2, `bounded by the row instead: ${near}`);
+  // And it is a real, generous round: a corner that is only a sliver of the
+  // gap is what read as a hard mechanical elbow.
+  assert.ok(near >= LANE * 0.5, `a turn is at least half a lane wide: ${near} vs ${LANE}`);
 });
 
 test("a lane the row merely passes through runs the full height", () => {
@@ -262,20 +289,67 @@ test("lanes sharing one parent fold into it instead of running past it", () => {
   assert.equal(parts.filter((part) => part.kind === "line" && part.y2 === 28).length, 1);
 });
 
-test("a row's ink weight tracks whether anything structural happens there", () => {
-  // The rhythm of the gutter: a straight run of the mainline is a hairline,
-  // a row carrying a lane is a lane, and a row that opens, closes or merges
-  // is drawn full. This is what makes a long history scannable.
-  const weightOf = (extra) =>
-    rowGeometry(graph({ entry: true, exit: true, ...extra }), 2, 10, 28, 3).parts
-      .find((part) => part.kind === "node").weight;
-  assert.equal(weightOf({}), "hairline", "the mainline being carried is quiet");
-  assert.equal(weightOf({ lanes: [1] }), "lane", "a lane running past is light");
-  assert.equal(weightOf({ merge: true }), "structural", "a merge is full");
-  assert.equal(weightOf({ root: true }), "structural", "the first commit is full");
-  assert.equal(weightOf({ branches: [1] }), "structural", "a branch opening is full");
-  assert.equal(weightOf({ incoming: [1] }), "structural", "lanes folding in is full");
-  assert.equal(weightOf({ dangling: true }), "structural", "a line leaving the window is full");
+test("a line is drawn the same width however the row is doing", () => {
+  // Line weight is a fact about a lane, not about the row it passes through.
+  // When it varied, a straight run of the mainline swelled at every merge it
+  // went near and a corner came out heavier than the straight run it joined —
+  // the line stopped reading as one continuous stroke. So no part may carry a
+  // weight at all: the stylesheet gives every line in the graph one width.
+  const kinds = [
+    ["a plain row", {}],
+    ["a merge", { merge: true }],
+    ["the first commit", { root: true }],
+    ["a branch opening", { branches: [1] }],
+    ["lanes folding in", { incoming: [1] }],
+    ["a line leaving the window", { dangling: true }],
+    ["a lane running past", { lanes: [1] }],
+  ];
+  for (const [name, extra] of kinds) {
+    const { parts } = rowGeometry(graph({ entry: true, exit: true, ...extra }), 2, 10, 28, 3);
+    assert.ok(parts.length > 0, `${name} draws something`);
+    for (const part of parts) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(part, "weight"),
+        false,
+        `${name}: a ${part.kind} carries no weight — one width for the whole graph`,
+      );
+    }
+  }
+  // And the stylesheet really does name a single width for the lines
+  // themselves. The ring around a merge is a marker rather than a run of
+  // line, so it is allowed its own, slightly finer, stroke.
+  const css = stylesheet("style.css");
+  const widthFor = (kind) => [
+    ...new Set(
+      [...css.matchAll(
+        new RegExp(`\\.graph-gutter \\.graph-${kind}\\s*\\{[^}]*stroke-width:\\s*var\\((--[\\w-]+)\\)`, "g"),
+      )].map((match) => match[1]),
+    ),
+  ];
+  assert.deepEqual(
+    widthFor("line"),
+    ["--graph-stroke"],
+    "every graph line shares one width token",
+  );
+  // A line and the underlay that backs it are two different things: the
+  // underlay is deliberately wider so a crossing stays readable.
+  assert.deepEqual(
+    widthFor("shadow"),
+    ["--graph-under"],
+    "every underlay shares one width token",
+  );
+
+  // Every shape in the gutter must say what it fills. An SVG shape is filled
+  // black by default, so a missing `fill: none` closes a line into a solid
+  // wedge behind it — a bug that is invisible in a stylesheet review and
+  // obvious on screen.
+  const rules = [...css.matchAll(/\.graph-gutter \.graph-(\w+)\s*\{([^}]*)\}/g)];
+  assert.ok(rules.length > 0, "the graph has rules to check");
+  for (const [, name, body] of rules) {
+    if (name === "node") continue; // a node is meant to be filled
+    assert.match(body, /fill:\s*none/, `.graph-${name} must declare fill: none`);
+    assert.match(body, /stroke:\s*/, `.graph-${name} must declare a stroke`);
+  }
 });
 
 test("a line whose parent is below the loaded window is dashed, not ended", () => {

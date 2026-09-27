@@ -70,53 +70,22 @@ export function graphColumns(commits: readonly CommitView[]): number {
 
 // One primitive of a row's drawing, in pixels. The view turns each into an
 // SVG child; nothing here touches the DOM.
-//
-// `weight` is the line's thickness tier. A commit that is only carrying the
-// mainline is drawn hairline-thin; one where a branch opens, closes or merges
-// is drawn full. That difference is the whole rhythm of the gutter: scanning
-// a long history, the eye should land on the rows where the shape of the work
-// actually changed, not on every straight run between them.
 export type GraphPart =
   // A vertical line in one lane. `lane` is the column, so the view can colour
   // a lane the same way everywhere it appears.
-  | { kind: "line"; lane: number; x: number; y1: number; y2: number; dashed: boolean; weight: GraphWeight }
+  | { kind: "line"; lane: number; x: number; y1: number; y2: number; dashed: boolean }
   // The commit's own dot. `shape` is the fact the dot carries, so colour is
   // never the only thing telling a merge from a plain commit.
-  | { kind: "node"; lane: number; cx: number; cy: number; r: number; shape: "normal" | "merge" | "root"; weight: GraphWeight }
-  // The one non-orthogonal line in the graph: a branch peeling out of its
-  // merge and running down to the next row in its own lane, and the mirror of
-  // it, a set of lanes folding back into the commit they all share. The
-  // control points are pushed most of a row height from their ends, so the
-  // curve is drawn in the space *between* two rows and reads as a slope
-  // rather than as a right angle.
-  | { kind: "branch"; lane: number; path: string; weight: GraphWeight };
-
-export type GraphWeight = "hairline" | "lane" | "structural";
+  | { kind: "node"; lane: number; cx: number; cy: number; r: number; shape: "normal" | "merge" | "root" }
+  // The one non-orthogonal line in the graph: a branch leaving a commit and
+  // running down to the next row in its own lane, and the mirror of it, a set
+  // of lanes folding back into the commit they all share.
+  | { kind: "branch"; lane: number; path: string };
 
 export interface RowGeometry {
   width: number;
   height: number;
   parts: GraphPart[];
-}
-
-// A row is only "structural" — worth full-strength ink — when something
-// happens to the shape of the history at it: a branch opens, a set of lanes
-// folds in, or the commit is a merge or the first one. Everything else is
-// the mainline being carried, and is drawn quiet.
-function rowWeight(graph: GraphRow): GraphWeight {
-  if (
-    graph.merge ||
-    graph.root ||
-    graph.branches.length > 0 ||
-    graph.incoming.length > 0 ||
-    graph.dangling
-  ) {
-    return "structural";
-  }
-  if (graph.lanes.length > 0) {
-    return "lane";
-  }
-  return "hairline";
 }
 
 /// The drawing of one commit row. Every coordinate is in pixels measured from
@@ -131,7 +100,6 @@ export function rowGeometry(
 ): RowGeometry {
   const mid = rowHeight / 2;
   const at = (column: number): number => (column + 0.5) * laneWidth;
-  const weight = rowWeight(graph);
   const parts: GraphPart[] = [];
 
   // A lane this row merely passes through runs the full height, so it joins
@@ -147,7 +115,6 @@ export function rowGeometry(
       y1: 0,
       y2: rowHeight,
       dashed: false,
-      weight: "lane",
     });
   }
   // A line that changes column runs vertically for almost the whole row and
@@ -157,15 +124,22 @@ export function rowGeometry(
   // look like a smear and a convergence look like a bracket; a flat step at
   // the node's own height made it a circuit diagram.
   //
-  // The corner is bounded by the row's own height, not by the distance it has
-  // to travel: a lane three columns away turns just as tightly as a lane one
-  // column away, and spends the extra width as a straight run rather than as a
-  // shallower slope. That is why a fan reads as several lines rather than as
-  // one line smeared wide.
-  const corner = Math.min(rowHeight * 0.3, Math.abs(at(1) - at(0)) / 2, rowHeight / 2);
+  // The corner is bounded by how far the line has to travel and by the room
+  // the row gives it, not by the distance to the *next* column: a lane three
+  // columns away turns as softly as one a single column away, and spends the
+  // extra width as a straight run rather than as a shallower slope. That is
+  // why a fan reads as several lines rather than as one line smeared wide.
+  //
+  // A turn only has to stay between the two columns it joins, so the radius
+  // may be the whole gap rather than half of it — that is what lets a hop to
+  // a neighbouring lane turn as roundly as a hop to a distant one, instead of
+  // every corner in the graph being pinned tight by the narrowest case in it.
+  // The row is the outer limit, because a corner taller than half a row would
+  // leave no straight run to arrive on.
+  const turn = (gap: number): number => Math.min(gap, rowHeight * 0.42, rowHeight / 2);
   for (const lane of graph.branches) {
     const target = at(lane);
-    const radius = Math.min(corner, Math.abs(target - at(graph.node)) / 2);
+    const radius = turn(Math.abs(target - at(graph.node)));
     parts.push({
       kind: "branch",
       lane,
@@ -174,12 +148,11 @@ export function rowGeometry(
       path:
         `M ${at(graph.node)} ${mid} L ${target - radius} ${mid} ` +
         `A ${radius} ${radius} 0 0 1 ${target} ${mid + radius} L ${target} ${rowHeight}`,
-      weight: "structural",
     });
   }
   for (const lane of graph.incoming) {
     const source = at(lane);
-    const radius = Math.min(corner, Math.abs(source - at(graph.node)) / 2);
+    const radius = turn(Math.abs(source - at(graph.node)));
     parts.push({
       kind: "branch",
       lane,
@@ -189,13 +162,12 @@ export function rowGeometry(
       path:
         `M ${source} 0 L ${source} ${mid - radius} ` +
         `A ${radius} ${radius} 0 0 1 ${source - radius} ${mid} L ${at(graph.node)} ${mid}`,
-      weight: "structural",
     });
   }
   // The node's own column: a line arrives from above and one leaves below,
   // with the dot bridging the two.
   if (graph.entry) {
-    parts.push({ kind: "line", lane: graph.node, x: at(graph.node), y1: 0, y2: mid, dashed: false, weight });
+    parts.push({ kind: "line", lane: graph.node, x: at(graph.node), y1: 0, y2: mid, dashed: false });
   }
   if (graph.exit) {
     parts.push({
@@ -207,7 +179,6 @@ export function rowGeometry(
       // A line whose parent is below the loaded window is drawn dashed: it
       // leaves the list rather than ending as though the history stopped.
       dashed: graph.dangling,
-      weight,
     });
   }
   parts.push({
@@ -217,7 +188,6 @@ export function rowGeometry(
     cy: mid,
     r: nodeRadius,
     shape: graph.root ? "root" : graph.merge ? "merge" : "normal",
-    weight,
   });
   // A merge is drawn as a ring with a filled dot inside it, so it reads as a
   // join rather than as a plain commit that happens to be drawn hollow. The
@@ -231,7 +201,6 @@ export function rowGeometry(
       cy: mid,
       r: nodeRadius * 0.42,
       shape: "normal",
-      weight,
     });
   }
   return { width: columns * laneWidth, height: rowHeight, parts };
