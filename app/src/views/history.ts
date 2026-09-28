@@ -10,17 +10,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, plural } from "../dom";
 import {
   buildHistoryRows,
+  buildRefMap,
   commitMatches,
   filterCommits,
   findError,
   graphColumns,
+  graphGutterMaxPx,
   graphLanePx,
   graphNodePx,
   historyPageStart,
   matchPosition,
+  refsIncluding,
   rowGeometry,
   stepMatch,
   type FindQuery,
+  type RefSummary,
 } from "../historyModel";
 import { revealScroll, rowHeightPx, visibleWindow, HISTORY_ROW_REM } from "../fileModel";
 import { currentFontPx } from "../font";
@@ -127,6 +131,11 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // screen: sizing it to what is visible would slide the subject text
   // sideways every time a wider part of the graph scrolled into view.
   let gutterColumns = 1;
+  // The loaded history wired backwards, so a graph tooltip can answer where
+  // a commit is included rather than only repeating what its row already
+  // says. Rebuilt with every page, and answers cached per commit until then.
+  let refMap = buildRefMap([]);
+  const refSummaries = new Map<string, RefSummary>();
   // Set when the backend had to draw the history first-parent because the
   // live lane count would not fit the gutter. It is said in words, because a
   // silently linearised graph would claim a shape the history does not have.
@@ -390,6 +399,22 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   /// the underlay is what stops them fusing into one thick mark — the line
   /// that passes over gets a clean gap around it, so every crossing stays
   /// readable without any of them being dashed or faded.
+  // The row already says who and what; the tooltip answers the one question
+  // the row cannot — which loaded ref tips contain this commit. When none
+  // do yet, it says so rather than leaving the line blank.
+  const graphTooltip = (commit: CommitView): string => {
+    let summary = refSummaries.get(commit.oid);
+    if (summary === undefined) {
+      summary = refsIncluding(refMap, commit.oid);
+      refSummaries.set(commit.oid, summary);
+    }
+    const included =
+      summary.names.length === 0
+        ? "nothing loaded"
+        : summary.names.join(", ") + (summary.truncated ? " …" : "");
+    return `${commit.authorName} — ${commit.subject}\nIncluded in: ${included}`;
+  };
+
   const graphSvg = (commit: CommitView, height: number, fontPx: number): SVGSVGElement => {
     const geometry = rowGeometry(
       commit.graph,
@@ -397,12 +422,16 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       graphLanePx(fontPx),
       height,
       graphNodePx(fontPx),
+      graphGutterMaxPx(fontPx),
     );
     const svg = document.createElementNS(SVG_NS, "svg");
     svg.setAttribute("class", "graph-gutter");
     svg.setAttribute("width", String(geometry.width));
     svg.setAttribute("height", String(geometry.height));
     svg.setAttribute("viewBox", `0 0 ${geometry.width} ${geometry.height}`);
+    // A row whose lanes reach past the ceiling fades at the edge rather
+    // than being cut by it; rows inside the ceiling carry no mask.
+    if (geometry.clipped) svg.setAttribute("data-fade", "true");
     // The row's own text already names the commit and its kind; announcing
     // the drawing as well would say the same thing twice.
     svg.setAttribute("aria-hidden", "true");
@@ -418,6 +447,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     const shadows: SVGElement[] = [];
     const strokes: SVGElement[] = [];
     const dots: SVGElement[] = [];
+    let seenNodes = 0;
     for (const part of geometry.parts) {
       if (part.kind === "line") {
         const shadow = element("line");
@@ -451,14 +481,19 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         dot.setAttribute("class", "graph-node");
         dot.setAttribute("data-lane", laneClass(part.lane));
         dot.setAttribute("data-shape", part.shape);
+        // A merge's second node is its inner dot; it stays small under the
+        // pointer so the ring around it still reads as the join.
+        if (part.kind === "node" && seenNodes++ > 0 && commit.graph.merge) {
+          dot.setAttribute("data-inner", "true");
+        }
         dot.setAttribute("cx", String(part.cx));
         dot.setAttribute("cy", String(part.cy));
         dot.setAttribute("r", String(part.r));
-        // A native tooltip on hover: who wrote this and when, without opening
-        // the detail pane. The gutter is hidden from assistive tech, so this
-        // is a convenience for a mouse, never the only way to the fact.
+        // A native tooltip on hover. The gutter is hidden from assistive
+        // tech, so this is a convenience for a mouse, never the only way to
+        // the fact.
         const title = element("title");
-        title.textContent = `${commit.authorName} — ${commit.subject}`;
+        title.textContent = graphTooltip(commit);
         dot.appendChild(title);
         dots.push(dot);
       }
@@ -533,6 +568,8 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       commits = reset ? page.commits : commits.concat(page.commits);
       hasMore = page.hasMore;
       gutterColumns = graphColumns(commits);
+      refMap = buildRefMap(commits);
+      refSummaries.clear();
       graphFolded = commits.some((commit) => commit.graph.folded);
       visible = filterCommits(commits, find);
       listPane.hidden = false;

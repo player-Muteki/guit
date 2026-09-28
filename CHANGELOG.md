@@ -9,6 +9,18 @@ is the record of what is not verified.
 
 ### Changed
 
+- A commit graph's lane turns are one smooth curve now — level where they
+  leave the node, vertical where they meet the row's edge — instead of a
+  straight step through a quarter-round corner.
+- The graph gutter keeps a fixed maximum width: a deep fan fades its extra
+  lanes at the right edge rather than widening every row and sliding the
+  subjects sideways once "Load older" reaches it.
+- The node the pointer is over grows, so the graph acknowledges the mouse
+  before the detail pane opens. A merge's ring grows and its inner dot does
+  not, so the join still reads as a join.
+- Hovering a graph node now also lists the loaded ref tips that contain the
+  commit, which the row itself cannot say, instead of repeating the row's
+  author and subject.
 - Redrew the app icon as Git branches interlacing like guitar strings, with
   commit nodes on the strings and a shared merge node. Regenerated the desktop
   icon assets from the SVG source, with rounded diamond commit nodes, a

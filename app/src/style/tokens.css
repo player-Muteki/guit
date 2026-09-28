@@ -125,6 +125,10 @@
      for out of the dot, not out of the spacing. */
   --graph-lane: 0.8125rem;
   --graph-node: 0.34375rem;
+  /* The node the mouse is over grows a quarter — enough to register as an
+     acknowledgement without becoming the drawing's subject. A merge's ring
+     grows and its inner dot does not, so the join keeps reading as a join. */
+  --graph-node-hover: 0.4375rem;
   --graph-ring: 0.11rem;
   /* Stroke weight. One width for every line in the graph, straight or
      turning: a lane that changes thickness along its own length reads as a
@@ -141,6 +145,13 @@
      solid block instead of separating anything. */
   --graph-stroke: 0.115rem;
   --graph-under: 0.16rem;
+  /* The widest gutter the list will draw, and the fade applied where a row
+     reaches past it. Must match GRAPH_GUTTER_MAX_REM in historyModel.ts; a
+     test gates it. Deep fans are drawn in full and dimmed at the edge, so a
+     wide history costs no text width anywhere — the alternative, widening
+     every row to the widest loaded lane, slid the subjects sideways. */
+  --graph-gutter-max: 6.5rem;
+  --graph-fade: 0.75rem;
   /* Commit-row column widths. Fixed so the subject's left edge and the
      author/date columns line up down the whole list. rem, not px, so they
      hold under interface zoom. The refs column gives up its width on a

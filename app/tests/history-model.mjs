@@ -4,19 +4,23 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   buildHistoryRows,
+  buildRefMap,
   commitMatches,
   filterCommits,
   findError,
   graphColumns,
+  graphGutterMaxPx,
   graphLanePx,
   graphNodePx,
   graphWidth,
   historyPageStart,
   matchPosition,
+  refsIncluding,
   rowGeometry,
   stepMatch,
   GRAPH_LANE_REM,
   GRAPH_NODE_REM,
+  GRAPH_GUTTER_MAX_REM,
 } from "../src/historyModel.ts";
 import { visibleWindow } from "../src/fileModel.ts";
 
@@ -127,8 +131,38 @@ test("a lane's rem size is the size the stylesheet gives it", () => {
   // interface zoom, the same way a hard-coded row height would.
   assert.equal(GRAPH_LANE_REM, cssRem("graph-lane"), "lanes follow --graph-lane");
   assert.equal(GRAPH_NODE_REM, cssRem("graph-node"), "the dot follows --graph-node");
+  assert.equal(
+    GRAPH_GUTTER_MAX_REM,
+    cssRem("graph-gutter-max"),
+    "the gutter ceiling follows --graph-gutter-max",
+  );
+  assert.ok(
+    cssRem("graph-fade") <= GRAPH_GUTTER_MAX_REM,
+    "the fade band fits inside the ceiling it lives at the end of",
+  );
   assert.equal(graphLanePx(20), 20 * GRAPH_LANE_REM);
   assert.equal(graphNodePx(20), 20 * GRAPH_NODE_REM);
+  assert.equal(graphGutterMaxPx(20), 20 * GRAPH_GUTTER_MAX_REM);
+});
+
+test("the node the pointer rests on grows, and only it", () => {
+  // Hover feedback is a stylesheet fact about one size token; if the rule
+  // or the token drifts apart, the graph stops answering the mouse and no
+  // runtime test would notice.
+  assert.ok(
+    cssRem("graph-node-hover") > GRAPH_NODE_REM,
+    "the hover size is really larger than the resting one",
+  );
+  const css = stylesheet("style.css");
+  assert.match(
+    css,
+    /\.graph-gutter:hover \.graph-node:not\(\[data-inner\]\)\s*\{\s*r:\s*var\(--graph-node-hover\)/,
+    "the hover rule grows nodes by the token, and spares a merge's inner dot",
+  );
+  assert.ok(
+    !/\.graph-gutter:hover[^{]*\{[^}]*stroke/.test(css),
+    "the hover rule touches no stroke — one width for the whole graph",
+  );
 });
 
 test("the gutter is as wide as the widest lane in the loaded history", () => {
@@ -145,6 +179,32 @@ test("the gutter is as wide as the widest lane in the loaded history", () => {
   assert.equal(graphWidth(0, 10), 10, "never narrower than one lane");
 });
 
+test("an over-wide row is capped at the gutter ceiling and marked clipped", () => {
+  // A deep fan repays its width in every row if the gutter follows it. The
+  // drawn width stops at the ceiling instead, and the row says it hangs off
+  // the edge so the view can fade rather than cut.
+  const cap = 80;
+  const wide = rowGeometry(
+    graph({ entry: true, exit: true, merge: true, lanes: [10], incoming: [10] }),
+    20,
+    10,
+    28,
+    3,
+    cap,
+  );
+  assert.equal(wide.width, cap, "the drawn width stops at the ceiling");
+  assert.equal(wide.clipped, true, "a lane past the edge is announced");
+  assert.ok(
+    wide.parts.some((part) => part.kind === "line" && part.x > cap),
+    "the over-wide lane is still generated, so only the display clipped it",
+  );
+  const narrow = rowGeometry(graph({ entry: true, exit: true }), 20, 10, 28, 3, cap);
+  assert.equal(narrow.width, cap, "the gutter is still the loaded width while it fits");
+  assert.equal(narrow.clipped, false, "a row inside the ceiling carries no fade");
+  const tighter = rowGeometry(graph({ entry: true, exit: true, merge: true, lanes: [1] }), 2, 10, 28, 3, 5);
+  assert.equal(tighter.width, 10, "never narrower than one lane, ceiling or not");
+});
+
 test("a straight line enters from above, leaves below, and joins at the dot", () => {
   const { parts } = rowGeometry(
     graph({ entry: true, exit: true }),
@@ -152,7 +212,7 @@ test("a straight line enters from above, leaves below, and joins at the dot", ()
     10,
     28,
     3,
-  );
+  1e9);
   const above = parts.find((part) => part.kind === "line" && part.y1 === 0);
   const below = parts.find((part) => part.kind === "line" && part.y2 === 28);
   const dot = parts.find((part) => part.kind === "node");
@@ -164,9 +224,9 @@ test("a straight line enters from above, leaves below, and joins at the dot", ()
 });
 
 test("the top of the history has nothing above it and a root nothing below", () => {
-  const top = rowGeometry(graph({ entry: false, exit: true }), 1, 10, 28, 3);
+  const top = rowGeometry(graph({ entry: false, exit: true }), 1, 10, 28, 3, 1e9);
   assert.equal(top.parts.filter((part) => part.kind === "line" && part.y1 === 0).length, 0);
-  const root = rowGeometry(graph({ entry: true, exit: false, root: true }), 1, 10, 28, 3);
+  const root = rowGeometry(graph({ entry: true, exit: false, root: true }), 1, 10, 28, 3, 1e9);
   assert.equal(root.parts.filter((part) => part.kind === "line" && part.y2 === 28).length, 0);
   assert.equal(root.parts.find((part) => part.kind === "node").shape, "root");
 });
@@ -178,7 +238,7 @@ test("a merge is a ring and a branch turns once out of it into its own lane", ()
     10,
     28,
     3,
-  );
+  1e9);
   assert.equal(parts.find((part) => part.kind === "node").shape, "merge");
   // A merge is a ring with a filled dot inside it, so it reads as a join
   // rather than as a plain commit drawn hollow.
@@ -195,17 +255,17 @@ test("a merge is a ring and a branch turns once out of it into its own lane", ()
 
   const branch = parts.find((part) => part.kind === "branch");
   assert.ok(branch, "a merge draws the turn into the lane it opens");
-  // The line leaves the node, runs straight across what is left of the gap,
-  // turns once through a quarter-round, then runs straight down the lane to
-  // the row's edge. It is vertical for most of the row and turns only once.
-  assert.match(branch.path, /^M 5 14 L 5(\.\d+)? 14 A /, "out of the node, then one turn");
-  assert.ok(branch.path.endsWith("L 15 28"), "and straight down to the row's edge");
-  assert.equal(branch.path.match(/ A /g).length, 1, "exactly one corner");
-  const radius = Number(branch.path.match(/A ([\d.]+)/)[1]);
+  // The line leaves the node level with its centre, curves once, and meets
+  // the row's edge vertically. One cubic, no arcs, no straight stubs.
+  assert.match(branch.path, /^M 5 14 C 15 14 /, "out of the node, level at the dot");
+  assert.ok(branch.path.endsWith(" 15 28"), "and vertical into the lane at the row's edge");
+  assert.equal(branch.path.match(/ C /g).length, 1, "exactly one curve");
+  assert.ok(!branch.path.includes(" A "), "a cubic, not a quarter-round arc");
+  const offset = Number(branch.path.match(/C ([\d.]+)/)[1]) - 5;
   const gap = 10;
-  assert.ok(radius <= gap, `the corner stays within the gap it crosses: ${radius} <= ${gap}`);
-  assert.ok(radius <= 28 / 2, `and leaves a straight run to arrive on: ${radius}`);
-  assert.ok(radius > 0, "and it is a real corner");
+  assert.ok(offset <= gap, `the curve stays within the gap it crosses: ${offset} <= ${gap}`);
+  assert.ok(offset <= 28 / 2, `and leaves a straight run to arrive on: ${offset}`);
+  assert.ok(offset > 0, "and it is a real turn");
   // The branch lane must not also run full height: that would draw a stub up
   // to a column that was free above.
   assert.equal(
@@ -213,6 +273,34 @@ test("a merge is a ring and a branch turns once out of it into its own lane", ()
     0,
     "the opened lane is drawn by the turn, not by a vertical",
   );
+});
+
+test("a turn meets the row edges vertically so windowed rows join seamlessly", () => {
+  // The virtual list draws each row on its own, so the only contract between
+  // neighbours is where a curve touches the row's top and bottom edges. A
+  // turn that arrived at an angle would kink against the next row's straight
+  // lane the moment that neighbour scrolled in. Vertical arrival is exactly
+  // what the first control points encode: they share their endpoint's column.
+  const { parts } = rowGeometry(
+    graph({ entry: true, exit: true, merge: true, branches: [1], incoming: [2] }),
+    3,
+    10,
+    28,
+    3,
+  1e9);
+  const nums = (path) => path.match(/-?[\d.]+/g).map(Number);
+  const branch = nums(parts.find((part) => part.kind === "branch" && part.lane === 1).path);
+  assert.equal(branch[0], 5, "the branch starts at the node's column");
+  assert.equal(branch[1], 14, "at the node's height");
+  assert.equal(branch[6], 15, "it ends on its own lane");
+  assert.equal(branch[7], 28, "exactly at the row's bottom edge");
+  assert.equal(branch[4], branch[6], "the last control point shares the endpoint's column: vertical arrival");
+  const incoming = nums(parts.find((part) => part.kind === "branch" && part.lane === 2).path);
+  assert.equal(incoming[0], 25, "the incoming lane starts on its own column");
+  assert.equal(incoming[1], 0, "exactly at the row's top edge");
+  assert.equal(incoming[2], incoming[0], "the first control point shares the start's column: vertical departure");
+  assert.equal(incoming[6], 5, "it levels into the node's column");
+  assert.equal(incoming[7], 14, "at the node's height");
 });
 
 test("a turn to a neighbouring lane is as round as one to a distant lane", () => {
@@ -230,20 +318,20 @@ test("a turn to a neighbouring lane is as round as one to a distant lane", () =>
       LANE,
       ROW,
       3,
-    );
-    return Number(parts.find((part) => part.kind === "branch").path.match(/A ([\d.]+)/)[1]);
+    1e9);
+    return Number(parts.find((part) => part.kind === "branch").path.match(/C ([\d.]+)/)[1]) - 0.5 * LANE;
   };
   const near = radiusFor(1);
   const far = radiusFor(3);
-  assert.equal(near, far, "the same corner either way — the gap is not the limit");
+  assert.equal(near, far, "the same turn either way — the gap is not the limit");
   assert.ok(near > 0 && near <= ROW / 2, `bounded by the row instead: ${near}`);
-  // And it is a real, generous round: a corner that is only a sliver of the
+  // And it is a real, generous round: a turn that is only a sliver of the
   // gap is what read as a hard mechanical elbow.
   assert.ok(near >= LANE * 0.5, `a turn is at least half a lane wide: ${near} vs ${LANE}`);
 });
 
 test("a lane the row merely passes through runs the full height", () => {
-  const { parts } = rowGeometry(graph({ entry: true, exit: true, lanes: [1] }), 2, 10, 28, 3);
+  const { parts } = rowGeometry(graph({ entry: true, exit: true, lanes: [1] }), 2, 10, 28, 3, 1e9);
   const lane = parts.find((part) => part.kind === "line" && part.lane === 1);
   assert.equal(lane.y1, 0, "a lane that was already open continues from the top");
   assert.equal(lane.y2, 28);
@@ -258,25 +346,26 @@ test("lanes sharing one parent fold into it instead of running past it", () => {
     10,
     28,
     3,
-  );
+  1e9);
   for (const lane of [1, 2, 3]) {
     const turn = parts.find((part) => part.kind === "branch" && part.lane === lane);
     assert.ok(turn, `lane ${lane} turns in to the node`);
-    // The mirror of a branch leaving: straight down the lane, one tight
-    // quarter-round, then level into the node. Each lane comes from its own
+    // The mirror of a branch leaving: vertical down the lane from the row's
+    // edge, one curve, then level into the node. Each lane comes from its own
     // column and turns in on its own, so a set of them folding into one
     // commit stays legible instead of piling onto a single point.
     assert.ok(
-      turn.path.startsWith(`M ${lane * 10 + 5} 0 L ${lane * 10 + 5} `),
-      `lane ${lane} comes straight down its own column: ${turn.path}`,
+      turn.path.startsWith(`M ${lane * 10 + 5} 0 C ${lane * 10 + 5} `),
+      `lane ${lane} leaves the row edge vertically down its own column: ${turn.path}`,
     );
-    assert.ok(turn.path.includes(" A "), `lane ${lane} turns with a corner`);
-    assert.ok(turn.path.endsWith("L 5 14"), `lane ${lane} arrives at the node`);
+    assert.equal(turn.path.match(/ C /g).length, 1, `lane ${lane} turns with one curve`);
+    assert.ok(turn.path.endsWith(" 5 14"), `lane ${lane} arrives at the node`);
     // Nothing may reach left of the node it joins — the bug this guards pulled
-    // the line past the node and folded it back.
-    const xs = [...turn.path.matchAll(/[MLA] (-?[\d.]+) (-?[\d.]+)/g)].map((m) => Number(m[1]));
-    for (const x of xs) {
-      assert.ok(x >= 5, `lane ${lane} never draws left of the node: x=${x}`);
+    // the line past the node and folded it back. A cubic lives inside the
+    // convex hull of its control points, so checking them checks the curve.
+    const nums = turn.path.match(/-?[\d.]+/g).map(Number);
+    for (let i = 0; i < nums.length; i += 2) {
+      assert.ok(nums[i] >= 5, `lane ${lane} never draws left of the node: x=${nums[i]}`);
     }
     // No vertical stub: the turn is the whole connection.
     assert.equal(
@@ -305,7 +394,7 @@ test("a line is drawn the same width however the row is doing", () => {
     ["a lane running past", { lanes: [1] }],
   ];
   for (const [name, extra] of kinds) {
-    const { parts } = rowGeometry(graph({ entry: true, exit: true, ...extra }), 2, 10, 28, 3);
+    const { parts } = rowGeometry(graph({ entry: true, exit: true, ...extra }), 2, 10, 28, 3, 1e9);
     assert.ok(parts.length > 0, `${name} draws something`);
     for (const part of parts) {
       assert.equal(
@@ -353,10 +442,10 @@ test("a line is drawn the same width however the row is doing", () => {
 });
 
 test("a line whose parent is below the loaded window is dashed, not ended", () => {
-  const { parts } = rowGeometry(graph({ exit: true, dangling: true }), 1, 10, 28, 3);
+  const { parts } = rowGeometry(graph({ exit: true, dangling: true }), 1, 10, 28, 3, 1e9);
   const below = parts.find((part) => part.kind === "line" && part.y2 === 28);
   assert.equal(below.dashed, true, "the line says it continues past what is loaded");
-  const whole = rowGeometry(graph({ exit: true, dangling: false }), 1, 10, 28, 3);
+  const whole = rowGeometry(graph({ exit: true, dangling: false }), 1, 10, 28, 3, 1e9);
   assert.equal(whole.parts.find((part) => part.kind === "line" && part.y2 === 28).dashed, false);
 });
 
@@ -369,7 +458,7 @@ test("a folded row draws one straight line and no branches", () => {
     10,
     28,
     3,
-  );
+  1e9);
   assert.equal(parts.filter((part) => part.kind === "branch").length, 0);
   assert.equal(parts.filter((part) => part.kind === "line" && part.lane === 0).length, 2);
   // The merge fact is still carried, so a folded graph does not quietly
@@ -381,7 +470,7 @@ test("a row is drawn from its own graph alone", () => {
   // The property the virtual list depends on: a windowed row needs nothing
   // from its neighbours, so scrolling cannot make a line jump a column.
   const rows = [graph({ entry: false, exit: true }), graph({ entry: true, exit: true, merge: true, lanes: [1], branches: [1] }), graph({ entry: true, exit: false, root: true })];
-  const drawn = rows.map((row) => rowGeometry(row, 2, 10, 28, 3));
+  const drawn = rows.map((row) => rowGeometry(row, 2, 10, 28, 3, 1e9));
   assert.equal(drawn[0].width, 20);
   assert.equal(drawn[0].parts.length, 2, "an entry-less row is a line and a dot");
   for (const geometry of drawn) {
@@ -394,6 +483,62 @@ test("buildHistoryRows carries the graph through without touching it", () => {
   const g = graph({ merge: true, lanes: [1], branches: [1], dangling: true });
   const [row] = buildHistoryRows([commit(1, { graph: g })]);
   assert.equal(row.commit.graph, g, "the row hands the backend's graph on unchanged");
+});
+
+// --- which refs contain a commit ---
+
+const oid = (n) => String(n).padStart(40, "0");
+
+test("the ref map names the loaded refs that contain a commit", () => {
+  // 1 is the shared base; 2 and 3 are topic tips; 4 is the merge that
+  // carries them into main. The pages arrive newest first, exactly as the
+  // backend loads them.
+  const named = (n, parents, branches) =>
+    commit(n, { parents, labels: { branches, tags: [], remotes: [], head: false } });
+  const loaded = [
+    named(4, [oid(2), oid(3)], ["main"]),
+    named(2, [oid(1)], ["feature-a"]),
+    named(3, [oid(1)], ["feature-b"]),
+    named(1, [], []),
+  ];
+  const map = buildRefMap(loaded);
+  assert.deepEqual(
+    refsIncluding(map, oid(1)).names,
+    ["feature-a", "feature-b", "main"],
+    "the base is named by every tip above it, nearer tips first",
+  );
+  assert.deepEqual(refsIncluding(map, oid(4)).names, ["main"], "a tip names itself");
+  assert.deepEqual(
+    refsIncluding(map, oid(2)).names,
+    ["feature-a", "main"],
+    "a descendant's name does not leak down onto an ancestor",
+  );
+  assert.deepEqual(
+    refsIncluding(map, oid(99)).names,
+    [],
+    "an oid that is not loaded has no answer, not a wrong one",
+  );
+  assert.equal(refsIncluding(map, oid(99)).truncated, false);
+});
+
+test("ref names deduplicate and truncate rather than rambling", () => {
+  // A chain whose two lowest commits both carry `shared` — the same ref
+  // seen twice on one walk — plus a branch and a remote above them.
+  const named = (n, parents, branches, remotes = []) =>
+    commit(n, { parents, labels: { branches, tags: [], remotes, head: false } });
+  const loaded = [
+    named(3, [oid(2)], [], ["origin/main"]),
+    named(2, [oid(1)], ["main"]),
+    named(1, [oid(0)], ["shared"]),
+    named(0, [], ["shared"]),
+  ];
+  const map = buildRefMap(loaded);
+  const summary = refsIncluding(map, oid(0));
+  assert.deepEqual(summary.names, ["shared", "main", "origin/main"], "each name once");
+  const capped = refsIncluding(map, oid(0), 2);
+  assert.deepEqual(capped.names, ["shared", "main"]);
+  assert.equal(capped.truncated, true, "the cap says there was more");
+  assert.equal(refsIncluding(map, oid(0), 3).truncated, false, "no more, no ellipsis");
 });
 
 // --- finding a commit ---

@@ -49,6 +49,19 @@ export function graphNodePx(baseFontPx: number): number {
   return baseFontPx * GRAPH_NODE_REM;
 }
 
+// The drawn width the gutter asks of any row, in rem, however wide the loaded
+// history gets. Without a ceiling a single deep fan far down the history
+// repays its width in every row on screen: the subject text slides right as
+// soon as "Load older" reaches it. Rows that exceed the ceiling still draw
+// every lane they have — the view fades the over-wide part at the right edge
+// instead of pretending it is not there. The ceiling is eight lanes, about
+// what a merge-heavy history opens at most before the backend folds it.
+export const GRAPH_GUTTER_MAX_REM = 6.5;
+
+export function graphGutterMaxPx(baseFontPx: number): number {
+  return baseFontPx * GRAPH_GUTTER_MAX_REM;
+}
+
 // The gutter is as wide as the widest row in the whole loaded history, not
 // the widest row on screen. Sizing it to what happens to be visible would
 // make the subject text slide sideways every time a new lane scrolled in.
@@ -85,18 +98,25 @@ export type GraphPart =
 export interface RowGeometry {
   width: number;
   height: number;
+  // True when this row draws further right than the drawn width, so the view
+  // can fade its over-wide lanes at the edge instead of ending them at a
+  // hard vertical line.
+  clipped: boolean;
   parts: GraphPart[];
 }
 
 /// The drawing of one commit row. Every coordinate is in pixels measured from
 /// the top-left of the row's own gutter, so the result is a self-contained
-/// picture of this row and nothing else.
+/// picture of this row and nothing else. `maxGutterWidth` is the ceiling the
+/// gutter shows — a display policy, not neighbour data, so the row stays
+/// independent while the drawn width stops tracking the deepest fan.
 export function rowGeometry(
   graph: GraphRow,
   columns: number,
   laneWidth: number,
   rowHeight: number,
   nodeRadius: number,
+  maxGutterWidth: number,
 ): RowGeometry {
   const mid = rowHeight / 2;
   const at = (column: number): number => (column + 0.5) * laneWidth;
@@ -117,24 +137,24 @@ export function rowGeometry(
       dashed: false,
     });
   }
-  // A line that changes column runs vertically for almost the whole row and
-  // turns once, close to the end, through a small quarter-round — the shape
-  // the reference graph uses and the one that reads as a lane stepping from
-  // one column to the next. A long diagonal across the row is what made a fan
-  // look like a smear and a convergence look like a bracket; a flat step at
-  // the node's own height made it a circuit diagram.
+  // A line that changes column is one cubic curve: it leaves the node
+  // horizontally, where the dot hides the joint, and meets the row's edge
+  // vertically, so it joins the next row's straight lane without a kink. The
+  // virtual list depends on that vertical arrival — a row drawn at an angle to
+  // its edge would show a seam the moment its neighbour scrolled in.
   //
-  // The corner is bounded by how far the line has to travel and by the room
-  // the row gives it, not by the distance to the *next* column: a lane three
-  // columns away turns as softly as one a single column away, and spends the
-  // extra width as a straight run rather than as a shallower slope. That is
-  // why a fan reads as several lines rather than as one line smeared wide.
+  // The curve's control offset is bounded by how far the line has to travel
+  // and by the room the row gives it, not by the distance to the *next*
+  // column: a lane three columns away turns as softly as one a single column
+  // away, and spends the extra width as a straight run rather than as a
+  // shallower slope. That is why a fan reads as several lines rather than as
+  // one line smeared wide.
   //
-  // A turn only has to stay between the two columns it joins, so the radius
-  // may be the whole gap rather than half of it — that is what lets a hop to
-  // a neighbouring lane turn as roundly as a hop to a distant one, instead of
+  // A turn only has to stay between the two columns it joins, so the offset
+  // may be the whole gap rather than half of it — that is what lets a hop to a
+  // neighbouring lane turn as roundly as a hop to a distant one, instead of
   // every corner in the graph being pinned tight by the narrowest case in it.
-  // The row is the outer limit, because a corner taller than half a row would
+  // The row is the outer limit, because a turn taller than half a row would
   // leave no straight run to arrive on.
   const turn = (gap: number): number => Math.min(gap, rowHeight * 0.42, rowHeight / 2);
   for (const lane of graph.branches) {
@@ -143,11 +163,12 @@ export function rowGeometry(
     parts.push({
       kind: "branch",
       lane,
-      // Out of the node, a short run across, the quarter-round, then straight
-      // down the lane to the row's edge where the next row's lane continues.
+      // Out of the node level with its centre, curving down to arrive at the
+      // lane vertical; the second control point shares the target's column,
+      // which is what makes the arrival vertical.
       path:
-        `M ${at(graph.node)} ${mid} L ${target - radius} ${mid} ` +
-        `A ${radius} ${radius} 0 0 1 ${target} ${mid + radius} L ${target} ${rowHeight}`,
+        `M ${at(graph.node)} ${mid} ` +
+        `C ${at(graph.node) + radius} ${mid} ${target} ${rowHeight - radius} ${target} ${rowHeight}`,
     });
   }
   for (const lane of graph.incoming) {
@@ -156,12 +177,12 @@ export function rowGeometry(
     parts.push({
       kind: "branch",
       lane,
-      // The mirror: straight down the lane, the same quarter-round, then level
-      // into the node. Each lane arrives from its own column, so a set of them
-      // folding into one commit stays legible instead of piling onto it.
+      // The mirror: leaving the row's edge vertical down the lane, curving to
+      // level into the node from its own side. Each lane arrives from its own
+      // column, so a set of them folding into one commit stays legible
+      // instead of piling onto it.
       path:
-        `M ${source} 0 L ${source} ${mid - radius} ` +
-        `A ${radius} ${radius} 0 0 1 ${source - radius} ${mid} L ${at(graph.node)} ${mid}`,
+        `M ${source} 0 C ${source} ${radius} ${at(graph.node) + radius} ${mid} ${at(graph.node)} ${mid}`,
     });
   }
   // The node's own column: a line arrives from above and one leaves below,
@@ -203,13 +224,87 @@ export function rowGeometry(
       shape: "normal",
     });
   }
-  return { width: columns * laneWidth, height: rowHeight, parts };
+  const drawn = Math.min(columns * laneWidth, maxGutterWidth);
+  const width = Math.max(laneWidth, drawn);
+  // Whether this row's own drawing reaches past the drawn width. The lanes
+  // beyond it are still generated and still coloured; only the gutter gets
+  // narrower, and the view fades the part that hangs off the edge.
+  let widestColumn = graph.node;
+  for (const lane of graph.lanes) if (lane > widestColumn) widestColumn = lane;
+  for (const lane of graph.branches) if (lane > widestColumn) widestColumn = lane;
+  for (const lane of graph.incoming) if (lane > widestColumn) widestColumn = lane;
+  const clipped = at(widestColumn) >= width;
+  return { width, height: rowHeight, clipped, parts };
 }
 
 // The window is as wide as the graph it draws, so a narrow window gives the
 // text back the columns the lanes were using.
 export function graphWidth(columns: number, laneWidth: number): number {
   return Math.max(columns, 1) * laneWidth;
+}
+
+// --- which refs contain a commit -----------------------------------
+
+// The answer to "where does this commit appear": the ref names sitting on
+// this commit or on any descendant of it that is loaded. A commit cannot be
+// reached from a ref that has not been loaded yet, so the list is honest
+// about its edge by being offered only while the page is on screen.
+export interface RefSummary {
+  names: string[];
+  truncated: boolean;
+}
+
+// The loaded history wired backwards: which loaded commits name this one as
+// a parent. Walking it from a commit visits exactly that commit's loaded
+// descendants, so the ref tips that contain it — including itself — are all
+// the walk ever needs to find.
+export interface RefMap {
+  byOid: Map<string, CommitView>;
+  children: Map<string, CommitView[]>;
+}
+
+export function buildRefMap(commits: readonly CommitView[]): RefMap {
+  const byOid = new Map<string, CommitView>();
+  const children = new Map<string, CommitView[]>();
+  for (const commit of commits) {
+    byOid.set(commit.oid, commit);
+  }
+  for (const commit of commits) {
+    for (const parent of commit.parents) {
+      const list = children.get(parent);
+      if (list === undefined) children.set(parent, [commit]);
+      else list.push(commit);
+    }
+  }
+  return { byOid, children };
+}
+
+/// The names found on the commit and its loaded descendants, nearest tips
+/// first, deduplicated. `limit` caps the list rather than the search, so
+/// `truncated` says there were more names, not that there might have been.
+export function refsIncluding(map: RefMap, oid: string, limit = 10): RefSummary {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  const start = map.byOid.get(oid);
+  if (start === undefined) return { names, truncated: false };
+  const queue = [start];
+  const walked = new Set<string>([oid]);
+  for (let head = 0; head < queue.length; head++) {
+    const commit = queue[head];
+    for (const name of [...commit.labels.branches, ...commit.labels.tags, ...commit.labels.remotes]) {
+      if (!seen.has(name)) {
+        seen.add(name);
+        names.push(name);
+      }
+    }
+    for (const child of map.children.get(commit.oid) ?? []) {
+      if (!walked.has(child.oid)) {
+        walked.add(child.oid);
+        queue.push(child);
+      }
+    }
+  }
+  return { names: names.slice(0, limit), truncated: names.length > limit };
 }
 
 // --- finding a commit in what is loaded ---

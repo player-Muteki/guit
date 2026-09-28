@@ -466,11 +466,25 @@ body {
 .graph-gutter [data-lane="3"] { color: var(--graph-lane-3); }
 .graph-gutter [data-lane="4"] { color: var(--graph-lane-4); }
 .graph-gutter [data-lane="5"] { color: var(--graph-lane-5); }
+/* A row wider than the gutter's ceiling keeps drawing every lane it has and
+   loses them to a fade rather than to a cut, so the edge reads as "more
+   follows" instead of "the history stopped". Only rows the model marks
+   clipped carry this; nothing else pays for a mask. */
+.graph-gutter[data-fade] {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - var(--graph-fade)), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - var(--graph-fade)), transparent 100%);
+}
 /* The graph acknowledges where you are. The checked-out commit's node is a
    heavier ring, and the selected row's node gains a halo, so following the
    eye down the gutter lands on a marked dot rather than on tinted text. */
 .commit-row.head .graph-gutter .graph-node[data-shape="normal"] { fill: none; stroke: currentColor; stroke-width: var(--graph-ring); }
 .commit-row.selected .graph-gutter .graph-node { stroke-width: var(--graph-ring); filter: drop-shadow(0 0 0.1rem currentColor); }
+/* The graph answers the mouse: entering a row's gutter grows that row's
+   node, so the eye learns the gutter is live without opening the detail
+   pane first. `r` rather than `transform`, because a scale would thicken
+   the ring along with the dot and break the one-width contract; a merge's
+   inner dot stays small so the ring still reads around it. */
+.graph-gutter:hover .graph-node:not([data-inner]) { r: var(--graph-node-hover); transition: r var(--transition); }
 .splitter { height: var(--splitter-size); flex: 0 0 auto; background: var(--surface-rail); border-block: 1px solid var(--line); cursor: row-resize; }
 .splitter:hover { background: var(--accent-soft); }
 .history-detail { flex: 0 0 auto; min-height: 8rem; overflow-y: auto; padding: 0.5rem 0.75rem; display: flex; flex-direction: column; gap: 0.4rem; }
