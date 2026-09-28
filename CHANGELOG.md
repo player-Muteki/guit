@@ -14,6 +14,8 @@ is the record of what is not verified.
   icon assets from the SVG source, with rounded diamond commit nodes, a
   two-tone merge ring, bold plum and sage strings with continuous color
   gradients into the nodes, and a softly shaded cream surface.
+- Softened the icon's diamond shoulders and branch curves, tightened the
+  crossing gap, and lengthened the color transitions between nodes and strings.
 
 ## [0.0.1] - 2026-09-27
 
