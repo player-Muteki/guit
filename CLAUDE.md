@@ -4,9 +4,47 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-guit is a Tauri 2 + framework-free TypeScript desktop Git client. It drives the user's
-own `git` binary with the user's own config; there is no second Git implementation and
+guit is a Tauri 2 + framework-free TypeScript desktop panel for monitoring and managing
+local Git repositories. Its core workflow works offline. It drives the installed `git`
+binary with the existing Git configuration; there is no second Git implementation and
 no vendored library.
+
+## Product authority and scope
+
+**Read `OUTLINE.md` before product or architecture work.** It is the authoritative
+product goal. `plan/README.md` indexes the current-state audit, technical design,
+implementation roadmap and acceptance criteria. This file supplies implementation
+constraints; an existing feature or an old README description does not override the
+outline. Keep these documents consistent when changing scope.
+
+The target is a small, persistent monitoring panel with exactly two top-level tabs:
+Main and Settings. Main shows search and latest-file-modification age above a changes
+area and a current-branch commit graph, visible together. Preserve the required
+staging, commit and previewed clean-reset flows, branch switching, commit tooltips,
+fonts/theme CSS, configurable timer and four window controls. Do not recreate the
+seven-view Git management suite behind an advanced-settings page.
+
+**Local repositories only; core functionality must work without a network.** Open
+repositories that already exist on disk. Do not add or retain product entry points,
+background tasks or frontend-callable commands for clone, fetch, pull, push, force
+push, publishing, remote administration or remote credential prompts. Submodule
+downloads and implicit object fetching in partial clones are also outside scope.
+Existing remote-tracking refs may be read as local metadata; do not claim they are
+current remote state. Preserve the repository's own remote and credential settings.
+Hooks, signing programs and external tools retain their existing Git configuration;
+offline functionality is not an OS-level network sandbox for those programs.
+
+The source still contains legacy remote operations and seven-view UI code. These are
+migration work, not evidence that they belong in the target product. Follow the plan
+to remove their entry points and command registrations, then remove unused internals
+without breaking shared local services. The plan describes future work; do not claim
+it is implemented just because its documents exist.
+
+Latest modification means the maximum filesystem mtime among eligible existing
+working-tree files, not the last watcher event, refresh or commit. A clean reset must
+account for target-tree changes and affected untracked paths, preserve protected
+boundaries, and report partial execution honestly. Reuse the snapshot, runner and
+single-use ticket boundaries below; do not implement these semantics in the frontend.
 
 **The defining constraint: guit never displays file contents or diffs.** Opening a file,
 viewing a diff and resolving a conflict all leave for `git difftool`, `git mergetool` and
@@ -62,9 +100,9 @@ covers it. `app/src-tauri/examples/watch_probe.rs` is a manual `cargo run --exam
 
 ### The backend owns all Git semantics; the frontend only renders
 
-`app/src-tauri/src/` is 27 modules. The Tauri command layer in `main.rs` is mechanical
-boilerplate — `spawn_blocking` + `app.state::<T>()` + a `map_err` to `task_failed` —
-repeated per command. Nothing semantic lives there.
+`app/src-tauri/src/` contains the backend modules. The Tauri command layer in `main.rs`
+is mechanical boilerplate — `spawn_blocking` + `app.state::<T>()` + a `map_err` to
+`task_failed` — repeated per command. Nothing semantic lives there.
 
 The frontend (`app/src/`) has **no Git knowledge at all**. It cannot build a command, it
 never sees a real filesystem path, and every action is a semantic `invoke` of a Rust
@@ -111,9 +149,12 @@ confirm    →  take_preview() removes it FIRST (even if the recheck then refuse
 ```
 
 What a ticket binds depends on the operation: a branch delete binds the observed `oid`;
-hard reset binds target + observed HEAD + the exact tracked-dirty file set; force push
-binds `(remote, branch)` + the local oid + the `--force-with-lease` lease oid. Nonces
-live in memory and die with the process. On the frontend, `preview.renew()` re-requests
+the existing hard reset binds target + observed HEAD + the tracked-dirty file set.
+That existing set is insufficient for the outline's clean-reset contract: the new
+preview must also cover target-tree differences, obstructing and explicitly cleaned
+untracked paths, and protected boundaries. Legacy force push binds the remote/branch
+pair, local oid and `--force-with-lease` lease oid; its product path is being removed.
+Nonces live in memory and die with the process. On the frontend, `preview.renew()` re-requests
 the preview after **every accepted snapshot**, so a changed candidate set is re-shown and
 must be confirmed again.
 
@@ -125,14 +166,21 @@ is `git_status_truncated`, not "no changes". An unidentifiable `MERGE_HEAD` is
 any Git read, decide what the failure looks like before deciding what the success looks
 like.
 
-### Credentials
+### Legacy credentials implementation
 
-guit stores nothing. The default is `GIT_TERMINAL_PROMPT=0` with no `GIT_ASKPASS`; the
+guit stores no credentials. The default is `GIT_TERMINAL_PROMPT=0` with no `GIT_ASKPASS`; the
 only path to a secret is the explicit "Retry with credentials", which attaches a
 `askpass::Bridge` living exactly as long as that one operation. `main()` intercepts its
 own argv before any Tauri machinery runs and acts as the helper. SSH passphrases are
 refused by design — ssh-agent is the only sanctioned path. `repo::user_git_command`
 strips every inherited `GIT_*` variable; interactive commands re-add exactly three.
+
+This describes the existing remote implementation for safe migration, not a supported
+product direction. Remove the remote retry UI and command surface under the local-only
+scope. Preserve shared subprocess cleanup and the no-secret-storage rule wherever
+applicable. Any environment control needed to prevent implicit object downloads must
+be added deliberately after inherited Git variables are stripped and verified with
+the supported Git versions.
 
 ## Rules that are enforced by tests — do not break them
 
@@ -146,8 +194,9 @@ the code they scan is how you break them.
 - **Shipped text is a contract.** `app/tests/user-facing-copy.mjs` scans the READMEs,
   CHANGELOG, `docs/`, `app/src/`, `app/src-tauri/src/` and `capabilities/` — **comments
   included** — and fails on milestone labels (`M7`, `M6-11`), `plan/...` citations and
-  `decision N` references. The development plan was deleted; a surviving label is now a
-  citation to nothing. Name behaviour, not schedule.
+  `decision N` references. The historical development plan was deleted. The current
+  `plan/` directory is internal engineering guidance; neither its paths nor task labels
+  belong in shipped text. Name behaviour, not schedule. Keep the existing gate intact.
 - **Row heights track the stylesheet.** `fileModel.ts` exports `FILE_ROW_REM` /
   `HISTORY_ROW_REM` that must equal `--row-height` / `--row-height-history` in
   `style/tokens.css`; a test gates it. The virtual lists derive row height from the root
@@ -161,10 +210,11 @@ the code they scan is how you break them.
 
 ## Verification status
 
-All runtime evidence comes from one Linux host (Ubuntu 26.04, Git 2.53, WebKitGTK /
-GTK 3, Node 26). **Windows and macOS are build configuration only and have never been
-run.** CI is configured in `.github/workflows/` but has never executed — the project has
-no git remote. Do not claim a CI pass, and do not claim platform coverage that
+Recorded application runtime evidence comes from one Linux host (Ubuntu 26.04,
+Git 2.53, WebKitGTK / GTK 3, Node 26). **Windows and macOS are build configuration only and have never been
+run.** CI is configured in `.github/workflows/`; no CI pass has been verified in the
+current records. An `origin` remote exists, but its presence does not prove a workflow
+ran or passed. Do not claim a CI pass, and do not claim platform coverage that
 `docs/known-limitations.md` does not. That file is the record of what is *not* verified;
 `CHANGELOG.md` is the record of what changed.
 
