@@ -1,7 +1,51 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#d75d3a"/>
-  <path d="M162 143v226m0-80h107c55 0 81-31 81-81v-65" fill="none" stroke="#fff" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="162" cy="143" r="34" fill="#fff"/>
-  <circle cx="162" cy="369" r="34" fill="#fff"/>
-  <circle cx="350" cy="143" r="34" fill="#fff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64" role="img" aria-labelledby="guit-title guit-description">
+  <title id="guit-title">guit</title>
+  <desc id="guit-description">Git branches interlace like guitar strings. Rounded diamond inlays mark commits; a plum ring around a sage core marks the merge.</desc>
+  <defs>
+    <path id="commit-node" d="M -0.85 -5.1 Q 0 -6.3 0.85 -5.1 L 3.8 -0.85 Q 4.4 0 3.8 0.85 L 0.85 5.1 Q 0 6.3 -0.85 5.1 L -3.8 0.85 Q -4.4 0 -3.8 -0.85 Z"/>
+    <linearGradient id="surface" x1="0" y1="0" x2="0.8" y2="1">
+      <stop stop-color="#fffdfb"/>
+      <stop offset="1" stop-color="#efe6ed"/>
+    </linearGradient>
+    <linearGradient id="plum-string" gradientUnits="userSpaceOnUse" x1="0" y1="9" x2="0" y2="56">
+      <stop stop-color="#ad88be"/>
+      <stop offset="0.28" stop-color="#51435c"/>
+      <stop offset="0.72" stop-color="#51435c"/>
+      <stop offset="1" stop-color="#9571aa"/>
+    </linearGradient>
+    <linearGradient id="lilac-string" gradientUnits="userSpaceOnUse" x1="0" y1="9" x2="0" y2="56">
+      <stop stop-color="#c5a4d8"/>
+      <stop offset="0.28" stop-color="#826696"/>
+      <stop offset="0.72" stop-color="#826696"/>
+      <stop offset="1" stop-color="#bda0cf"/>
+    </linearGradient>
+    <linearGradient id="sage-string" gradientUnits="userSpaceOnUse" x1="0" y1="9" x2="0" y2="37">
+      <stop stop-color="#9acba9"/>
+      <stop offset="0.48" stop-color="#507d6d"/>
+      <stop offset="1" stop-color="#507d6d"/>
+    </linearGradient>
+    <linearGradient id="plum-node-top" href="#plum-string" y1="-6" y2="41"/>
+    <linearGradient id="plum-node-bottom" href="#plum-string" y1="-41" y2="6"/>
+    <linearGradient id="lilac-node-top" href="#lilac-string" y1="-6" y2="41"/>
+    <linearGradient id="lilac-node-bottom" href="#lilac-string" y1="-41" y2="6"/>
+    <linearGradient id="sage-node-top" href="#sage-string" y1="-6" y2="22"/>
+    <mask id="string-crossing" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#fff"/>
+      <path d="M46 15V21C46 32 18 27 18 37" fill="none" stroke="#000" stroke-width="8.25" stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#surface)"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="14.5" fill="none" stroke="#d8cddb" stroke-opacity="0.55"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 15V50" stroke="url(#plum-string)" stroke-width="4.25"/>
+    <path d="M32 15V22C32 32 46 32 46 42V50" stroke="url(#lilac-string)" stroke-width="4.25" mask="url(#string-crossing)"/>
+    <path d="M46 15V21C46 32 18 27 18 37" stroke="url(#sage-string)" stroke-width="4.25"/>
+  </g>
+  <use href="#commit-node" x="18" y="15" fill="url(#plum-node-top)"/>
+  <use href="#commit-node" x="18" y="50" fill="url(#plum-node-bottom)"/>
+  <use href="#commit-node" x="32" y="15" fill="url(#lilac-node-top)"/>
+  <use href="#commit-node" x="46" y="50" fill="url(#lilac-node-bottom)"/>
+  <use href="#commit-node" x="46" y="15" fill="url(#sage-node-top)"/>
+  <circle cx="18" cy="37" r="4.5" fill="#fbf8f7" stroke="#51435c" stroke-width="2"/>
+  <circle cx="18" cy="37" r="2.05" fill="#507d6d"/>
 </svg>

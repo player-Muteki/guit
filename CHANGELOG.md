@@ -7,6 +7,14 @@ is the record of what is not verified.
 
 ## [Unreleased]
 
+### Changed
+
+- Redrew the app icon as Git branches interlacing like guitar strings, with
+  commit nodes on the strings and a shared merge node. Regenerated the desktop
+  icon assets from the SVG source, with rounded diamond commit nodes, a
+  two-tone merge ring, bold plum and sage strings with continuous color
+  gradients into the nodes, and a softly shaded cream surface.
+
 ## [0.0.1] - 2026-09-27
 
 First public release. Runtime verification is limited to Linux; Windows and
