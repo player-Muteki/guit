@@ -6,10 +6,8 @@
 //! reuses the one-time preview ticket flow, bound to the object id observed
 //! at preview time.
 
-use crate::probe::ProbeError;
-use crate::write::{
-    OperationKind, OperationResult, Outcome, PreviewKind, PreviewResult, WriteState,
-};
+use crate::probe::{Code, ProbeError};
+use crate::write::{self, OperationKind, OperationResult, Outcome, PreviewResult, WriteState};
 use crate::{branches, history, refs, repo, runner, session};
 use serde::Serialize;
 use std::io::Write;
@@ -278,7 +276,7 @@ fn run_create(
                         details = Some(crate::write::first_stderr_line(&output.stderr));
                     }
                 }
-                Err(error) if error.code == "process_cancelled" => {
+                Err(error) if error.code == Code::PROCESS_CANCELLED => {
                     outcome = Outcome::Cancelled;
                     message = "Cancelled while the Git process was running.".into();
                 }
@@ -324,7 +322,7 @@ fn prepare_create(
     target_oid: Option<&str>,
 ) -> Result<(), branches::PrepareError> {
     if let Err(error) = validate_tag_name(work_root, name) {
-        return Err(if error.code == "tag_name_invalid" {
+        return Err(if error.code == Code::TAG_NAME_INVALID {
             branches::PrepareError::Rejected(error)
         } else {
             branches::PrepareError::Failed(error)
@@ -357,7 +355,7 @@ pub(crate) fn preview_delete_tag(
     let listing = refs::list(&work_root)?;
     let tag = unique_tag(&listing, name)?;
     let nonce = state.stage_ref_delete(
-        PreviewKind::DeleteTag,
+        write::RefTarget::Tag,
         work_root,
         name.to_owned(),
         tag.oid.clone(),
@@ -396,80 +394,52 @@ fn run_delete(
     sessions: &session::SessionState,
     nonce: &str,
 ) -> Result<OperationResult, ProbeError> {
-    let kind = OperationKind::TagDelete;
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    let Some((work_root, name, oid, _force)) = state.take_ref_delete(nonce, PreviewKind::DeleteTag)
-    else {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(OperationResult {
-            category: None,
-            suggestion: None,
-            operation_id: 0,
-            kind,
-            outcome: Outcome::Rejected,
-            exit_code: None,
-            message: "That confirmation has expired; preview the deletion again.".into(),
-            details: None,
-            snapshot,
-        });
-    };
-    let same_repo = sessions
-        .current_identity()
-        .is_some_and(|identity| identity.work_root.as_deref() == Some(work_root.as_path()));
-    if !same_repo {
-        outcome = Outcome::Rejected;
-        message = "The repository session changed after the preview; no tag was deleted.".into();
-    } else {
-        let listing = match refs::list(&work_root) {
-            Ok(listing) => listing,
-            Err(error) => return Err(error),
-        };
-        let unchanged = match unique_tag(&listing, &name) {
-            Ok(tag) => tag.oid == oid,
-            Err(_) => false,
-        };
-        if !unchanged {
-            outcome = Outcome::Rejected;
-            message =
-                "The tag changed after the preview; nothing was deleted. Confirm again.".into();
-        } else if state.cancel_flag().load(Ordering::SeqCst) {
-            outcome = Outcome::Cancelled;
-            message = "Cancelled before Git ran.".into();
-        } else {
-            match branches::run_git(&work_root, &["tag", "-d", &name], state.cancel_flag()) {
-                Ok(output) => {
-                    exit_code = output.status.code();
-                    if output.status.success() && !output.truncated {
-                        message = "Tag deleted.".into();
-                    } else {
-                        outcome = Outcome::Failed;
-                        message = "tag reported a failure.".into();
-                        details = Some(crate::write::first_stderr_line(&output.stderr));
-                    }
-                }
-                Err(error) if error.code == "process_cancelled" => {
-                    outcome = Outcome::Cancelled;
-                    message = "Cancelled while the Git process was running.".into();
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+    write::confirm(
+        state,
+        sessions,
+        OperationKind::TagDelete,
+        nonce,
+        write::Refusals {
+            expired: "That confirmation has expired; preview the deletion again.",
+            session_changed:
+                "The repository session changed after the preview; no tag was deleted.",
+            cancelled_before_git: "Cancelled before Git ran.",
+        },
+        |preview| match preview.bound {
+            write::Bound::RefDelete {
+                target: write::RefTarget::Tag,
+                name,
+                oid,
+                ..
+            } => Some((preview.work_root, (name, oid))),
+            _ => None,
+        },
+        |work_root, (name, oid)| {
+            let listing = refs::list(work_root)?;
+            let unchanged = match unique_tag(&listing, name) {
+                Ok(tag) => tag.oid == *oid,
+                Err(_) => false,
+            };
+            Ok(if unchanged {
+                Ok(())
+            } else {
+                Err(
+                    "The tag changed after the preview; nothing was deleted. Confirm again."
+                        .to_owned(),
+                )
+            })
+        },
+        |work_root, (name, _)| {
+            write::ran_from(
+                branches::run_git(work_root, &["tag", "-d", name], state.cancel_flag()),
+                write::Wording {
+                    ok: "Tag deleted.".to_owned(),
+                    failed: "tag reported a failure.".to_owned(),
+                    cancelled: "Cancelled while the Git process was running.".to_owned(),
+                },
+            )
+        },
+    )
 }
 
 #[cfg(test)]
@@ -692,7 +662,7 @@ mod tests {
         let writes = WriteState::default();
 
         let missing = preview_delete_tag(&writes, &sessions, view.version, "ghost");
-        assert_eq!(missing.unwrap_err().code, "tag_missing");
+        assert_eq!(missing.unwrap_err().code.as_str(), "tag_missing");
 
         let created = create_tag(&writes, &sessions, view.version, "lite", None, None).unwrap();
         let snapshot = created.snapshot.expect("re-read");
@@ -742,12 +712,7 @@ mod tests {
         let wrong_kind = delete_tag(&writes, &sessions, branch_preview.nonce.clone()).unwrap();
         assert_eq!(wrong_kind.outcome, Outcome::Rejected);
         assert!(wrong_kind.message.contains("expired"));
-        let branch_ticket_gone = writes
-            .take_ref_delete(
-                &branch_preview.nonce.clone(),
-                crate::write::PreviewKind::DeleteBranch,
-            )
-            .is_none();
+        let branch_ticket_gone = writes.take_bound(&branch_preview.nonce).is_none();
         assert!(branch_ticket_gone);
         let still_there = branches::preview_delete_branch(
             &writes,

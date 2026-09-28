@@ -18,7 +18,7 @@
 //! progress lines. The file-transport restriction stays the user's Git
 //! configuration call; guit does not inject `-c` overrides.
 
-use crate::probe::{redact, ProbeError};
+use crate::probe::{redact, Code, ProbeError};
 use crate::repo::{self, RepoIdentity};
 use crate::runner;
 use crate::write::{self, OperationKind, OperationResult, Outcome, WriteState};
@@ -565,7 +565,7 @@ fn run_update(
                         details = Some(write::first_stderr_line(&output.stderr));
                     }
                 }
-                Err(error) if error.code == "process_cancelled" => {
+                Err(error) if error.code == Code::PROCESS_CANCELLED => {
                     outcome = Outcome::Cancelled;
                     message =
                         "Cancelled while Git ran; the submodule state may be incomplete.".into();
@@ -977,7 +977,7 @@ mod tests {
         );
         let sessions = session::SessionState::default();
         assert_eq!(
-            list_view(&sessions).unwrap_err().code,
+            list_view(&sessions).unwrap_err().code.as_str(),
             "submodules_no_session"
         );
         session::open(&sessions, root.path()).unwrap();

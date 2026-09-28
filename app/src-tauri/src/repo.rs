@@ -1,6 +1,6 @@
 use crate::probe::ProbeError;
 use crate::runner;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
@@ -42,6 +42,93 @@ pub fn user_git_command_noninteractive(path: &Path) -> Command {
     let mut command = user_git_command(path);
     command.env("GIT_EDITOR", ":");
     command
+}
+
+/// A merge/rebase/cherry-pick step may run an editor or a long checkout, so
+/// it gets far longer than an ordinary read.
+const SEQUENCE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Everything a caller chooses when it invokes Git in a work tree: the
+/// arguments, how long to wait, the caller's cancellation flag, and whether
+/// the command is one of the two that measured-require a no-op editor.
+/// Together with [`git`] this is the one way guit runs Git, so the sanitized
+/// command, the timeout and the cancel source are composed in one place
+/// instead of restated by every caller. Build it with [`GitRun::read`],
+/// [`GitRun::sequence`] or [`GitRun::paths`].
+pub struct GitRun<'a> {
+    args: &'a [&'a str],
+    cancelled: &'a AtomicBool,
+    timeout: Duration,
+    /// The two `--continue` paths that would otherwise open an editor.
+    noninteractive: bool,
+    /// Raw-path targets appended after a `--` separator, so a path can
+    /// never be read as an option. `Some` (even empty) always emits the
+    /// separator: that is the path-scoped form callers mean when they reach
+    /// for this field.
+    paths: Option<&'a [OsString]>,
+}
+
+impl<'a> GitRun<'a> {
+    /// An ordinary read: the user's Git, the given arguments, a short
+    /// timeout and the caller's cancel flag. Most calls want exactly this.
+    pub fn read(args: &'a [&'a str], cancelled: &'a AtomicBool) -> Self {
+        Self {
+            args,
+            cancelled,
+            timeout: Duration::from_secs(60),
+            noninteractive: false,
+            paths: None,
+        }
+    }
+
+    /// A merge/rebase/cherry-pick step, which may run an editor and takes
+    /// far longer than a read.
+    pub fn sequence(args: &'a [&'a str], cancelled: &'a AtomicBool, noninteractive: bool) -> Self {
+        Self {
+            args,
+            cancelled,
+            timeout: SEQUENCE_TIMEOUT,
+            noninteractive,
+            paths: None,
+        }
+    }
+
+    /// A path-scoped write: `git <args…> -- <paths…>`, so a path can never
+    /// be read as an option. The separator is always emitted.
+    pub fn paths(args: &'a [&'a str], paths: &'a [OsString], cancelled: &'a AtomicBool) -> Self {
+        Self {
+            args,
+            cancelled,
+            timeout: Duration::from_secs(120),
+            noninteractive: false,
+            paths: Some(paths),
+        }
+    }
+}
+
+/// Runs Git in `work_root` with the arguments, timeout and cancel flag the
+/// caller chose. This is the single seam for process spawning: every caller
+/// builds its argv here, so process-group isolation, the exit-status event
+/// and the capture limit are applied once, by the runner.
+pub fn git(work_root: &Path, run: GitRun<'_>) -> Result<runner::CapturedOutput, ProbeError> {
+    let mut command = if run.noninteractive {
+        user_git_command_noninteractive(work_root)
+    } else {
+        user_git_command(work_root)
+    };
+    command.args(run.args);
+    if let Some(paths) = run.paths {
+        command.arg("--");
+        command.args(paths);
+    }
+    runner::run_with_limit(
+        command,
+        run.cancelled,
+        Duration::ZERO,
+        run.timeout,
+        runner::DEFAULT_OUTPUT_LIMIT,
+        |_, _| {},
+    )
 }
 
 fn rev_parse_line(path: &Path, flag: &str) -> Result<Option<String>, ProbeError> {
@@ -383,14 +470,14 @@ mod tests {
     fn folder_outside_any_repository_is_rejected() {
         let root = tempfile::tempdir().unwrap();
         let error = detect(root.path()).unwrap_err();
-        assert_eq!(error.code, "not_a_repository");
+        assert_eq!(error.code.as_str(), "not_a_repository");
     }
 
     #[test]
     fn missing_path_is_rejected() {
         let root = tempfile::tempdir().unwrap();
         let error = detect(&root.path().join("nope")).unwrap_err();
-        assert_eq!(error.code, "repo_path_missing");
+        assert_eq!(error.code.as_str(), "repo_path_missing");
     }
 
     #[test]
@@ -465,7 +552,7 @@ mod tests {
         // `git status` cannot run against a bare repository; the failure must
         // surface as a structured error instead of a falsely clean repository.
         let error = status_output(&detect(&bare).unwrap(), true).unwrap_err();
-        assert_eq!(error.code, "git_status_failed");
+        assert_eq!(error.code.as_str(), "git_status_failed");
     }
 
     #[test]

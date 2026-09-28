@@ -1,4 +1,4 @@
-use crate::probe::{redact, ProbeError};
+use crate::probe::{redact, Code, ProbeError};
 use crate::status::StatusEntry;
 use crate::{netclassify, repo, runner, session, status};
 use serde::Serialize;
@@ -9,51 +9,90 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-/// What a stored confirmation permits. Discard reverts tracked work-tree
-/// edits; Clean removes untracked items; DeleteBranch removes a ref whose
-/// object id was captured at preview time. DropStash/PopStash consume a
-/// `stash@{N}` entry, the selector's commit oid re-checked at confirm.
-/// ResetHard binds the target commit, the observed HEAD and the exact
-/// tracked-dirty file set; all must still match at confirm.
-/// All share the one-time ticket flow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PreviewKind {
-    Discard,
-    Clean,
-    DeleteBranch,
-    DeleteTag,
-    DropStash,
-    PopStash,
-    ResetHard,
-    RemoveWorktree,
-    /// Removing a remote also drops its remote-tracking refs, so the
-    /// deletion goes through the same one-time ticket flow; the ticket binds
-    /// the name, the fetch URL observed at preview time and the tracking-ref
-    /// set.
-    RemoveRemote,
-    /// Deleting a branch on the remote is an irreversible remote write, so
-    /// it rides the same one-time ticket: the name pair plus the tracking
-    /// oid observed at preview time must all still hold at confirm.
-    DeleteRemoteBranch,
-    /// Force push reuses the slots: `paths` is (remote, branch), `oid` the
-    /// local commit the preview computed its overwrite list from and
-    /// `secondary` the lease — the tracking oid `--force-with-lease` pins.
-    ForcePush,
+/// Exactly the facts one confirmation is bound to. Each variant holds what
+/// its own confirm re-checks before Git runs, so a ticket can never carry a
+/// fact the operation does not verify, and adding an operation adds a
+/// variant rather than a new meaning for an existing field.
+#[derive(Debug)]
+pub(crate) enum Bound {
+    /// Revert these tracked work-tree edits.
+    Discard { paths: Vec<Vec<u8>> },
+    /// Remove exactly these untracked items.
+    Clean { paths: Vec<Vec<u8>> },
+    /// Delete a branch or a tag. `target` keeps a branch ticket from ever
+    /// authorizing a tag deletion (and vice versa): they share a shape but
+    /// never a confirmation. `force` records the explicit, separately
+    /// confirmed `-D` for a branch; a tag delete has no force path.
+    RefDelete {
+        target: RefTarget,
+        name: String,
+        oid: String,
+        force: bool,
+    },
+    /// A `stash@{N}` entry, bound to the commit oid that selector resolved to.
+    /// `action` keeps a drop confirmation from ever authorizing a pop: the two
+    /// share a shape but never a confirmation, because one discards the
+    /// changes and the other applies them.
+    StashEntry {
+        action: StashAction,
+        selector: String,
+        oid: String,
+    },
+    /// Reset hard: the target commit, the observed HEAD and the exact
+    /// tracked-dirty set; all three must still match at confirm.
+    ResetHard {
+        dirty: Vec<Vec<u8>>,
+        target_oid: String,
+        head_oid: String,
+    },
+    /// Remove a worktree bound to the HEAD it had when previewed.
+    WorktreeRemove { path: String, head: String },
+    /// Remove a remote: the name, its fetch URL and its tracking-ref set, all
+    /// as observed at preview time.
+    RemoveRemote {
+        name: String,
+        url: String,
+        tracking: Vec<String>,
+    },
+    /// Delete a branch on a remote, bound to the tracking oid.
+    DeleteRemoteBranch {
+        remote: String,
+        branch: String,
+        oid: String,
+    },
+    /// Force push: the (remote, branch) target, the local commit the
+    /// overwrite list was computed against, and the lease oid
+    /// `--force-with-lease` pins the remote to.
+    ForcePush {
+        remote: String,
+        branch: String,
+        local_oid: String,
+        lease_oid: String,
+    },
 }
 
 #[derive(Debug)]
-struct Preview {
-    work_root: PathBuf,
-    kind: PreviewKind,
-    paths: Vec<Vec<u8>>,
-    /// Object id the branch pointed at when the delete was previewed.
-    oid: Option<String>,
-    /// Second bound id, so far only the reset-hard ticket's HEAD; deletions
-    /// and stash tickets leave it None.
-    secondary: Option<String>,
-    /// -d refuses unmerged branches; the force flag records an explicit,
-    /// separately confirmed second stage (never a silent -D).
-    force: bool,
+pub(crate) struct Preview {
+    pub(crate) work_root: PathBuf,
+    pub(crate) bound: Bound,
+}
+
+/// Which ref a `RefDelete` ticket names. A branch and a tag are deleted by
+/// different Git commands and confirmed separately, so a ticket carries which
+/// one it is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefTarget {
+    Branch,
+    Tag,
+}
+
+/// Which end of a stash entry a `StashEntry` ticket is for. Dropping and
+/// popping are confirmed separately: pop re-applies the entry, drop throws it
+/// away, so one confirmation must never authorize the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StashAction {
+    Drop,
+    Pop,
 }
 
 /// Serializes every Git write in the repository, strictly in order.
@@ -103,7 +142,7 @@ impl WriteState {
     /// bound to the name and the object id observed at preview time.
     pub(crate) fn stage_ref_delete(
         &self,
-        kind: PreviewKind,
+        target: RefTarget,
         work_root: PathBuf,
         name: String,
         oid: String,
@@ -111,36 +150,32 @@ impl WriteState {
     ) -> String {
         self.stage_preview(Preview {
             work_root,
-            kind,
-            paths: vec![name.into_bytes()],
-            oid: Some(oid),
-            secondary: None,
-            force,
+            bound: Bound::RefDelete {
+                target,
+                name,
+                oid,
+                force,
+            },
         })
     }
 
-    /// Consumes a delete ticket; the ref must still point at the stored
-    /// oid before Git runs, so any drift forces a fresh preview.
-    pub(crate) fn take_ref_delete(
+    /// Ticket for a stash entry, bound to the commit its selector resolved
+    /// to at preview time.
+    pub(crate) fn stage_stash_entry(
         &self,
-        nonce: &str,
-        kind: PreviewKind,
-    ) -> Option<(PathBuf, String, String, bool)> {
-        let ticket = self.take_preview(nonce, kind)?;
-        let name = String::from_utf8(ticket.paths.first()?.clone()).ok()?;
-        let oid = ticket.oid?;
-        Some((ticket.work_root, name, oid, ticket.force))
-    }
-
-    /// Confirmation nonces are single-use: the take removes them even when
-    /// the follow-up check then refuses, forcing a fresh preview.
-    fn take_preview(&self, nonce: &str, kind: PreviewKind) -> Option<Preview> {
-        let removed = crate::util::guard(&self.previews).remove(nonce);
-        match removed {
-            Some(ticket) if ticket.kind == kind => Some(ticket),
-            Some(_) => None,
-            None => None,
-        }
+        action: StashAction,
+        work_root: PathBuf,
+        selector: String,
+        oid: String,
+    ) -> String {
+        self.stage_preview(Preview {
+            work_root,
+            bound: Bound::StashEntry {
+                action,
+                selector,
+                oid,
+            },
+        })
     }
 
     /// Everything a hard reset confirmation is bound to: the target commit,
@@ -156,25 +191,26 @@ impl WriteState {
     ) -> String {
         self.stage_preview(Preview {
             work_root,
-            kind: PreviewKind::ResetHard,
-            paths: dirty,
-            oid: Some(target_oid),
-            secondary: Some(head_oid),
-            force: false,
+            bound: Bound::ResetHard {
+                dirty,
+                target_oid,
+                head_oid,
+            },
         })
     }
 
-    pub(crate) fn take_reset_hard(
+    /// Ticket for removing a worktree, bound to the path and the HEAD oid
+    /// it carried when previewed.
+    pub(crate) fn stage_worktree_remove(
         &self,
-        nonce: &str,
-    ) -> Option<(PathBuf, Vec<Vec<u8>>, String, String)> {
-        let ticket = self.take_preview(nonce, PreviewKind::ResetHard)?;
-        Some((
-            ticket.work_root,
-            ticket.paths,
-            ticket.oid?,
-            ticket.secondary?,
-        ))
+        work_root: PathBuf,
+        path: String,
+        head: String,
+    ) -> String {
+        self.stage_preview(Preview {
+            work_root,
+            bound: Bound::WorktreeRemove { path, head },
+        })
     }
 
     /// Ticket for removing a remote, bound to the name, the fetch URL and
@@ -190,27 +226,12 @@ impl WriteState {
     ) -> String {
         self.stage_preview(Preview {
             work_root,
-            kind: PreviewKind::RemoveRemote,
-            paths: vec![name.into_bytes()],
-            oid: Some(fetch_url),
-            secondary: Some(tracking.join("\n")),
-            force: false,
+            bound: Bound::RemoveRemote {
+                name,
+                url: fetch_url,
+                tracking,
+            },
         })
-    }
-
-    pub(crate) fn take_remote_remove(
-        &self,
-        nonce: &str,
-    ) -> Option<(PathBuf, String, String, Vec<String>)> {
-        let ticket = self.take_preview(nonce, PreviewKind::RemoveRemote)?;
-        let name = String::from_utf8(ticket.paths.first()?.clone()).ok()?;
-        let tracking = ticket.secondary?;
-        let tracking = if tracking.is_empty() {
-            Vec::new()
-        } else {
-            tracking.split('\n').map(str::to_owned).collect()
-        };
-        Some((ticket.work_root, name, ticket.oid?, tracking))
     }
 
     /// Ticket for deleting a branch on a remote, bound to the remote name,
@@ -225,23 +246,12 @@ impl WriteState {
     ) -> String {
         self.stage_preview(Preview {
             work_root,
-            kind: PreviewKind::DeleteRemoteBranch,
-            paths: vec![remote.into_bytes(), branch.into_bytes()],
-            oid: Some(oid),
-            secondary: None,
-            force: false,
+            bound: Bound::DeleteRemoteBranch {
+                remote,
+                branch,
+                oid,
+            },
         })
-    }
-
-    pub(crate) fn take_remote_branch_delete(
-        &self,
-        nonce: &str,
-    ) -> Option<(PathBuf, String, String, String)> {
-        let ticket = self.take_preview(nonce, PreviewKind::DeleteRemoteBranch)?;
-        let mut names = ticket.paths.into_iter();
-        let remote = String::from_utf8(names.next()?).ok()?;
-        let branch = String::from_utf8(names.next()?).ok()?;
-        Some((ticket.work_root, remote, branch, ticket.oid?))
     }
 
     /// Ticket for a force push: the (remote, branch) target, the local
@@ -257,34 +267,268 @@ impl WriteState {
     ) -> String {
         self.stage_preview(Preview {
             work_root,
-            kind: PreviewKind::ForcePush,
-            paths: vec![remote.into_bytes(), branch.into_bytes()],
-            oid: Some(local_oid),
-            secondary: Some(lease_oid),
-            force: false,
+            bound: Bound::ForcePush {
+                remote,
+                branch,
+                local_oid,
+                lease_oid,
+            },
         })
     }
 
-    pub(crate) fn take_force_push(
-        &self,
-        nonce: &str,
-    ) -> Option<(PathBuf, String, String, String, String)> {
-        let ticket = self.take_preview(nonce, PreviewKind::ForcePush)?;
-        let mut names = ticket.paths.into_iter();
-        let remote = String::from_utf8(names.next()?).ok()?;
-        let branch = String::from_utf8(names.next()?).ok()?;
-        Some((
-            ticket.work_root,
-            remote,
-            branch,
-            ticket.oid?,
-            ticket.secondary?,
-        ))
+    /// Removes and returns the ticket for `nonce`, whatever operation staged
+    /// it. This is the single-use gate: the ticket is gone from here on, so
+    /// even a re-check that goes on to refuse still forces a fresh preview.
+    /// Every caller narrows the returned [`Bound`] to the one variant it
+    /// staged, so a nonce belonging to another operation reads as `None`
+    /// rather than being reinterpreted.
+    pub(crate) fn take_bound(&self, nonce: &str) -> Option<Preview> {
+        crate::util::guard(&self.previews).remove(nonce)
     }
 
     pub(crate) fn clear_previews(&self) {
         crate::util::guard(&self.previews).clear();
     }
+}
+
+/// What an operation's Git invocation reports back: the outcome, the
+/// wording shown, and — for network writes — the heuristic category and
+/// advice that the shared result carries through.
+pub(crate) struct Ran {
+    pub outcome: Outcome,
+    pub message: String,
+    pub details: Option<String>,
+    pub exit_code: Option<i32>,
+    pub category: Option<netclassify::NetCategory>,
+    pub suggestion: Option<String>,
+}
+
+impl Ran {
+    /// A Git process that ran and reported success. `exit_code` is kept even
+    /// on success: the frontend shows it as the operation's exit status.
+    pub(crate) fn ok(message: impl Into<String>, exit_code: Option<i32>) -> Self {
+        Self {
+            outcome: Outcome::Success,
+            message: message.into(),
+            details: None,
+            exit_code,
+            category: None,
+            suggestion: None,
+        }
+    }
+
+    /// A Git process that ran and reported failure. `exit_code` and the
+    /// redacted first stderr line are preserved; a truncated capture is
+    /// never reported as success, because a partial read proves nothing.
+    pub(crate) fn failed(message: impl Into<String>, output: &runner::CapturedOutput) -> Self {
+        Self {
+            outcome: Outcome::Failed,
+            message: message.into(),
+            details: Some(first_stderr_line(&output.stderr)),
+            exit_code: output.status.code(),
+            category: None,
+            suggestion: None,
+        }
+    }
+
+    /// Cancellation observed while the Git process was running.
+    pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            outcome: Outcome::Cancelled,
+            message: message.into(),
+            details: None,
+            exit_code: None,
+            category: None,
+            suggestion: None,
+        }
+    }
+}
+
+/// An operation's re-check: `Ok(Ok(()))` the bound facts still hold,
+/// `Ok(Err(message))` they drifted, `Err` the re-check itself could not read
+/// Git. A read failure is never treated as a clean answer.
+pub(crate) type Recheck = Result<Result<(), String>, ProbeError>;
+
+/// The three ways a local Git invocation can end, with the wording shown for
+/// each. Grouped so an operation states all of its user-facing text in one
+/// place, at the point that runs Git.
+pub(crate) struct Wording {
+    /// Shown when Git ran and reported success. Computed before Git starts,
+    /// so it can be a plain string.
+    pub ok: String,
+    /// Shown when Git ran and reported failure. Git's own refusal is the
+    /// authoritative reason, so this is a short label and the redacted first
+    /// stderr line carries the detail.
+    pub failed: String,
+    /// Shown when cancellation arrived while Git was running. An operation
+    /// that may have been left half-applied says so here rather than
+    /// reporting a clean stop.
+    pub cancelled: String,
+}
+
+/// Runs a captured local Git command and reports how it ended. A success is
+/// only ever reported from a complete capture: a truncated read cannot prove
+/// Git finished, so it is reported as a failure, never as success.
+pub(crate) fn ran_from(
+    output: Result<runner::CapturedOutput, ProbeError>,
+    wording: Wording,
+) -> Result<Ran, ProbeError> {
+    match output {
+        Ok(output) => {
+            if output.status.success() && !output.truncated {
+                Ok(Ran::ok(wording.ok, output.status.code()))
+            } else {
+                Ok(Ran::failed(wording.failed, &output))
+            }
+        }
+        Err(error) if error.code == Code::PROCESS_CANCELLED => {
+            Ok(Ran::cancelled(wording.cancelled))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The two refusals every confirm reports, in each operation's own words.
+/// They are supplied rather than fixed because they name what did *not*
+/// happen — "no branch was deleted" is more use to the reader than a single
+/// generic sentence, and that wording is part of the product.
+pub(crate) struct Refusals {
+    /// The confirmation is missing, already spent, or was issued for a
+    /// different operation. The ticket is consumed either way.
+    pub expired: &'static str,
+    /// The ticket names a repository that is no longer the one open.
+    pub session_changed: &'static str,
+    /// Cancellation was already requested when the ticket was confirmed, so
+    /// Git never started.
+    pub cancelled_before_git: &'static str,
+}
+
+/// The one confirm flow, shared by every ticketed destructive operation.
+///
+/// Everything that must not vary between operations is decided here, once:
+/// the ticket is consumed whether or not the answer is a refusal; a missing
+/// or mis-shaped nonce reports the standard expired confirmation; a ticket
+/// whose repository is no longer the open one is refused; the operation's own
+/// bound facts are re-verified; a cancellation that arrived before Git ran is
+/// reported as cancelled; and every answer — refusal, cancellation, failure
+/// or success — carries a freshly re-read snapshot.
+///
+/// An operation supplies three closures and nothing else: which bound facts
+/// its ticket holds, how to re-verify them, and how to run Git once they hold.
+/// That is the whole per-operation interface.
+///
+/// The seam is this function rather than a `trait`: Git is a single adapter
+/// (the user's own `git`), so a port over it would be indirection with nothing
+/// behind it. `B` is the operation's own bound-facts type, chosen at the call
+/// site, so a ticket staged for one operation can never be read as another's.
+// The last three arguments are the operation's whole contribution: what its
+/// ticket holds, how to re-verify it, and how to run Git. They are separate
+// closures rather than one bundle so the call site reads as the flow itself.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn confirm<B>(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    kind: OperationKind,
+    nonce: &str,
+    refusals: Refusals,
+    facts: impl FnOnce(Preview) -> Option<(PathBuf, B)>,
+    recheck: impl FnOnce(&Path, &B) -> Recheck,
+    run: impl FnOnce(&Path, &B) -> Result<Ran, ProbeError>,
+) -> Result<OperationResult, ProbeError> {
+    // The ticket is consumed here whether or not the answer is a refusal, so
+    // a replayed or mis-shaped confirm can never be reused.
+    let Some((work_root, bound)) = state.take_bound(nonce).and_then(facts) else {
+        return plain(sessions, kind, Outcome::Rejected, refusals.expired);
+    };
+    // The repository a ticket was staged against must still be the one open.
+    let same_repo = sessions
+        .current_identity()
+        .is_some_and(|identity| identity.work_root.as_deref() == Some(work_root.as_path()));
+    if !same_repo {
+        return plain(sessions, kind, Outcome::Rejected, refusals.session_changed);
+    }
+    match recheck(&work_root, &bound)? {
+        Ok(()) => {}
+        Err(message) => return plain(sessions, kind, Outcome::Rejected, &message),
+    }
+    if state.cancelled.load(Ordering::SeqCst) {
+        return plain(
+            sessions,
+            kind,
+            Outcome::Cancelled,
+            refusals.cancelled_before_git,
+        );
+    }
+    let ran = run(&work_root, &bound)?;
+    Ok(OperationResult {
+        category: ran.category,
+        suggestion: ran.suggestion,
+        operation_id: 0,
+        kind,
+        outcome: ran.outcome,
+        exit_code: ran.exit_code,
+        message: ran.message,
+        details: ran.details,
+        snapshot: session::refresh(sessions)?,
+    })
+}
+
+/// A result with no Git outcome to report — a refusal, an expiry or a
+/// cancellation — carrying a freshly re-read snapshot. Also the answer for a
+/// non-ticketed write that was refused before Git ran.
+pub(crate) fn plain(
+    sessions: &session::SessionState,
+    kind: OperationKind,
+    outcome: Outcome,
+    message: &str,
+) -> Result<OperationResult, ProbeError> {
+    Ok(OperationResult {
+        category: None,
+        suggestion: None,
+        operation_id: 0,
+        kind,
+        outcome,
+        exit_code: None,
+        message: message.to_owned(),
+        details: None,
+        snapshot: session::refresh(sessions)?,
+    })
+}
+
+/// The answer the frontend applies, built from a completed Git run: a freshly
+/// re-read snapshot plus whatever the run reported. The non-ticketed half of
+/// the write lane uses this; the ticketed half reaches the same result
+/// through [`confirm`], so the snapshot re-read and the outcome wording are
+/// decided in one place.
+pub(crate) fn report(
+    sessions: &session::SessionState,
+    kind: OperationKind,
+    ran: Ran,
+) -> Result<OperationResult, ProbeError> {
+    Ok(OperationResult {
+        category: ran.category,
+        suggestion: ran.suggestion,
+        operation_id: 0,
+        kind,
+        outcome: ran.outcome,
+        exit_code: ran.exit_code,
+        message: ran.message,
+        details: ran.details,
+        snapshot: session::refresh(sessions)?,
+    })
+}
+
+/// Runs a Git command and reports how it ended as the whole answer. This is
+/// the shape most writes need once their gates have passed: one call owns
+/// the run→outcome rule, so a truncated capture is never success and a
+/// cancellation is never a failure.
+pub(crate) fn run_and_report(
+    sessions: &session::SessionState,
+    kind: OperationKind,
+    output: Result<runner::CapturedOutput, ProbeError>,
+    wording: Wording,
+) -> Result<OperationResult, ProbeError> {
+    report(sessions, kind, ran_from(output, wording)?)
 }
 
 /// Unguessable one-time token. `RandomState` draws fresh SipHash keys from
@@ -459,59 +703,36 @@ pub(crate) fn run_write(
 ) -> Result<OperationResult, ProbeError> {
     let kind = write.kind();
     let (git_prefix, verb) = write.plan();
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    match sessions.resolve_files(snapshot_version, &file_ids) {
-        Err(error) => {
-            outcome = Outcome::Rejected;
-            message = error.message;
-        }
-        Ok((work_root, targets)) => {
-            if write.needs_restore() && !restore_supported(&work_root) {
-                outcome = Outcome::Rejected;
-                message =
-                    "This Git is too old for unstaging; guit needs git restore (2.23+).".into();
-            } else if state.cancelled.load(Ordering::SeqCst) {
-                outcome = Outcome::Cancelled;
-                message = "Cancelled before Git ran.".into();
-            } else {
-                match run_git_paths(&work_root, git_prefix, &targets, &state.cancelled) {
-                    Ok(output) => {
-                        exit_code = output.status.code();
-                        if output.status.success() && !output.truncated {
-                            message = format!("{} {} file(s).", verb, targets.len());
-                        } else {
-                            outcome = Outcome::Failed;
-                            message = format!("{} reported a failure.", git_prefix[0]);
-                            details = Some(first_stderr_line(&output.stderr));
-                        }
-                    }
-                    Err(error) if error.code == "process_cancelled" => {
-                        outcome = Outcome::Cancelled;
-                        message = "Cancelled while the Git process was running.".into();
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
+    let (work_root, targets) = match sessions.resolve_files(snapshot_version, &file_ids) {
+        Ok(resolved) => resolved,
+        Err(error) => return plain(sessions, kind, Outcome::Rejected, &error.message),
+    };
+    if write.needs_restore() && !restore_supported(&work_root) {
+        return plain(
+            sessions,
+            kind,
+            Outcome::Rejected,
+            "This Git is too old for unstaging; guit needs git restore (2.23+).",
+        );
     }
-    // Success, failure and cancellation all end with a re-read of the real
-    // Git state; the result is wrong if that read fails.
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        // Assigned by the queue wrapper so every entry point reports it.
-        operation_id: 0,
+    if state.cancelled.load(Ordering::SeqCst) {
+        return plain(
+            sessions,
+            kind,
+            Outcome::Cancelled,
+            "Cancelled before Git ran.",
+        );
+    }
+    run_and_report(
+        sessions,
         kind,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+        run_git_paths(&work_root, git_prefix, &targets, &state.cancelled),
+        Wording {
+            ok: format!("{verb} {} file(s).", targets.len()),
+            failed: format!("{} reported a failure.", git_prefix[0]),
+            cancelled: "Cancelled while the Git process was running.".to_owned(),
+        },
+    )
 }
 
 /// Commit the staged index. The message travels to Git only through a
@@ -542,95 +763,77 @@ pub(crate) fn run_commit(
     message: &str,
     amend: bool,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let result_message;
-    let mut details = None;
+    let kind = OperationKind::Commit;
     if message.trim().is_empty() {
-        outcome = Outcome::Rejected;
-        result_message = "Commit message is empty.".into();
-    } else {
-        match sessions.commit_context(snapshot_version) {
-            Err(error) => {
-                outcome = Outcome::Rejected;
-                result_message = error.message;
-            }
-            Ok((work_root, unborn)) => {
-                if amend && unborn {
-                    outcome = Outcome::Rejected;
-                    result_message = "This branch has no commit to amend yet.".into();
-                } else if state.cancelled.load(Ordering::SeqCst) {
-                    outcome = Outcome::Cancelled;
-                    result_message = "Cancelled before Git ran.".into();
-                } else {
-                    let message_file = tempfile::NamedTempFile::new().map_err(|error| {
-                        ProbeError::new("commit_temp_failed", error.to_string())
-                    })?;
-                    let mut written = message_file.reopen().map_err(|error| {
-                        ProbeError::new("commit_temp_failed", error.to_string())
-                    })?;
-                    use std::io::Write;
-                    written.write_all(message.as_bytes()).map_err(|error| {
-                        ProbeError::new("commit_temp_failed", error.to_string())
-                    })?;
-                    written
-                        .write_all(b"\n")
-                        .and_then(|_| written.sync_all())
-                        .map_err(|error| {
-                            ProbeError::new("commit_temp_failed", error.to_string())
-                        })?;
-                    drop(written);
-                    let mut command = repo::user_git_command(&work_root);
-                    command.args(["commit", "-F"]);
-                    command.arg(message_file.path());
-                    if amend {
-                        command.arg("--amend");
-                    }
-                    match runner::run_with_limit(
-                        command,
-                        &state.cancelled,
-                        Duration::ZERO,
-                        Duration::from_secs(600),
-                        runner::DEFAULT_OUTPUT_LIMIT,
-                        |_, _| {},
-                    ) {
-                        Ok(output) => {
-                            exit_code = output.status.code();
-                            if output.status.success() {
-                                result_message = if amend {
-                                    "Amended the last commit.".into()
-                                } else {
-                                    "Commit completed.".into()
-                                };
-                            } else {
-                                outcome = Outcome::Failed;
-                                result_message = "git commit reported a failure.".into();
-                                details = Some(first_stderr_line(&output.stderr));
-                            }
-                        }
-                        Err(error) if error.code == "process_cancelled" => {
-                            outcome = Outcome::Cancelled;
-                            result_message = "Cancelled while the Git process was running.".into();
-                        }
-                        Err(error) => return Err(error),
-                    }
-                    // message_file drops here, after Git has read it.
-                }
-            }
-        }
+        return plain(
+            sessions,
+            kind,
+            Outcome::Rejected,
+            "Commit message is empty.",
+        );
     }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::Commit,
-        outcome,
-        exit_code,
-        message: result_message,
-        details,
-        snapshot,
-    })
+    let (work_root, unborn) = match sessions.commit_context(snapshot_version) {
+        Ok(context) => context,
+        Err(error) => return plain(sessions, kind, Outcome::Rejected, &error.message),
+    };
+    if amend && unborn {
+        return plain(
+            sessions,
+            kind,
+            Outcome::Rejected,
+            "This branch has no commit to amend yet.",
+        );
+    }
+    if state.cancelled.load(Ordering::SeqCst) {
+        return plain(
+            sessions,
+            kind,
+            Outcome::Cancelled,
+            "Cancelled before Git ran.",
+        );
+    }
+    let message_file = tempfile::NamedTempFile::new()
+        .map_err(|error| ProbeError::new("commit_temp_failed", error.to_string()))?;
+    let mut written = message_file
+        .reopen()
+        .map_err(|error| ProbeError::new("commit_temp_failed", error.to_string()))?;
+    use std::io::Write;
+    written
+        .write_all(message.as_bytes())
+        .map_err(|error| ProbeError::new("commit_temp_failed", error.to_string()))?;
+    written
+        .write_all(b"\n")
+        .and_then(|_| written.sync_all())
+        .map_err(|error| ProbeError::new("commit_temp_failed", error.to_string()))?;
+    drop(written);
+    let mut command = repo::user_git_command(&work_root);
+    command.args(["commit", "-F"]);
+    command.arg(message_file.path());
+    if amend {
+        command.arg("--amend");
+    }
+    run_and_report(
+        sessions,
+        kind,
+        runner::run_with_limit(
+            command,
+            &state.cancelled,
+            Duration::ZERO,
+            Duration::from_secs(600),
+            runner::DEFAULT_OUTPUT_LIMIT,
+            |_, _| {},
+        ),
+        Wording {
+            ok: if amend {
+                "Amended the last commit.".to_owned()
+            } else {
+                "Commit completed.".to_owned()
+            },
+            failed: "git commit reported a failure.".to_owned(),
+            cancelled: "Cancelled while the Git process was running.".to_owned(),
+        },
+    )
+    // message_file drops here, after Git has read it.
 }
 
 /// What a discard confirmation covers: display names only (the frontend
@@ -687,11 +890,9 @@ pub(crate) fn preview_discard(
     }
     let nonce = state.stage_preview(Preview {
         work_root,
-        kind: PreviewKind::Discard,
-        paths: candidates.clone(),
-        oid: None,
-        secondary: None,
-        force: false,
+        bound: Bound::Discard {
+            paths: candidates.clone(),
+        },
     });
     Ok(PreviewResult {
         nonce,
@@ -727,91 +928,57 @@ pub(crate) fn run_discard(
     sessions: &session::SessionState,
     nonce: &str,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    let Some(preview) = state.take_preview(nonce, PreviewKind::Discard) else {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(OperationResult {
-            category: None,
-            suggestion: None,
-            operation_id: 0,
-            kind: OperationKind::Discard,
-            outcome: Outcome::Rejected,
-            exit_code: None,
-            message: "That confirmation has expired; preview the discard again.".into(),
-            details: None,
-            snapshot,
-        });
-    };
-    let same_repo = sessions
-        .current_identity()
-        .is_some_and(|identity| identity.work_root.as_deref() == Some(preview.work_root.as_path()));
-    if !same_repo {
-        outcome = Outcome::Rejected;
-        message = "The repository session changed after the preview; nothing was discarded.".into();
-    } else if !restore_supported(&preview.work_root) {
-        outcome = Outcome::Rejected;
-        message = "This Git is too old for discarding; guit needs git restore (2.23+).".into();
-    } else {
-        match status_index(sessions) {
-            Err(error) => return Err(error),
-            Ok(entries) => {
-                let unchanged = preview
-                    .paths
-                    .iter()
-                    .all(|raw| entries.get(raw).is_some_and(worktree_dirty));
-                if !unchanged {
-                    outcome = Outcome::Rejected;
-                    message =
-                        "Files changed after the preview; nothing was discarded. Confirm again."
-                            .into();
-                } else if state.cancelled.load(Ordering::SeqCst) {
-                    outcome = Outcome::Cancelled;
-                    message = "Cancelled before Git ran.".into();
-                } else {
-                    match run_git_paths(
-                        &preview.work_root,
-                        &["restore", "--worktree"],
-                        &preview.paths,
-                        &state.cancelled,
-                    ) {
-                        Ok(output) => {
-                            exit_code = output.status.code();
-                            if output.status.success() && !output.truncated {
-                                message = format!(
-                                    "Discarded work-tree changes in {} file(s).",
-                                    preview.paths.len()
-                                );
-                            } else {
-                                outcome = Outcome::Failed;
-                                message = "restore reported a failure.".into();
-                                details = Some(first_stderr_line(&output.stderr));
-                            }
-                        }
-                        Err(error) if error.code == "process_cancelled" => {
-                            outcome = Outcome::Cancelled;
-                            message = "Cancelled while the Git process was running.".into();
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
+    confirm(
+        state,
+        sessions,
+        OperationKind::Discard,
+        nonce,
+        Refusals {
+            expired: "That confirmation has expired; preview the discard again.",
+            session_changed:
+                "The repository session changed after the preview; nothing was discarded.",
+            cancelled_before_git: "Cancelled before Git ran.",
+        },
+        |preview| match preview.bound {
+            Bound::Discard { paths } => Some((preview.work_root, paths)),
+            _ => None,
+        },
+        |work_root, paths| {
+            if !restore_supported(work_root) {
+                return Ok(Err(
+                    "This Git is too old for discarding; guit needs git restore (2.23+)."
+                        .to_owned(),
+                ));
             }
-        }
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::Discard,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+            let entries = status_index(sessions)?;
+            let unchanged = paths
+                .iter()
+                .all(|raw| entries.get(raw).is_some_and(worktree_dirty));
+            Ok(if unchanged {
+                Ok(())
+            } else {
+                Err(
+                    "Files changed after the preview; nothing was discarded. Confirm again."
+                        .to_owned(),
+                )
+            })
+        },
+        |work_root, paths| {
+            ran_from(
+                run_git_paths(
+                    work_root,
+                    &["restore", "--worktree"],
+                    paths,
+                    &state.cancelled,
+                ),
+                Wording {
+                    ok: format!("Discarded work-tree changes in {} file(s).", paths.len()),
+                    failed: "restore reported a failure.".to_owned(),
+                    cancelled: "Cancelled while the Git process was running.".to_owned(),
+                },
+            )
+        },
+    )
 }
 
 /// Fresh porcelain-v2 read keyed by raw path bytes, used to recompute
@@ -908,11 +1075,7 @@ pub(crate) fn preview_clean(
     }
     let nonce = state.stage_preview(Preview {
         work_root,
-        kind: PreviewKind::Clean,
-        paths,
-        oid: None,
-        secondary: None,
-        force: false,
+        bound: Bound::Clean { paths },
     });
     Ok(PreviewResult {
         nonce,
@@ -946,83 +1109,49 @@ pub(crate) fn run_clean(
     sessions: &session::SessionState,
     nonce: &str,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    let Some(preview) = state.take_preview(nonce, PreviewKind::Clean) else {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(OperationResult {
-            category: None,
-            suggestion: None,
-            operation_id: 0,
-            kind: OperationKind::Clean,
-            outcome: Outcome::Rejected,
-            exit_code: None,
-            message: "That confirmation has expired; preview the clean again.".into(),
-            details: None,
-            snapshot,
-        });
-    };
-    let same_repo = sessions
-        .current_identity()
-        .is_some_and(|identity| identity.work_root.as_deref() == Some(preview.work_root.as_path()));
-    if !same_repo {
-        outcome = Outcome::Rejected;
-        message = "The repository session changed after the preview; nothing was removed.".into();
-    } else if state.cancelled.load(Ordering::SeqCst) {
-        outcome = Outcome::Cancelled;
-        message = "Cancelled before Git ran.".into();
-    } else {
-        let mut fresh = match clean_candidates(&preview.work_root) {
-            Ok(found) => found.into_iter().map(|(raw, _)| raw).collect::<Vec<_>>(),
-            Err(error) => return Err(error),
-        };
-        let mut expected = preview.paths.clone();
-        fresh.sort();
-        expected.sort();
-        if fresh != expected {
-            outcome = Outcome::Rejected;
-            message =
-                "Untracked files changed after the preview; nothing was removed. Confirm again."
-                    .into();
-        } else {
-            match run_git_paths(
-                &preview.work_root,
-                &["clean", "-fd"],
-                &preview.paths,
-                &state.cancelled,
-            ) {
-                Ok(output) => {
-                    exit_code = output.status.code();
-                    if output.status.success() && !output.truncated {
-                        message = format!("Removed {} untracked item(s).", preview.paths.len());
-                    } else {
-                        outcome = Outcome::Failed;
-                        message = "git clean reported a failure.".into();
-                        details = Some(first_stderr_line(&output.stderr));
-                    }
-                }
-                Err(error) if error.code == "process_cancelled" => {
-                    outcome = Outcome::Cancelled;
-                    message = "Cancelled while the Git process was running.".into();
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::Clean,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+    confirm(
+        state,
+        sessions,
+        OperationKind::Clean,
+        nonce,
+        Refusals {
+            expired: "That confirmation has expired; preview the clean again.",
+            session_changed:
+                "The repository session changed after the preview; nothing was removed.",
+            cancelled_before_git: "Cancelled before Git ran.",
+        },
+        |preview| match preview.bound {
+            Bound::Clean { paths } => Some((preview.work_root, paths)),
+            _ => None,
+        },
+        |work_root, paths| {
+            let mut fresh = clean_candidates(work_root)?
+                .into_iter()
+                .map(|(raw, _)| raw)
+                .collect::<Vec<_>>();
+            let mut expected = paths.clone();
+            fresh.sort();
+            expected.sort();
+            Ok(if fresh == expected {
+                Ok(())
+            } else {
+                Err(
+                    "Untracked files changed after the preview; nothing was removed. Confirm again."
+                        .to_owned(),
+                )
+            })
+        },
+        |work_root, paths| {
+            ran_from(
+                run_git_paths(work_root, &["clean", "-fd"], paths, &state.cancelled),
+                Wording {
+                    ok: format!("Removed {} untracked item(s).", paths.len()),
+                    failed: "git clean reported a failure.".to_owned(),
+                    cancelled: "Cancelled while the Git process was running.".to_owned(),
+                },
+            )
+        },
+    )
 }
 
 /// Cheap pre-flight for restore-based operations: `git --version` parsed with
@@ -1045,29 +1174,21 @@ pub(crate) fn restore_supported(work_root: &Path) -> bool {
 }
 
 /// `git <args…> -- <paths…>` with argument arrays only — paths arrive as the
-/// exact bytes Git reported, so no shell or display-name round trip.
+/// exact bytes Git reported, converted to OS arguments and placed behind a
+/// `--` separator, so no shell or display-name round trip happens.
 fn run_git_paths(
     work_root: &Path,
     git_prefix: &[&str],
     targets: &[Vec<u8>],
     cancelled: &AtomicBool,
 ) -> Result<runner::CapturedOutput, ProbeError> {
-    let mut command = repo::user_git_command(work_root);
-    command.args(git_prefix);
-    command.arg("--");
-    command.args(
-        targets
-            .iter()
-            .map(|target| raw_to_os(target))
-            .collect::<Result<Vec<OsString>, ProbeError>>()?,
-    );
-    runner::run_with_limit(
-        command,
-        cancelled,
-        Duration::ZERO,
-        Duration::from_secs(120),
-        runner::DEFAULT_OUTPUT_LIMIT,
-        |_, _| {},
+    let paths = targets
+        .iter()
+        .map(|target| raw_to_os(target))
+        .collect::<Result<Vec<OsString>, ProbeError>>()?;
+    repo::git(
+        work_root,
+        repo::GitRun::paths(git_prefix, &paths, cancelled),
     )
 }
 
@@ -1075,6 +1196,11 @@ pub(crate) fn raw_to_os(raw: &[u8]) -> Result<OsString, ProbeError> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
+        // The `use` above means this block cannot be a tail expression, so the
+        // `return` is what makes the unix build return `Result` (the
+        // `not(unix)` arm is compiled out here). Removing it fails to compile
+        // on unix; clippy's `needless_return` does not model the cfg split.
+        #[allow(clippy::needless_return)]
         return Ok(OsString::from_vec(raw.to_vec()));
     }
     #[cfg(not(unix))]
@@ -1158,31 +1284,127 @@ mod tests {
         // old nonce and the destructive command cannot run without a fresh
         // preview.
         let staged = WriteState::default().stage_ref_delete(
-            PreviewKind::DeleteBranch,
+            RefTarget::Branch,
             PathBuf::from("/repository"),
             "topic".to_owned(),
             "0".repeat(40),
             false,
         );
         let after_restart = WriteState::default();
-        assert!(after_restart
-            .take_ref_delete(&staged, PreviewKind::DeleteBranch)
-            .is_none());
-        // The same nonce is single-use within one process too.
+        assert!(after_restart.take_bound(&staged).is_none());
+        // The same nonce is single-use within one process too, and a ticket
+        // staged for one operation is never readable as another.
         let state = WriteState::default();
         let nonce = state.stage_ref_delete(
-            PreviewKind::DeleteBranch,
+            RefTarget::Branch,
             PathBuf::from("/repository"),
             "topic".to_owned(),
             "0".repeat(40),
             false,
         );
-        assert!(state
-            .take_ref_delete(&nonce, PreviewKind::DeleteBranch)
-            .is_some());
-        assert!(state
-            .take_ref_delete(&nonce, PreviewKind::DeleteBranch)
-            .is_none());
+        assert!(matches!(
+            state.take_bound(&nonce).map(|ticket| ticket.bound),
+            Some(Bound::RefDelete { .. })
+        ));
+        assert!(state.take_bound(&nonce).is_none());
+    }
+
+    /// The two operations that share a ticket shape still never share a
+    /// confirmation: a branch ticket and a tag ticket are both
+    /// `RefDelete`, discriminated only by `target`, and a drop ticket and a
+    /// pop ticket are both `StashEntry`, discriminated only by `action`.
+    /// Each reader must reject the other's ticket as "not mine", which the
+    /// confirm flow turns into a consumed-and-expired refusal.
+    #[test]
+    fn a_ticket_is_readable_only_by_the_operation_that_staged_it() {
+        // Reading helpers mirroring each confirm call site's `facts` arm.
+        fn read_branch(ticket: Preview) -> bool {
+            matches!(
+                ticket.bound,
+                Bound::RefDelete {
+                    target: RefTarget::Branch,
+                    ..
+                }
+            )
+        }
+        fn read_tag(ticket: Preview) -> bool {
+            matches!(
+                ticket.bound,
+                Bound::RefDelete {
+                    target: RefTarget::Tag,
+                    ..
+                }
+            )
+        }
+        fn read_pop(ticket: Preview) -> bool {
+            matches!(
+                ticket.bound,
+                Bound::StashEntry {
+                    action: StashAction::Pop,
+                    ..
+                }
+            )
+        }
+        let root = PathBuf::from("/repository");
+        let oid = "0".repeat(40);
+
+        let branch = WriteState::default().stage_ref_delete(
+            RefTarget::Branch,
+            root.clone(),
+            "topic".to_owned(),
+            oid.clone(),
+            false,
+        );
+        let state = WriteState::default();
+        let branch_nonce = state.stage_ref_delete(
+            RefTarget::Branch,
+            root.clone(),
+            "topic".to_owned(),
+            oid.clone(),
+            false,
+        );
+        // A branch ticket is not a tag ticket and not a pop ticket.
+        assert!(read_branch(state.take_bound(&branch_nonce).unwrap()));
+        // The dispatcher matches each ticket to exactly one reader.
+        let _ = branch; // keeps the standalone staging exercised
+
+        let tag_state = WriteState::default();
+        let tag_nonce = tag_state.stage_ref_delete(
+            RefTarget::Tag,
+            root.clone(),
+            "v1".to_owned(),
+            oid.clone(),
+            false,
+        );
+        assert!(read_tag(tag_state.take_bound(&tag_nonce).unwrap()));
+        assert!(!read_branch(Preview {
+            work_root: root.clone(),
+            bound: Bound::RefDelete {
+                target: RefTarget::Tag,
+                name: "v1".to_owned(),
+                oid: oid.clone(),
+                force: false,
+            }
+        }));
+
+        // A pop ticket is not a drop ticket.
+        let pop_state = WriteState::default();
+        let pop_nonce = pop_state.stage_stash_entry(
+            StashAction::Pop,
+            root.clone(),
+            "stash@{0}".to_owned(),
+            oid.clone(),
+        );
+        let pop_ticket = pop_state.take_bound(&pop_nonce).unwrap();
+        assert!(read_pop(pop_ticket));
+        assert!(!read_pop(Preview {
+            work_root: root,
+            bound: Bound::StashEntry {
+                action: StashAction::Drop,
+                selector: "stash@{0}".to_owned(),
+                oid,
+            }
+        }));
     }
 
     #[test]
@@ -1294,7 +1516,7 @@ mod tests {
         let first = writes.begin().unwrap();
         assert_eq!(first, 1);
         let error = writes.begin().unwrap_err();
-        assert_eq!(error.code, "write_queue_busy");
+        assert_eq!(error.code.as_str(), "write_queue_busy");
         writes.finish();
         assert_eq!(writes.begin().unwrap(), 2);
         writes.finish();
@@ -1863,13 +2085,13 @@ mod tests {
         let writes = WriteState::default();
         let ids = vec![file_id(&view, "a.txt"), file_id(&view, "u.txt")];
         let error = preview_discard(&writes, &sessions, view.version, &ids).unwrap_err();
-        assert_eq!(error.code, "discard_untracked");
+        assert_eq!(error.code.as_str(), "discard_untracked");
         // The refusal happens before staging a ticket or running Git.
         assert_eq!(
             std::fs::read_to_string(root.join("a.txt")).unwrap(),
             "a dirty\n"
         );
-        assert!(writes.take_preview("any", PreviewKind::Discard).is_none());
+        assert!(writes.take_bound("any").is_none());
     }
 
     #[test]
@@ -2017,13 +2239,13 @@ mod tests {
         // A superseded snapshot cannot even start a preview.
         session::refresh(&sessions).unwrap().expect("fresh version");
         let error = preview_clean(&writes, &sessions, view.version).unwrap_err();
-        assert_eq!(error.code, "write_stale_snapshot");
+        assert_eq!(error.code.as_str(), "write_stale_snapshot");
 
         // A repository without untracked files reports nothing to clean
         // instead of staging an empty confirmation.
         let live = session::refresh(&sessions).unwrap().expect("session");
         std::fs::remove_file(root.join("u1.txt")).unwrap();
         let error = preview_clean(&writes, &sessions, live.version).unwrap_err();
-        assert_eq!(error.code, "clean_nothing");
+        assert_eq!(error.code.as_str(), "clean_nothing");
     }
 }

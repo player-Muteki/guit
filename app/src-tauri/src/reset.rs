@@ -86,25 +86,6 @@ fn tracked_dirty_set(sessions: &session::SessionState) -> Result<Vec<Vec<u8>>, P
 
 /// The shared refusal path: everything rejected happens before Git runs,
 /// with the actual state re-read and attached.
-fn refused(
-    sessions: &session::SessionState,
-    kind: OperationKind,
-    message: String,
-) -> Result<OperationResult, ProbeError> {
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind,
-        outcome: Outcome::Rejected,
-        exit_code: None,
-        message,
-        details: None,
-        snapshot,
-    })
-}
-
 pub(crate) fn reset(
     state: &WriteState,
     sessions: &session::SessionState,
@@ -130,76 +111,48 @@ fn run_reset(
 ) -> Result<OperationResult, ProbeError> {
     let kind = OperationKind::Reset;
     let (work_root, unborn) = match sessions.commit_context(snapshot_version) {
-        Err(error) => return refused(sessions, kind, error.message),
+        Err(error) => return write::plain(sessions, kind, Outcome::Rejected, &error.message),
         Ok(context) => context,
     };
     let in_progress = sequencer::in_progress_message(sessions)?;
     if unborn {
-        return refused(
+        return write::plain(
             sessions,
             kind,
-            "Cannot reset before the first commit.".into(),
+            Outcome::Rejected,
+            "Cannot reset before the first commit.",
         );
     }
     if let Some(refusal) = in_progress {
-        return refused(sessions, kind, refusal);
+        return write::plain(sessions, kind, Outcome::Rejected, &refusal);
     }
     if !sequencer::validate_target(&work_root, target) {
-        return refused(
+        return write::plain(
             sessions,
             kind,
-            "The target must be a full commit id or an existing local branch name.".into(),
+            Outcome::Rejected,
+            "The target must be a full commit id or an existing local branch name.",
         );
     }
     if state.cancel_flag().load(Ordering::SeqCst) {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(OperationResult {
-            category: None,
-            suggestion: None,
-            operation_id: 0,
+        return write::plain(
+            sessions,
             kind,
-            outcome: Outcome::Cancelled,
-            exit_code: None,
-            message: "Cancelled before Git ran.".into(),
-            details: None,
-            snapshot,
-        });
+            Outcome::Cancelled,
+            "Cancelled before Git ran.",
+        );
     }
     let args = ["reset", mode.flag(), target];
-    let outcome;
-    let message;
-    let mut exit_code = None;
-    let mut details = None;
-    match sequencer::run_git(&work_root, false, &args, state) {
-        Ok(output) => {
-            exit_code = output.status.code();
-            if output.status.success() && !output.truncated {
-                outcome = Outcome::Success;
-                message = format!("Reset ({}) to {}.", mode.label(), target);
-            } else {
-                outcome = Outcome::Failed;
-                message = format!("git reset {} reported a failure.", mode.flag());
-                details = Some(write::first_stderr_line(&output.stderr));
-            }
-        }
-        Err(error) if error.code == "process_cancelled" => {
-            outcome = Outcome::Cancelled;
-            message = "Cancelled while the Git process was running.".into();
-        }
-        Err(error) => return Err(error),
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
+    write::run_and_report(
+        sessions,
         kind,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+        sequencer::run_git(&work_root, false, &args, state),
+        write::Wording {
+            ok: format!("Reset ({}) to {}.", mode.label(), target),
+            failed: format!("git reset {} reported a failure.", mode.flag()),
+            cancelled: "Cancelled while the Git process was running.".to_owned(),
+        },
+    )
 }
 
 /// Short display prefix for a full commit id in confirmation lists.
@@ -311,112 +264,72 @@ fn run_reset_hard(
     sessions: &session::SessionState,
     nonce: &str,
 ) -> Result<OperationResult, ProbeError> {
-    let kind = OperationKind::ResetHard;
-    let Some((work_root, expected_dirty, target_oid, expected_head)) = state.take_reset_hard(nonce)
-    else {
-        return refused(
-            sessions,
-            kind,
-            "That confirmation has expired; preview the action again.".into(),
-        );
-    };
-    let same_repo = sessions
-        .current_identity()
-        .is_some_and(|identity| identity.work_root.as_deref() == Some(work_root.as_path()));
-    if !same_repo {
-        return refused(
-            sessions,
-            kind,
-            "A different repository is open now; preview the reset again.".into(),
-        );
-    }
-    if let Some(refusal) = sequencer::in_progress_message(sessions)? {
-        return refused(sessions, kind, refusal);
-    }
-    // The ticket promised exactly this HEAD, this target and this dirty
-    // set; anything else means the preview no longer describes reality.
-    let Some(head_now) = resolve_commit(&work_root, "HEAD") else {
-        return refused(
-            sessions,
-            kind,
-            "HEAD no longer names a commit; preview the reset again.".into(),
-        );
-    };
-    if head_now != expected_head {
-        return refused(
-            sessions,
-            kind,
-            "The branch moved since the preview; nothing was changed. Preview the reset again."
-                .into(),
-        );
-    }
-    if resolve_commit(&work_root, &target_oid).as_deref() != Some(target_oid.as_str()) {
-        return refused(
-            sessions,
-            kind,
-            "The target commit is no longer reachable; preview the reset again.".into(),
-        );
-    }
-    let dirty_now = tracked_dirty_set(sessions)?;
-    if dirty_now != expected_dirty {
-        return refused(
-            sessions,
-            kind,
-            "The working copy changed since the preview; nothing was changed. Preview the reset again."
-                .into(),
-        );
-    }
-    if state.cancel_flag().load(Ordering::SeqCst) {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(OperationResult {
-            category: None,
-            suggestion: None,
-            operation_id: 0,
-            kind,
-            outcome: Outcome::Cancelled,
-            exit_code: None,
-            message: "Cancelled before Git ran.".into(),
-            details: None,
-            snapshot,
-        });
-    }
-    let outcome;
-    let message;
-    let mut exit_code = None;
-    let mut details = None;
-    match sequencer::run_git(&work_root, false, &["reset", "--hard", &target_oid], state) {
-        Ok(output) => {
-            exit_code = output.status.code();
-            if output.status.success() && !output.truncated {
-                outcome = Outcome::Success;
-                message = format!(
-                    "Hard reset to {}. Discarded the working-copy changes listed in the preview.",
-                    short(&target_oid)
-                );
-            } else {
-                outcome = Outcome::Failed;
-                message = "git reset --hard reported a failure.".into();
-                details = Some(write::first_stderr_line(&output.stderr));
+    write::confirm(
+        state,
+        sessions,
+        OperationKind::ResetHard,
+        nonce,
+        write::Refusals {
+            expired: "That confirmation has expired; preview the action again.",
+            session_changed: "A different repository is open now; preview the reset again.",
+            cancelled_before_git: "Cancelled before Git ran.",
+        },
+        |preview| match preview.bound {
+            write::Bound::ResetHard {
+                dirty,
+                target_oid,
+                head_oid,
+            } => Some((preview.work_root, (dirty, target_oid, head_oid))),
+            _ => None,
+        },
+        |work_root, (expected_dirty, target_oid, expected_head)| {
+            if let Some(refusal) = sequencer::in_progress_message(sessions)? {
+                return Ok(Err(refusal));
             }
-        }
-        Err(error) if error.code == "process_cancelled" => {
-            outcome = Outcome::Cancelled;
-            message = "Cancelled while the Git process was running. The reset may have partly applied; the refreshed snapshot shows the actual state.".into();
-        }
-        Err(error) => return Err(error),
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+            // The ticket promised exactly this HEAD, this target and this
+            // dirty set; anything else means the preview no longer describes
+            // reality.
+            let Some(head_now) = resolve_commit(work_root, "HEAD") else {
+                return Ok(Err(
+                    "HEAD no longer names a commit; preview the reset again.".to_owned(),
+                ));
+            };
+            if head_now != *expected_head {
+                return Ok(Err(
+                    "The branch moved since the preview; nothing was changed. Preview the reset again."
+                        .to_owned(),
+                ));
+            }
+            if resolve_commit(work_root, target_oid).as_deref() != Some(target_oid.as_str()) {
+                return Ok(Err(
+                    "The target commit is no longer reachable; preview the reset again.".to_owned(),
+                ));
+            }
+            let dirty_now = tracked_dirty_set(sessions)?;
+            if dirty_now != *expected_dirty {
+                return Ok(Err(
+                    "The working copy changed since the preview; nothing was changed. Preview the reset again."
+                        .to_owned(),
+                ));
+            }
+            Ok(Ok(()))
+        },
+        |work_root, (_, target_oid, _)| {
+            write::ran_from(
+                sequencer::run_git(work_root, false, &["reset", "--hard", target_oid], state),
+                write::Wording {
+                    ok: format!(
+                        "Hard reset to {}. Discarded the working-copy changes listed in the preview.",
+                        short(target_oid)
+                    ),
+                    failed: "git reset --hard reported a failure.".to_owned(),
+                    cancelled:
+                        "Cancelled while the Git process was running. The reset may have partly applied; the refreshed snapshot shows the actual state."
+                            .to_owned(),
+                },
+            )
+        },
+    )
 }
 
 #[cfg(test)]
@@ -625,7 +538,7 @@ mod tests {
         // (soft/mixed leave it to Git's own failure reporting).
         let ghost = "deadbeef".repeat(5);
         let error = preview_reset_hard(&writes, &sessions, version, &ghost).unwrap_err();
-        assert_eq!(error.code, "reset_target_missing");
+        assert_eq!(error.code.as_str(), "reset_target_missing");
         // But a branch name is a legitimate hard target.
         let preview = preview_reset_hard(&writes, &sessions, version, "main").unwrap();
         assert_eq!(
@@ -675,7 +588,7 @@ mod tests {
         // above re-read state, so the next call needs the newer version.
         let version = soft.snapshot.expect("re-read").version;
         let error = preview_reset_hard(&writes, &sessions, version, "main").unwrap_err();
-        assert_eq!(error.code, "reset_unborn");
+        assert_eq!(error.code.as_str(), "reset_unborn");
     }
 
     /// A cancel that arrives before Git starts is reported as `Cancelled`,

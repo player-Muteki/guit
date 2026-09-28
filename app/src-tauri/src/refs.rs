@@ -435,7 +435,8 @@ mod tests {
         assert_eq!(
             parse_listing(b"refs/heads/main\x1fcommit\x1fabc\n".as_slice())
                 .unwrap_err()
-                .code,
+                .code
+                .as_str(),
             "refs_protocol_error"
         );
         // Unknown namespace (patterns are supposed to prevent this).
@@ -444,13 +445,13 @@ mod tests {
             "a".repeat(40)
         );
         assert_eq!(
-            parse_listing(line.as_bytes()).unwrap_err().code,
+            parse_listing(line.as_bytes()).unwrap_err().code.as_str(),
             "refs_protocol_error"
         );
         // Malformed object id.
         let line = "refs/heads/main\u{1f}commit\u{1f}not-an-oid\u{1f}\u{1f}*\u{1f}\u{1f}\u{1f}\n";
         assert_eq!(
-            parse_listing(line.as_bytes()).unwrap_err().code,
+            parse_listing(line.as_bytes()).unwrap_err().code.as_str(),
             "refs_protocol_error"
         );
         // Unknown object type.
@@ -459,7 +460,7 @@ mod tests {
             "a".repeat(40)
         );
         assert_eq!(
-            parse_listing(line.as_bytes()).unwrap_err().code,
+            parse_listing(line.as_bytes()).unwrap_err().code.as_str(),
             "refs_protocol_error"
         );
         // Empty input is a legitimate empty listing (fresh unborn repo).

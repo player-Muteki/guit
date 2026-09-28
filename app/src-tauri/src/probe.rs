@@ -1,21 +1,67 @@
 use serde::Serialize;
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+/// A machine-readable error code. It is a string on the wire, in the log and
+/// in the diagnostics ring, and a typed value in the code: a small set of
+/// named constants for the codes that actually drive a decision, so those
+/// decision points cannot drift or misspell. Codes that are only ever
+/// displayed keep passing a plain string, which becomes a `Code` through
+/// `From` and is byte-for-byte what it always was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct Code(&'static str);
+
+impl Code {
+    /// The cancellation code the runner raises when a write is cancelled.
+    /// Every cancellation gate in the write lane matches on this constant.
+    pub const PROCESS_CANCELLED: Code = Code("process_cancelled");
+    pub const PROBE_TIMEOUT: Code = Code("probe_timeout");
+    pub const GIT_NOT_FOUND: Code = Code("git_not_found");
+    pub const TOOL_NOT_FOUND: Code = Code("tool_not_found");
+    pub const BRANCH_NAME_INVALID: Code = Code("branch_name_invalid");
+    pub const TAG_NAME_INVALID: Code = Code("tag_name_invalid");
+    /// The three refusals that mean "this is not an openable repository".
+    /// Session recovery treats them as "clear and start over" rather than as
+    /// an error the user must dismiss.
+    pub const REPO_PATH_MISSING: Code = Code("repo_path_missing");
+    pub const NOT_A_REPOSITORY: Code = Code("not_a_repository");
+    pub const REPO_WORKTREE_MISSING: Code = Code("repo_worktree_missing");
+
+    /// The code as it appears in logs, diagnostics and the wire.
+    pub const fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl From<&'static str> for Code {
+    fn from(code: &'static str) -> Self {
+        Code(code)
+    }
+}
+
+impl fmt::Display for Code {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProbeError {
-    pub code: &'static str,
+    pub code: Code,
     pub message: String,
 }
 
 impl ProbeError {
-    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(code: impl Into<Code>, message: impl Into<String>) -> Self {
+        let code = code.into();
         let message = redact(&message.into());
         eprintln!("guit [{code}]: {message}");
-        crate::diagnostics::error(code, &message);
+        crate::diagnostics::error(code.as_str(), &message);
         Self { code, message }
     }
 }
@@ -101,7 +147,7 @@ fn git_at_within(executable: &OsStr, timeout: Duration) -> Result<GitProbe, Prob
             Ok(output) => output,
             // Either spelling of "this program is not on PATH" means the same
             // thing for a probe: the Git we were asked about is not installed.
-            Err(error) if matches!(error.code, "git_not_found" | "tool_not_found") => {
+            Err(error) if matches!(error.code, Code::GIT_NOT_FOUND | Code::TOOL_NOT_FOUND) => {
                 return Ok(GitProbe {
                     available: false,
                     version: None,
@@ -111,7 +157,7 @@ fn git_at_within(executable: &OsStr, timeout: Duration) -> Result<GitProbe, Prob
                     message: "Git was not found. Install Git or add it to PATH.".into(),
                 });
             }
-            Err(error) if error.code == "probe_timeout" => {
+            Err(error) if error.code == Code::PROBE_TIMEOUT => {
                 return Err(ProbeError::new(
                     "git_unresponsive",
                     format!(
@@ -177,7 +223,7 @@ fn status_capability(executable: &OsStr, timeout: Duration) -> Result<bool, Prob
         // A Git that starts for `--version` and then fails to initialise a
         // repository is simply too old, which the guidance below says.
         Ok(_) => return Ok(false),
-        Err(error) if error.code == "probe_timeout" => return Ok(false),
+        Err(error) if error.code == Code::PROBE_TIMEOUT => return Ok(false),
         Err(error) => return Err(error),
     }
     let status = run_bounded(
@@ -331,7 +377,7 @@ fn process_with_deadlines(
         timeout_after,
         |_, _| {},
     ) {
-        Err(error) if error.code == "process_cancelled" => {
+        Err(error) if error.code == Code::PROCESS_CANCELLED => {
             return Ok("Git process cancelled and reaped.".into())
         }
         result => result?,
@@ -457,7 +503,7 @@ mod tests {
                 |_, _| {},
             )
         });
-        assert!(matches!(result, Err(error) if error.code == "probe_timeout"));
+        assert!(matches!(result, Err(error) if error.code == Code::PROBE_TIMEOUT));
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
@@ -497,10 +543,12 @@ mod tests {
                 match git_at_within(executable.as_os_str(), Duration::from_millis(200)) {
                     // The fixture was written moments ago; a spawn that never
                     // happened is not the outcome under test.
-                    Err(error) if error.code == "process_start_failed" => {
+                    Err(error) if error.code.as_str() == "process_start_failed" => {
                         std::thread::sleep(Duration::from_millis(20 * (attempt + 1)));
                     }
-                    answer => outcome = Some(answer.map(|_| ()).map_err(|error| error.code)),
+                    answer => {
+                        outcome = Some(answer.map(|_| ()).map_err(|error| error.code.as_str()))
+                    }
                 }
             }
             let _ = sender.send(outcome);
@@ -601,6 +649,46 @@ mod tests {
         assert!(process(&cancelled).unwrap().contains("cancelled"));
     }
 
+    /// A `Code` is a string on the wire, in the log and in the diagnostics
+    /// ring. The constants exist so the decision points that match on them
+    /// cannot misspell, but the *value* must stay the exact string the rest
+    /// of the system (and every recorded diagnostic) already uses, so this
+    /// pins both the constants' text and the transparent serialization.
+    #[test]
+    fn the_code_constants_serialize_to_their_exact_strings() {
+        for (code, expected) in [
+            (Code::PROCESS_CANCELLED, "process_cancelled"),
+            (Code::PROBE_TIMEOUT, "probe_timeout"),
+            (Code::GIT_NOT_FOUND, "git_not_found"),
+            (Code::TOOL_NOT_FOUND, "tool_not_found"),
+            (Code::BRANCH_NAME_INVALID, "branch_name_invalid"),
+            (Code::TAG_NAME_INVALID, "tag_name_invalid"),
+            (Code::REPO_PATH_MISSING, "repo_path_missing"),
+            (Code::NOT_A_REPOSITORY, "not_a_repository"),
+            (Code::REPO_WORKTREE_MISSING, "repo_worktree_missing"),
+        ] {
+            assert_eq!(code.as_str(), expected);
+            assert_eq!(
+                serde_json::to_string(&code).unwrap(),
+                format!("\"{expected}\"")
+            );
+            assert_eq!(code.to_string(), expected);
+        }
+    }
+
+    /// A code built from a plain string is the same value as the matching
+    /// constant, so a display-only site and a matching site can never
+    /// disagree about the spelling.
+    #[test]
+    fn a_plain_string_becomes_the_same_code_as_the_constant() {
+        let error = ProbeError::new("process_cancelled", "cancelled by the test");
+        assert_eq!(error.code, Code::PROCESS_CANCELLED);
+        assert_eq!(
+            serde_json::to_string(&error.code).unwrap(),
+            "\"process_cancelled\""
+        );
+    }
+
     #[test]
     fn process_probe_reads_git_output() {
         let cancelled = AtomicBool::new(false);
@@ -616,6 +704,6 @@ mod tests {
     fn process_probe_times_out() {
         let cancelled = AtomicBool::new(false);
         let result = process_with_deadlines(&cancelled, Duration::from_secs(3), Duration::ZERO);
-        assert_eq!(result.unwrap_err().code, "probe_timeout");
+        assert_eq!(result.unwrap_err().code.as_str(), "probe_timeout");
     }
 }

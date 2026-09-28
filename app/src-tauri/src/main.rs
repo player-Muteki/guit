@@ -28,7 +28,7 @@ mod watch;
 mod worktrees;
 mod write;
 
-use probe::{GitProbe, ProbeError, ToolProbe};
+use probe::{Code, GitProbe, ProbeError, ToolProbe};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -95,7 +95,7 @@ async fn restore_repository(
             Err(error)
                 if matches!(
                     error.code,
-                    "repo_path_missing" | "not_a_repository" | "repo_worktree_missing"
+                    Code::REPO_PATH_MISSING | Code::NOT_A_REPOSITORY | Code::REPO_WORKTREE_MISSING
                 ) =>
             {
                 session::clear_session(&directory)?;
@@ -209,7 +209,7 @@ fn write_window_settings(
         .sync_all()
         .map_err(|error| ProbeError::new("settings_write_failed", error.to_string()))?;
     temporary
-        .persist(&path)
+        .persist(path)
         .map(|_| ())
         .map_err(|error| ProbeError::new("settings_write_failed", error.to_string()))
 }
@@ -1750,12 +1750,15 @@ mod tests {
         assert!(read_window_settings(&path).unwrap().unwrap().always_on_top);
         std::fs::write(&path, b"invalid").unwrap();
         assert_eq!(
-            read_window_settings(&path).unwrap_err().code,
+            read_window_settings(&path).unwrap_err().code.as_str(),
             "settings_decode_failed"
         );
         settings.schema_version = 99;
         assert_eq!(
-            write_window_settings(&path, &settings).unwrap_err().code,
+            write_window_settings(&path, &settings)
+                .unwrap_err()
+                .code
+                .as_str(),
             "settings_invalid"
         );
     }
@@ -1771,7 +1774,7 @@ mod tests {
             br#"{"schemaVersion":2,"width":1234,"height":777,"x":10,"y":20,"alwaysOnTop":false}"#;
         std::fs::write(&path, bytes).unwrap();
         assert_eq!(
-            read_window_settings(&path).unwrap_err().code,
+            read_window_settings(&path).unwrap_err().code.as_str(),
             "settings_invalid"
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);

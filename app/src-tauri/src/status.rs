@@ -199,10 +199,10 @@ impl ExpectAscii for &[u8] {
     }
 }
 
-fn parse_record_2<'t>(
+fn parse_record_2(
     fields: Vec<&[u8]>,
     path: &[u8],
-    origins: &mut std::iter::Peekable<std::vec::IntoIter<&'t [u8]>>,
+    origins: &mut std::iter::Peekable<std::vec::IntoIter<&[u8]>>,
 ) -> Result<StatusEntry, ProbeError> {
     // <XY> <sub> <mH> <mI> <mW> <hH> <hI> <Xscore> then a NUL-separated origin path
     let [xy, sub, mh, mi, mw, hh, hi, score] = fields.as_slice() else {
@@ -488,17 +488,17 @@ mod tests {
                 continue;
             }
             let error = parse(&case).unwrap_err();
-            assert_eq!(error.code, "status_parse_failed");
+            assert_eq!(error.code.as_str(), "status_parse_failed");
         }
         // A rename record without its origin token must fail, not pass silently.
         let error = parse(&nul(&[&format!(
             "2 R. N... 100644 100644 100644 {ZERO} {OID} R100 new.txt"
         )]))
         .unwrap_err();
-        assert_eq!(error.code, "status_parse_failed");
+        assert_eq!(error.code.as_str(), "status_parse_failed");
         // Tracked output must not be accepted with an incomplete branch header.
         let error = parse(&nul(&["# branch.oid (initial)"])).unwrap_err();
-        assert_eq!(error.code, "status_parse_failed");
+        assert_eq!(error.code.as_str(), "status_parse_failed");
     }
 
     #[test]
@@ -752,7 +752,7 @@ mod stress {
         ] {
             let error = parse(&nul(&["# branch.oid (initial)", "# branch.head x", bad]))
                 .expect_err("malformed branch.ab must fail");
-            assert_eq!(error.code, "status_parse_failed", "{bad}");
+            assert_eq!(error.code.as_str(), "status_parse_failed", "{bad}");
         }
     }
 
@@ -808,7 +808,7 @@ mod stress {
             "? not-an-origin.txt",
         ]))
         .expect_err("X score is not a rename");
-        assert_eq!(error.code, "status_parse_failed");
+        assert_eq!(error.code.as_str(), "status_parse_failed");
     }
 
     use std::time::{Duration, Instant};

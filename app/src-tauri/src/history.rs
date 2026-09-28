@@ -169,8 +169,8 @@ fn folded_row(node: &Node, present: &std::collections::HashSet<&str>) -> GraphRo
 /// from there on is taken. Growth is the only way the width increases, and
 /// it is monotone, so column `c` is the same lane for the whole window.
 fn take_free(owner: &mut Vec<Option<&str>>, from: usize) -> usize {
-    for column in from..owner.len() {
-        if owner[column].is_none() {
+    for (column, slot) in owner.iter().enumerate().skip(from) {
+        if slot.is_none() {
             return column;
         }
     }
@@ -841,7 +841,7 @@ mod tests {
     fn parsing_rejects_short_records_instead_of_guessing() {
         let broken = b"abc\x1fdef"; // fewer than FIELD_COUNT fields
         let error = parse(broken, &plain_graph(4), 0, &[]).unwrap_err();
-        assert_eq!(error.code, "history_protocol_error");
+        assert_eq!(error.code.as_str(), "history_protocol_error");
         // Empty input and trailing separators parse to zero commits.
         assert_eq!(parse(&[], &plain_graph(4), 0, &[]).unwrap().len(), 0);
         assert_eq!(parse(b"\x00", &plain_graph(4), 0, &[]).unwrap().len(), 0);
@@ -858,7 +858,10 @@ mod tests {
             "a".repeat(40)
         );
         assert_eq!(
-            parse(one.as_bytes(), &[], 0, &[]).unwrap_err().code,
+            parse(one.as_bytes(), &[], 0, &[])
+                .unwrap_err()
+                .code
+                .as_str(),
             "history_graph_mismatch"
         );
     }
@@ -874,12 +877,12 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert_eq!(error.code, "history_page_failed");
+        assert_eq!(error.code.as_str(), "history_page_failed");
         assert!(!error.message.is_empty());
         // Unborn HEAD: the caller gates on the session branch state, the
         // raw page surfaces Git's refusal without pretending to be empty.
         let error = page(&repo, 0, None, 10, false).unwrap_err();
-        assert_eq!(error.code, "history_page_failed");
+        assert_eq!(error.code.as_str(), "history_page_failed");
     }
 
     #[test]
@@ -1067,7 +1070,7 @@ mod tests {
         touch(&repo, "a.txt", "one\n");
         commit_worktree(&repo, "only");
         let error = commit_files(&repo, &"f".repeat(40)).unwrap_err();
-        assert_eq!(error.code, "commit_files_failed");
+        assert_eq!(error.code.as_str(), "commit_files_failed");
         assert!(!error.message.is_empty());
     }
 
@@ -1077,7 +1080,7 @@ mod tests {
         // A bare NUL is not a stream diff-tree can produce: records always
         // pair a status with at least one path.
         assert_eq!(
-            parse_files(b"\x00").unwrap_err().code,
+            parse_files(b"\x00").unwrap_err().code.as_str(),
             "history_protocol_error"
         );
         let one = parse_files(b"M\x00a.txt\x00").unwrap();
@@ -1095,7 +1098,11 @@ mod tests {
             &b"M\x00\x00a"[..],          // empty path token
         ] {
             let error = parse_files(broken).unwrap_err();
-            assert_eq!(error.code, "history_protocol_error", "input: {broken:?}");
+            assert_eq!(
+                error.code.as_str(),
+                "history_protocol_error",
+                "input: {broken:?}"
+            );
         }
     }
 
@@ -1178,7 +1185,7 @@ mod tests {
         let merge = &rows[2];
         assert!(merge.merge);
         assert_eq!(merge.node, 0, "the merge sits on the mainline column");
-        assert_eq!(merge.exit, true, "its first parent continues downward");
+        assert!(merge.exit, "its first parent continues downward");
         assert_eq!(
             merge.branches,
             vec![1],
@@ -1377,7 +1384,7 @@ mod tests {
             &format!("{} {} extra\n", oid_of("a"), oid_of("b")),
         ] {
             assert_eq!(
-                parse_topology(broken.as_bytes()).unwrap_err().code,
+                parse_topology(broken.as_bytes()).unwrap_err().code.as_str(),
                 "history_protocol_error",
                 "input: {broken:?}"
             );

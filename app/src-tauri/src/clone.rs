@@ -1,4 +1,4 @@
-use crate::probe::{redact, ProbeError};
+use crate::probe::{redact, Code, ProbeError};
 use crate::repo::{self, user_git_command};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,14 +111,17 @@ fn residue_of(target: &Path) -> Option<String> {
     if !target.exists() {
         return None;
     }
-    let occupied = target
-        .is_dir()
-        .then(|| {
-            std::fs::read_dir(target)
-                .map(|mut entries| entries.next().is_some())
-                .unwrap_or(true)
-        })
-        .unwrap_or(true);
+    // A directory Git emptied is no residue; anything else is. A `read_dir`
+    // that fails cannot prove the directory is empty, so it fails closed and
+    // counts as residue.
+    let occupied = if target.is_dir() {
+        match std::fs::read_dir(target) {
+            Ok(mut entries) => entries.next().is_some(),
+            Err(_) => true,
+        }
+    } else {
+        true
+    };
     occupied.then(|| repo::to_display(target))
 }
 
@@ -233,7 +236,7 @@ fn clone_within_silence_limit(
                 )
             }
         }
-        Err(error) if error.code == "process_cancelled" => {
+        Err(error) if error.code == Code::PROCESS_CANCELLED => {
             if watch.stalled.load(Ordering::SeqCst) {
                 // Not the user: Git stopped talking, so guit stopped it.
                 // Saying "cancelled" here would hide the actual failure.
@@ -278,7 +281,7 @@ fn last_error_line(stderr: &[u8]) -> Option<String> {
         .flat_map(|line| line.rsplit('\r'))
         .map(|part| part.trim_end())
         .find(|part| !part.is_empty())
-        .map(|part| redact(part))
+        .map(redact)
 }
 
 #[cfg(test)]
@@ -411,7 +414,7 @@ mod tests {
             &mut |_| {},
         )
         .unwrap_err();
-        assert_eq!(error.code, "clone_target_occupied");
+        assert_eq!(error.code.as_str(), "clone_target_occupied");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::probe::ProbeError;
+use crate::probe::{Code, ProbeError};
 use crate::status::StatusEntry;
 use crate::write::{first_stderr_line, Outcome};
 use crate::{repo, runner, session, write};
@@ -220,7 +220,7 @@ fn run_commit_diff(
                             )
                         }
                     }
-                    Err(error) if error.code == "process_cancelled" => (
+                    Err(error) if error.code == Code::PROCESS_CANCELLED => (
                         Outcome::Cancelled,
                         None,
                         "Cancelled while the diff tool was running.".into(),
@@ -396,7 +396,7 @@ fn dispatch(
                         )
                     }
                 }
-                Err(error) if error.code == "process_cancelled" => (
+                Err(error) if error.code == Code::PROCESS_CANCELLED => (
                     Outcome::Cancelled,
                     None,
                     "Cancelled while the merge tool was running.".into(),
@@ -456,7 +456,7 @@ fn dispatch(
                             )
                         }
                     }
-                    Err(error) if error.code == "process_cancelled" => (
+                    Err(error) if error.code == Code::PROCESS_CANCELLED => (
                         Outcome::Cancelled,
                         None,
                         "Cancelled while the diff tool was running.".into(),
@@ -700,7 +700,7 @@ mod tests {
         let tools = ToolState::default();
         assert_eq!(tools.begin().unwrap(), 1);
         let error = tools.begin().unwrap_err();
-        assert_eq!(error.code, "tool_busy");
+        assert_eq!(error.code.as_str(), "tool_busy");
         tools.finish();
         assert_eq!(tools.begin().unwrap(), 2);
         tools.finish();
@@ -711,7 +711,7 @@ mod tests {
         let directory = init_repo();
         let path = directory.path().join("a.txt");
         let error = spawn_detached("guit-nonexistent-opener", &path).unwrap_err();
-        assert_eq!(error.code, "external_tool_failed");
+        assert_eq!(error.code.as_str(), "external_tool_failed");
         assert!(error.message.contains("guit-nonexistent-opener"));
     }
 

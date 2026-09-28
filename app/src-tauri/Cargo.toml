@@ -4,6 +4,10 @@ version = "0.0.1"
 description = "Lightweight Git desktop client"
 license = "MIT"
 edition = "2021"
+# The oldest toolchain this code is expected to build on. Nothing here needs
+# a recent release (the newest construct in use is let-else, stable in 1.65),
+# so the floor is set conservatively rather than tracking the local toolchain.
+rust-version = "1.83"
 
 [features]
 # Without this the binary points its webview at `devUrl` instead of serving the
@@ -26,3 +30,31 @@ notify = "8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Lints are a gate, not a suggestion: `cargo clippy --locked --all-targets` is
+# part of the build checks, so a warning that survives here reaches the release
+# binary and new code cannot quietly accumulate more. The groups chosen are
+# the ones that catch correctness and performance defects; pedantic and nursery
+# are deliberately left off because this crate is an application with no
+# public API to polish, and enabling them buys churn rather than safety.
+[lints.rust]
+unexpected_cfgs = "deny"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"
+style = "warn"
+complexity = "warn"
+perf = "warn"
+
+[profile.release]
+# Whole-program optimisation at a single codegen unit, so the hot paths in
+# history layout and status parsing are not split across a boundary that
+# inlining cannot cross. This lengthens the link noticeably; measure with
+# GUIT_PERF=1 before assuming it bought anything. `panic = "abort"` is
+# intentionally NOT set: the plugin layer relies on unwinding, and the design
+# rule that one panic must not leave a shared lock poisoned assumes it.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

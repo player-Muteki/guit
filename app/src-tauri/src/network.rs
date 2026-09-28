@@ -13,7 +13,7 @@
 //! `git remote` server-side and refuses anything not present. No refspec,
 //! URL or path ever arrives from the frontend.
 
-use crate::probe::ProbeError;
+use crate::probe::{Code, ProbeError};
 use crate::repo;
 use crate::runner;
 use crate::write::{self, OperationKind, OperationResult, Outcome, PreviewResult, WriteState};
@@ -184,7 +184,7 @@ fn sweep_fetch(
                     }
                 }
             }
-            Err(error) if error.code == "process_cancelled" => {
+            Err(error) if error.code == Code::PROCESS_CANCELLED => {
                 // Stop landed mid-transfer for this remote: it is neither
                 // fetched nor failed, and the sweep stops.
                 sweep.cancelled = true;
@@ -692,7 +692,7 @@ fn integrate_ff_only(
             annotate(&mut result, &output.stderr);
             Ok(result)
         }
-        Err(error) if error.code == "process_cancelled" => {
+        Err(error) if error.code == Code::PROCESS_CANCELLED => {
             let snapshot = session::refresh(sessions)?;
             Ok(pull_result(
                 Outcome::Cancelled,
@@ -893,7 +893,7 @@ fn push_leg(
                 cancelled: false,
             })
         }
-        Err(error) if error.code == "process_cancelled" => Ok(Leg {
+        Err(error) if error.code == Code::PROCESS_CANCELLED => Ok(Leg {
             ok: false,
             exit: None,
             stderr: Vec::new(),
@@ -950,6 +950,42 @@ fn annotate(result: &mut OperationResult, raw_stderr: &[u8]) {
         let category = netclassify::classify(raw_stderr);
         result.category = Some(category);
         result.suggestion = Some(category.suggestion().to_owned());
+    }
+}
+
+/// A completed push leg as the shared confirm flow wants it: the outcome and
+/// wording for each way the leg can end, with the failure classified from
+/// Git's own stderr so the suggestion layer still reaches the user.
+fn ran_from_leg(
+    leg: &Leg,
+    ok_message: String,
+    failed_message: String,
+    cancelled_message: String,
+) -> write::Ran {
+    let (outcome, message, details) = if leg.cancelled {
+        (Outcome::Cancelled, cancelled_message, None)
+    } else if leg.ok {
+        (Outcome::Success, ok_message, None)
+    } else {
+        (
+            Outcome::Failed,
+            failed_message,
+            Some(push_failure_line(&leg.stderr)),
+        )
+    };
+    let (category, suggestion) = if outcome == Outcome::Failed {
+        let category = netclassify::classify(&leg.stderr);
+        (Some(category), Some(category.suggestion().to_owned()))
+    } else {
+        (None, None)
+    };
+    write::Ran {
+        outcome,
+        message,
+        details,
+        exit_code: leg.exit,
+        category,
+        suggestion,
     }
 }
 
@@ -1323,93 +1359,59 @@ fn run_delete_remote_branch(
     askpass_bridge: Option<&askpass::Bridge>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<OperationResult, ProbeError> {
-    let Some((dir, remote, branch, oid)) = state.take_remote_branch_delete(nonce) else {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(op_result(
-            OperationKind::DeleteRemoteBranch,
-            Outcome::Rejected,
-            None,
-            "That confirmation has expired; preview the action again.".into(),
-            None,
-            snapshot,
-        ));
-    };
-    let same_repo = sessions
-        .current_identity()
-        .is_some_and(|identity| identity.work_root.as_deref() == Some(dir.as_path()));
-    let target = format!("{remote}/{branch}");
-    let unchanged = same_repo
-        && remotes::raw_names(&dir)?
-            .iter()
-            .any(|raw| raw.as_slice() == remote.as_bytes())
-        && refs::list(&dir)?
-            .remotes
-            .iter()
-            .any(|seen| seen.name == target && seen.oid == oid);
-    if !unchanged {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(op_result(
-            OperationKind::DeleteRemoteBranch,
-            Outcome::Rejected,
-            None,
-            "The remote branch changed after the preview; nothing was deleted.".into(),
-            None,
-            snapshot,
-        ));
-    }
-    if state.cancel_flag().load(Ordering::SeqCst) {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(op_result(
-            OperationKind::DeleteRemoteBranch,
-            Outcome::Cancelled,
-            None,
-            "Cancelled before Git ran; nothing was deleted.".into(),
-            None,
-            snapshot,
-        ));
-    }
-    let refspec = format!("refs/heads/{branch}");
-    let leg = push_leg(
+    write::confirm(
         state,
-        &dir,
-        &["--progress", &remote, "--delete", &refspec],
-        askpass_bridge,
-        on_line,
-    )?;
-    let snapshot = session::refresh(sessions)?;
-    let mut result = if leg.cancelled {
-        op_result(
-            OperationKind::DeleteRemoteBranch,
-            Outcome::Cancelled,
-            None,
-            format!(
-                "Cancelled while the delete was running; {target} may or may not still exist \
-                     on \"{remote}\"."
-            ),
-            None,
-            snapshot,
-        )
-    } else if leg.ok {
-        op_result(
-            OperationKind::DeleteRemoteBranch,
-            Outcome::Success,
-            leg.exit,
-            format!("Deleted {target} from \"{remote}\"."),
-            None,
-            snapshot,
-        )
-    } else {
-        op_result(
-            OperationKind::DeleteRemoteBranch,
-            Outcome::Failed,
-            leg.exit,
-            format!("git push --delete reported a failure; {target} was not removed."),
-            Some(push_failure_line(&leg.stderr)),
-            snapshot,
-        )
-    };
-    annotate(&mut result, &leg.stderr);
-    Ok(result)
+        sessions,
+        OperationKind::DeleteRemoteBranch,
+        nonce,
+        write::Refusals {
+            expired: "That confirmation has expired; preview the action again.",
+            session_changed: "The remote branch changed after the preview; nothing was deleted.",
+            cancelled_before_git: "Cancelled before Git ran; nothing was deleted.",
+        },
+        |preview| match preview.bound {
+            write::Bound::DeleteRemoteBranch {
+                remote,
+                branch,
+                oid,
+            } => Some((preview.work_root, (remote, branch, oid))),
+            _ => None,
+        },
+        |work_root, (remote, branch, oid)| {
+            let target = format!("{remote}/{branch}");
+            let unchanged = remotes::raw_names(work_root)?
+                .iter()
+                .any(|raw| raw.as_slice() == remote.as_bytes())
+                && refs::list(work_root)?
+                    .remotes
+                    .iter()
+                    .any(|seen| seen.name == target && seen.oid == *oid);
+            Ok(if unchanged {
+                Ok(())
+            } else {
+                Err("The remote branch changed after the preview; nothing was deleted.".to_owned())
+            })
+        },
+        |work_root, (remote, branch, _)| {
+            let refspec = format!("refs/heads/{branch}");
+            let target = format!("{remote}/{branch}");
+            let leg = push_leg(
+                state,
+                work_root,
+                &["--progress", remote, "--delete", &refspec],
+                askpass_bridge,
+                on_line,
+            )?;
+            Ok(ran_from_leg(
+                &leg,
+                format!("Deleted {target} from \"{remote}\"."),
+                format!("git push --delete reported a failure; {target} was not removed."),
+                format!(
+                    "Cancelled while the delete was running; {target} may or may not still exist on \"{remote}\"."
+                ),
+            ))
+        },
+    )
 }
 
 /// Commit lines in force-push previews: the count is exact, the subjects
@@ -1541,103 +1543,74 @@ fn run_force_push(
     askpass_bridge: Option<&askpass::Bridge>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<OperationResult, ProbeError> {
-    let Some((dir, remote, branch, local_oid, lease)) = state.take_force_push(nonce) else {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(op_result(
-            OperationKind::ForcePush,
-            Outcome::Rejected,
-            None,
-            "That confirmation has expired; preview the action again.".into(),
-            None,
-            snapshot,
-        ));
-    };
-    let same_repo = sessions
-        .current_identity()
-        .is_some_and(|identity| identity.work_root.as_deref() == Some(dir.as_path()));
-    let target = format!("{remote}/{branch}");
-    let listing = refs::list(&dir)?;
-    let unchanged = same_repo
-        && remotes::raw_names(&dir)?
-            .iter()
-            .any(|raw| raw.as_slice() == remote.as_bytes())
-        && listing.branches.iter().any(|seen| {
-            seen.head
-                && seen.name == branch
-                && seen.oid == local_oid
-                && seen.upstream.as_deref() == Some(target.as_str())
-        })
-        && listing
-            .remotes
-            .iter()
-            .any(|seen| seen.name == target && seen.oid == lease);
-    if !unchanged {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(op_result(
-            OperationKind::ForcePush,
-            Outcome::Rejected,
-            None,
-            "The branch or the remote changed after the preview; the force push was refused."
-                .into(),
-            None,
-            snapshot,
-        ));
-    }
-    if state.cancel_flag().load(Ordering::SeqCst) {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(op_result(
-            OperationKind::ForcePush,
-            Outcome::Cancelled,
-            None,
-            "Cancelled before Git ran; nothing was pushed.".into(),
-            None,
-            snapshot,
-        ));
-    }
-    // Measured on Git 2.53: the lease key must be the full ref name of the
-    // push target — the short form resolves to a different ref and guards
-    // nothing — hence this exact shape and the tests around it.
-    let lease_arg = format!("--force-with-lease=refs/heads/{branch}:{lease}");
-    let leg = push_leg(
+    write::confirm(
         state,
-        &dir,
-        &["--progress", &lease_arg, &remote, &branch],
-        askpass_bridge,
-        on_line,
-    )?;
-    let snapshot = session::refresh(sessions)?;
-    let mut result = if leg.cancelled {
-        op_result(
-            OperationKind::ForcePush,
-            Outcome::Cancelled,
-            None,
-            "Cancelled while the push was running; the remote may or may not have accepted the \
-             forced update."
-                .into(),
-            None,
-            snapshot,
-        )
-    } else if leg.ok {
-        op_result(
-            OperationKind::ForcePush,
-            Outcome::Success,
-            leg.exit,
-            format!("Force-pushed {branch} to {target} under the lease."),
-            None,
-            snapshot,
-        )
-    } else {
-        op_result(
-            OperationKind::ForcePush,
-            Outcome::Failed,
-            leg.exit,
-            "git push --force-with-lease reported a failure; the remote kept its history.".into(),
-            Some(push_failure_line(&leg.stderr)),
-            snapshot,
-        )
-    };
-    annotate(&mut result, &leg.stderr);
-    Ok(result)
+        sessions,
+        OperationKind::ForcePush,
+        nonce,
+        write::Refusals {
+            expired: "That confirmation has expired; preview the action again.",
+            session_changed:
+                "The branch or the remote changed after the preview; the force push was refused.",
+            cancelled_before_git: "Cancelled before Git ran; nothing was pushed.",
+        },
+        |preview| match preview.bound {
+            write::Bound::ForcePush {
+                remote,
+                branch,
+                local_oid,
+                lease_oid,
+            } => Some((preview.work_root, (remote, branch, local_oid, lease_oid))),
+            _ => None,
+        },
+        |work_root, (remote, branch, local_oid, lease)| {
+            let target = format!("{remote}/{branch}");
+            let listing = refs::list(work_root)?;
+            let unchanged = remotes::raw_names(work_root)?
+                .iter()
+                .any(|raw| raw.as_slice() == remote.as_bytes())
+                && listing.branches.iter().any(|seen| {
+                    seen.head
+                        && seen.name == *branch
+                        && seen.oid == *local_oid
+                        && seen.upstream.as_deref() == Some(target.as_str())
+                })
+                && listing
+                    .remotes
+                    .iter()
+                    .any(|seen| seen.name == target && seen.oid == *lease);
+            Ok(if unchanged {
+                Ok(())
+            } else {
+                Err(
+                    "The branch or the remote changed after the preview; the force push was refused."
+                        .to_owned(),
+                )
+            })
+        },
+        |work_root, (remote, branch, _, lease)| {
+            // Measured on Git 2.53: the lease key must be the full ref name of
+            // the push target — the short form resolves to a different ref and
+            // guards nothing — hence this exact shape and the tests around it.
+            let lease_arg = format!("--force-with-lease=refs/heads/{branch}:{lease}");
+            let target = format!("{remote}/{branch}");
+            let leg = push_leg(
+                state,
+                work_root,
+                &["--progress", &lease_arg, remote, branch],
+                askpass_bridge,
+                on_line,
+            )?;
+            Ok(ran_from_leg(
+                &leg,
+                format!("Force-pushed {branch} to {target} under the lease."),
+                "git push --force-with-lease reported a failure; the remote kept its history."
+                    .to_owned(),
+                "Cancelled while the push was running; the remote may or may not have accepted the forced update."
+                    .to_owned(),
+            ))
+        },
+    )
 }
 
 /// Binds (or clears) the upstream of one local branch. This only rewrites
@@ -1725,7 +1698,7 @@ fn run_set_upstream(
                         details = Some(write::first_stderr_line(&output.stderr));
                     }
                 }
-                Err(error) if error.code == "process_cancelled" => {
+                Err(error) if error.code == Code::PROCESS_CANCELLED => {
                     outcome = Outcome::Cancelled;
                     message =
                         "Cancelled while Git ran; the branch config may be half-changed.".into();
@@ -3111,13 +3084,18 @@ mod tests {
         for (target, code) in cases {
             let error = preview_delete_remote_branch(&state, &sessions, version, target.into())
                 .unwrap_err();
-            assert_eq!(error.code, code, "target {target} gave {:?}", error.code);
+            assert_eq!(
+                error.code.as_str(),
+                code,
+                "target {target} gave {:?}",
+                error.code
+            );
         }
         // The remote's default-branch marker is a symref, not a branch.
         git(&work, &["remote", "set-head", "origin", "main"]);
         let error = preview_delete_remote_branch(&state, &sessions, version, "origin/HEAD".into())
             .unwrap_err();
-        assert_eq!(error.code, "remote_ref_symref");
+        assert_eq!(error.code.as_str(), "remote_ref_symref");
         // A ref whose remote vanished from the config cannot be deleted either.
         let oid = branch_of(&work, "main").oid;
         git(
@@ -3126,7 +3104,7 @@ mod tests {
         );
         let error =
             preview_delete_remote_branch(&state, &sessions, version, "ghost/x".into()).unwrap_err();
-        assert_eq!(error.code, "remote_missing");
+        assert_eq!(error.code.as_str(), "remote_missing");
         // None of that staged anything: every error returned before the
         // stage call, so the only live tickets would answer to a nonce the
         // refused previews never handed out.
@@ -3303,7 +3281,7 @@ mod tests {
         git(&work, &["fetch", "-q", "--prune", "origin"]);
         let (state, sessions, version) = pull_env(&work);
         let error = preview_force_push(&state, &sessions, version).unwrap_err();
-        assert_eq!(error.code, "forcepush_no_tracking");
+        assert_eq!(error.code.as_str(), "forcepush_no_tracking");
     }
 
     #[test]
@@ -3431,7 +3409,7 @@ mod tests {
         let final_snapshot = pushed.snapshot.unwrap();
         let main = final_snapshot.branch.as_ref().unwrap();
         assert_eq!(
-            (main.ahead.clone(), main.behind.clone()),
+            (main.ahead, main.behind),
             (Some(0), Some(0)),
             "a synced repository reports zeros explicitly"
         );

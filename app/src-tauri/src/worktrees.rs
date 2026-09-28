@@ -9,9 +9,7 @@
 
 use crate::probe::ProbeError;
 use crate::repo::RepoIdentity;
-use crate::write::{
-    self, OperationKind, OperationResult, Outcome, PreviewKind, PreviewResult, WriteState,
-};
+use crate::write::{self, OperationKind, OperationResult, Outcome, PreviewResult, WriteState};
 use crate::{branches, history, sequencer, session};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -233,81 +231,55 @@ fn run_add(
     path: &str,
     target: &str,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    let gates = match sessions.commit_context(snapshot_version) {
-        Err(error) => Err(error.message),
+    let kind = OperationKind::WorktreeAdd;
+    let work_root = match sessions.commit_context(snapshot_version) {
+        Err(error) => return write::plain(sessions, kind, Outcome::Rejected, &error.message),
         Ok((work_root, unborn)) => {
             if unborn {
-                Err("Cannot add a worktree before the first commit.".into())
-            } else if let Err(refusal) = validate_path(path) {
-                Err(refusal.message)
-            } else if !sequencer::validate_target(&work_root, target) {
-                Err(
-                    "Worktrees check out a full commit id or an exact local branch name."
-                        .to_string(),
-                )
-            } else if state.cancel_flag().load(Ordering::SeqCst) {
-                // Not a refusal: report the cancel honestly after the refresh.
-                let snapshot = session::refresh(sessions)?;
-                return Ok(OperationResult {
-                    category: None,
-                    suggestion: None,
-                    operation_id: 0,
-                    kind: OperationKind::WorktreeAdd,
-                    outcome: Outcome::Cancelled,
-                    exit_code: None,
-                    message: "Cancelled before Git ran.".into(),
-                    details: None,
-                    snapshot,
-                });
-            } else {
-                Ok((work_root, ()))
+                return write::plain(
+                    sessions,
+                    kind,
+                    Outcome::Rejected,
+                    "Cannot add a worktree before the first commit.",
+                );
             }
+            if let Err(refusal) = validate_path(path) {
+                return write::plain(sessions, kind, Outcome::Rejected, &refusal.message);
+            }
+            if !sequencer::validate_target(&work_root, target) {
+                return write::plain(
+                    sessions,
+                    kind,
+                    Outcome::Rejected,
+                    "Worktrees check out a full commit id or an exact local branch name.",
+                );
+            }
+            work_root
         }
     };
-    match gates {
-        Err(refusal) => {
-            outcome = Outcome::Rejected;
-            message = refusal;
-        }
-        Ok((work_root, ())) => match branches::run_git(
+    if state.cancel_flag().load(Ordering::SeqCst) {
+        return write::plain(
+            sessions,
+            kind,
+            Outcome::Cancelled,
+            "Cancelled before Git ran.",
+        );
+    }
+    write::run_and_report(
+        sessions,
+        kind,
+        branches::run_git(
             &work_root,
             &["worktree", "add", path, target],
             state.cancel_flag(),
-        ) {
-            Ok(output) => {
-                exit_code = output.status.code();
-                if output.status.success() && !output.truncated {
-                    message = format!("Worktree added for {target}.");
-                } else {
-                    outcome = Outcome::Failed;
-                    message = "git worktree add reported a failure.".into();
-                    details = Some(write::first_stderr_line(&output.stderr));
-                }
-            }
-            Err(error) if error.code == "process_cancelled" => {
-                outcome = Outcome::Cancelled;
-                message =
-                    "Cancelled while Git ran; the new directory may be partially created.".into();
-            }
-            Err(error) => return Err(error),
+        ),
+        write::Wording {
+            ok: format!("Worktree added for {target}."),
+            failed: "git worktree add reported a failure.".to_owned(),
+            cancelled: "Cancelled while Git ran; the new directory may be partially created."
+                .to_owned(),
         },
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::WorktreeAdd,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+    )
 }
 
 pub(crate) fn preview_remove_worktree(
@@ -358,13 +330,7 @@ pub(crate) fn preview_remove_worktree(
             "This is the work tree guit has open; remove it from that checkout, not this one.",
         ));
     }
-    let nonce = state.stage_ref_delete(
-        PreviewKind::RemoveWorktree,
-        dir.clone(),
-        entry.path.clone(),
-        head.clone(),
-        false,
-    );
+    let nonce = state.stage_worktree_remove(dir.clone(), entry.path.clone(), head.clone());
     let snapshot = session::refresh(sessions)?
         .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
     Ok(PreviewResult {
@@ -395,78 +361,59 @@ fn run_remove(
     sessions: &session::SessionState,
     nonce: &str,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    let Some((dir, path, head, _force)) = state.take_ref_delete(nonce, PreviewKind::RemoveWorktree)
-    else {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(OperationResult {
-            category: None,
-            suggestion: None,
-            operation_id: 0,
-            kind: OperationKind::WorktreeRemove,
-            outcome: Outcome::Rejected,
-            exit_code: None,
-            message: "That confirmation has expired; preview the action again.".into(),
-            details: None,
-            snapshot,
-        });
-    };
-    let same_repo = sessions
-        .current_identity()
-        .is_some_and(|identity| identity.work_root.as_deref() == Some(dir.as_path()));
-    let fresh = worktree_list(&session_directory(sessions)?)?;
-    let unchanged = fresh
-        .iter()
-        .any(|view| view.path == path && view.head.as_deref() == Some(head.as_str()));
-    let still_current = sessions
-        .current_identity()
-        .and_then(|identity| identity.work_root)
-        .is_some_and(|work_root| path == work_root.to_string_lossy().into_owned());
-    if !same_repo || !unchanged {
-        outcome = Outcome::Rejected;
-        message = "The worktree list changed after the preview; nothing was removed.".into();
-    } else if still_current {
-        outcome = Outcome::Rejected;
-        message = "This is the work tree guit has open; removal was refused.".into();
-    } else if state.cancel_flag().load(Ordering::SeqCst) {
-        outcome = Outcome::Cancelled;
-        message = "Cancelled before Git ran.".into();
-    } else {
-        match branches::run_git(&dir, &["worktree", "remove", &path], state.cancel_flag()) {
-            Ok(output) => {
-                exit_code = output.status.code();
-                if output.status.success() && !output.truncated {
-                    message = "Worktree removed.".into();
-                } else {
-                    outcome = Outcome::Failed;
+    write::confirm(
+        state,
+        sessions,
+        OperationKind::WorktreeRemove,
+        nonce,
+        write::Refusals {
+            expired: "That confirmation has expired; preview the action again.",
+            session_changed:
+                "The repository session changed after the preview; the worktree was untouched.",
+            cancelled_before_git: "Cancelled before Git ran.",
+        },
+        |preview| match preview.bound {
+            write::Bound::WorktreeRemove { path, head } => Some((preview.work_root, (path, head))),
+            _ => None,
+        },
+        |_work_root, (path, head)| {
+            let fresh = worktree_list(&session_directory(sessions)?)?;
+            let unchanged = fresh
+                .iter()
+                .any(|view| view.path == *path && view.head.as_deref() == Some(head.as_str()));
+            if !unchanged {
+                return Ok(Err(
+                    "The worktree list changed after the preview; nothing was removed.".to_owned(),
+                ));
+            }
+            let still_current = sessions
+                .current_identity()
+                .and_then(|identity| identity.work_root)
+                .is_some_and(|work_root| *path == work_root.to_string_lossy().into_owned());
+            Ok(if still_current {
+                Err("This is the work tree guit has open; removal was refused.".to_owned())
+            } else {
+                Ok(())
+            })
+        },
+        |work_root, (path, _)| {
+            write::ran_from(
+                branches::run_git(
+                    work_root,
+                    &["worktree", "remove", path],
+                    state.cancel_flag(),
+                ),
+                write::Wording {
+                    ok: "Worktree removed.".to_owned(),
                     // Git's own refusal (dirty contents, locked, ...) is the
                     // authoritative reason; there is no force path here.
-                    message = "git worktree remove reported a failure.".into();
-                    details = Some(write::first_stderr_line(&output.stderr));
-                }
-            }
-            Err(error) if error.code == "process_cancelled" => {
-                outcome = Outcome::Cancelled;
-                message = "Cancelled while Git ran; the worktree may be partially removed.".into();
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::WorktreeRemove,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+                    failed: "git worktree remove reported a failure.".to_owned(),
+                    cancelled: "Cancelled while Git ran; the worktree may be partially removed."
+                        .to_owned(),
+                },
+            )
+        },
+    )
 }
 
 pub(crate) fn prune_worktrees(
@@ -492,63 +439,47 @@ fn run_prune(
     sessions: &session::SessionState,
     snapshot_version: u64,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    match sessions.commit_context(snapshot_version) {
-        Err(error) => {
-            outcome = Outcome::Rejected;
-            message = error.message;
-        }
+    let kind = OperationKind::WorktreePrune;
+    let work_root = match sessions.commit_context(snapshot_version) {
+        Err(error) => return write::plain(sessions, kind, Outcome::Rejected, &error.message),
         Ok((work_root, unborn)) => {
             if unborn {
-                outcome = Outcome::Rejected;
-                message = "Cannot prune worktrees before the first commit.".into();
-            } else if state.cancel_flag().load(Ordering::SeqCst) {
-                outcome = Outcome::Cancelled;
-                message = "Cancelled before Git ran.".into();
-            } else {
-                let stale = worktree_list(&work_root)?
-                    .iter()
-                    .filter(|view| view.prunable)
-                    .count();
-                match branches::run_git(&work_root, &["worktree", "prune"], state.cancel_flag()) {
-                    Ok(output) => {
-                        exit_code = output.status.code();
-                        if output.status.success() && !output.truncated {
-                            message = if stale == 0 {
-                                "No stale worktree records.".into()
-                            } else {
-                                format!("Pruned {stale} stale worktree record(s).")
-                            };
-                        } else {
-                            outcome = Outcome::Failed;
-                            message = "git worktree prune reported a failure.".into();
-                            details = Some(write::first_stderr_line(&output.stderr));
-                        }
-                    }
-                    Err(error) if error.code == "process_cancelled" => {
-                        outcome = Outcome::Cancelled;
-                        message = "Cancelled while Git ran; some stale records may remain.".into();
-                    }
-                    Err(error) => return Err(error),
-                }
+                return write::plain(
+                    sessions,
+                    kind,
+                    Outcome::Rejected,
+                    "Cannot prune worktrees before the first commit.",
+                );
             }
+            work_root
         }
+    };
+    if state.cancel_flag().load(Ordering::SeqCst) {
+        return write::plain(
+            sessions,
+            kind,
+            Outcome::Cancelled,
+            "Cancelled before Git ran.",
+        );
     }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::WorktreePrune,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+    let stale = worktree_list(&work_root)?
+        .iter()
+        .filter(|view| view.prunable)
+        .count();
+    write::run_and_report(
+        sessions,
+        kind,
+        branches::run_git(&work_root, &["worktree", "prune"], state.cancel_flag()),
+        write::Wording {
+            ok: if stale == 0 {
+                "No stale worktree records.".to_owned()
+            } else {
+                format!("Pruned {stale} stale worktree record(s).")
+            },
+            failed: "git worktree prune reported a failure.".to_owned(),
+            cancelled: "Cancelled while Git ran; some stale records may remain.".to_owned(),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -604,7 +535,7 @@ mod tests {
         assert!(views[2].bare);
         assert_eq!(views[2].head, None, "Git 2.53 prints no HEAD line for bare");
         assert_eq!(views[2].index, 2);
-        let orphan = parse_porcelain(format!("worktree /o\norphan\n").as_bytes()).unwrap();
+        let orphan = parse_porcelain("worktree /o\norphan\n".as_bytes()).unwrap();
         assert_eq!(orphan.len(), 1);
         assert!(orphan[0].orphan && orphan[0].head.is_none());
     }
@@ -618,7 +549,9 @@ mod tests {
             // missing HEAD
             b"worktree /r\nbranch refs/heads/main\n".to_vec(),
             // bad oid
-            format!("worktree /r\nHEAD not-hex\nbranch refs/heads/main\n").into_bytes(),
+            "worktree /r\nHEAD not-hex\nbranch refs/heads/main\n"
+                .as_bytes()
+                .to_vec(),
             // branch outside refs/heads
             format!("worktree /r\n{good_head}\nbranch refs/remotes/origin/x\n").into_bytes(),
             // detached and branch together
@@ -628,7 +561,11 @@ mod tests {
         ];
         for case in cases {
             assert_eq!(
-                parse_porcelain(&case).map(|_| ()).unwrap_err().code,
+                parse_porcelain(&case)
+                    .map(|_| ())
+                    .unwrap_err()
+                    .code
+                    .as_str(),
                 "worktree_protocol_error",
                 "must refuse: {case:?}"
             );
@@ -748,7 +685,7 @@ mod tests {
 
         // The session's own worktree can never be the removal target.
         let error = preview_remove_worktree(&state, &sessions, version, 0).unwrap_err();
-        assert_eq!(error.code, "worktree_current");
+        assert_eq!(error.code.as_str(), "worktree_current");
 
         let preview = preview_remove_worktree(&state, &sessions, version, 1).unwrap();
         assert_eq!(preview.candidates, vec![wt.display().to_string()]);
@@ -830,7 +767,7 @@ mod tests {
             .expect("snapshot")
             .version;
         let error = preview_remove_worktree(&state, &sessions, version, 0).unwrap_err();
-        assert_eq!(error.code, "write_bare_repo");
+        assert_eq!(error.code.as_str(), "write_bare_repo");
     }
 
     #[test]

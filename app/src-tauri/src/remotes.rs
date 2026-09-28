@@ -220,61 +220,37 @@ fn run_config_op(
     build: &dyn Fn(&Path) -> Result<Vec<String>, ProbeError>,
     success: &dyn Fn() -> String,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    match sessions
+    let (work_root, args) = match sessions
         .commit_context(snapshot_version)
         .and_then(|(work_root, _unborn)| build(&work_root).map(|args| (work_root, args)))
     {
-        Err(error) => {
-            outcome = Outcome::Rejected;
-            message = error.message;
-        }
-        Ok((work_root, args)) => {
-            if state
-                .cancel_flag()
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                outcome = Outcome::Cancelled;
-                message = "Cancelled before Git ran.".into();
-            } else {
-                let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-                match branches::run_git(&work_root, &argv, state.cancel_flag()) {
-                    Ok(output) => {
-                        exit_code = output.status.code();
-                        if output.status.success() && !output.truncated {
-                            message = success();
-                        } else {
-                            outcome = Outcome::Failed;
-                            message = format!("git remote {verb} reported a failure.");
-                            details = Some(write::first_stderr_line(&output.stderr));
-                        }
-                    }
-                    Err(error) if error.code == "process_cancelled" => {
-                        outcome = Outcome::Cancelled;
-                        message = "Cancelled while the Git process was running; the config may \
-                             be half-changed."
-                            .into();
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
+        Ok(resolved) => resolved,
+        Err(error) => return write::plain(sessions, kind, Outcome::Rejected, &error.message),
+    };
+    if state
+        .cancel_flag()
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return write::plain(
+            sessions,
+            kind,
+            Outcome::Cancelled,
+            "Cancelled before Git ran.",
+        );
     }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    write::run_and_report(
+        sessions,
         kind,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+        branches::run_git(&work_root, &argv, state.cancel_flag()),
+        write::Wording {
+            ok: success(),
+            failed: format!("git remote {verb} reported a failure."),
+            cancelled:
+                "Cancelled while the Git process was running; the config may be half-changed."
+                    .to_owned(),
+        },
+    )
 }
 
 pub(crate) fn remote_add(
@@ -428,73 +404,51 @@ fn run_remove(
     sessions: &session::SessionState,
     nonce: &str,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    let Some((dir, name, url, tracking)) = state.take_remote_remove(nonce) else {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(OperationResult {
-            category: None,
-            suggestion: None,
-            operation_id: 0,
-            kind: OperationKind::RemoteRemove,
-            outcome: Outcome::Rejected,
-            exit_code: None,
-            message: "That confirmation has expired; preview the action again.".into(),
-            details: None,
-            snapshot,
-        });
-    };
-    let same_repo = sessions
-        .current_identity()
-        .is_some_and(|identity| identity.work_root.as_deref() == Some(dir.as_path()));
-    // Re-check everything the ticket bound: the remote must still exist,
-    // still carry the same URL and the same remote-tracking ref set.
-    let unchanged = same_repo
-        && exists(&dir, &name)?
-        && get_url(&dir, &name, false)?.unwrap_or_default() == url
-        && tracking_refs(&dir, &name)? == tracking;
-    if !unchanged {
-        outcome = Outcome::Rejected;
-        message = "The remote or its refs changed after the preview; nothing was removed.".into();
-    } else if state
-        .cancel_flag()
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        outcome = Outcome::Cancelled;
-        message = "Cancelled before Git ran.".into();
-    } else {
-        match branches::run_git(&dir, &["remote", "remove", &name], state.cancel_flag()) {
-            Ok(output) => {
-                exit_code = output.status.code();
-                if output.status.success() && !output.truncated {
-                    message = format!("Remote \"{name}\" and its remote-tracking refs removed.");
-                } else {
-                    outcome = Outcome::Failed;
-                    message = "git remote remove reported a failure.".into();
-                    details = Some(write::first_stderr_line(&output.stderr));
-                }
-            }
-            Err(error) if error.code == "process_cancelled" => {
-                outcome = Outcome::Cancelled;
-                message = "Cancelled while Git ran; check the remote list.".into();
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::RemoteRemove,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+    write::confirm(
+        state,
+        sessions,
+        OperationKind::RemoteRemove,
+        nonce,
+        write::Refusals {
+            expired: "That confirmation has expired; preview the action again.",
+            session_changed:
+                "The repository session changed after the preview; the remote was untouched.",
+            cancelled_before_git: "Cancelled before Git ran.",
+        },
+        |preview| match preview.bound {
+            write::Bound::RemoveRemote {
+                name,
+                url,
+                tracking,
+            } => Some((preview.work_root, (name, url, tracking))),
+            _ => None,
+        },
+        |work_root, (name, url, tracking)| {
+            // Re-check everything the ticket bound: the remote must still
+            // exist, still carry the same URL and the same tracking set.
+            let unchanged = exists(work_root, name)?
+                && get_url(work_root, name, false)?.unwrap_or_default() == *url
+                && tracking_refs(work_root, name)? == *tracking;
+            Ok(if unchanged {
+                Ok(())
+            } else {
+                Err(
+                    "The remote or its refs changed after the preview; nothing was removed."
+                        .to_owned(),
+                )
+            })
+        },
+        |work_root, (name, _, _)| {
+            write::ran_from(
+                branches::run_git(work_root, &["remote", "remove", name], state.cancel_flag()),
+                write::Wording {
+                    ok: format!("Remote \"{name}\" and its remote-tracking refs removed."),
+                    failed: "git remote remove reported a failure.".to_owned(),
+                    cancelled: "Cancelled while Git ran; check the remote list.".to_owned(),
+                },
+            )
+        },
+    )
 }
 
 #[cfg(test)]
@@ -538,7 +492,7 @@ mod tests {
     fn name_gate_matrix() {
         let long = "x".repeat(MAX_NAME_LEN);
         for good in ["origin", "up.stream", "a-b_c", long.as_str()] {
-            validate_remote_name(&good)
+            validate_remote_name(good)
                 .unwrap_or_else(|error| panic!("must accept {good}: {}", error.message));
         }
         for bad in [
@@ -557,7 +511,11 @@ mod tests {
             "ctrl\x01char",
         ] {
             assert_eq!(
-                validate_remote_name(bad).map(|_| ()).unwrap_err().code,
+                validate_remote_name(bad)
+                    .map(|_| ())
+                    .unwrap_err()
+                    .code
+                    .as_str(),
                 "remote_name_invalid",
                 "must refuse {bad:?}"
             );
@@ -598,7 +556,11 @@ mod tests {
             ("https://example.invalid/x\x01", "remote_url_invalid"),
         ] {
             assert_eq!(
-                validate_remote_url(bad).map(|_| ()).unwrap_err().code,
+                validate_remote_url(bad)
+                    .map(|_| ())
+                    .unwrap_err()
+                    .code
+                    .as_str(),
                 code,
                 "must refuse {bad:?}"
             );
@@ -871,7 +833,7 @@ mod tests {
         // version keeps the next gate on the bare guard, not the version one.
         let version = result.snapshot.expect("re-read").version;
         let error = preview_remove_remote(&state, &sessions, version, "origin".into()).unwrap_err();
-        assert_eq!(error.code, "write_bare_repo");
+        assert_eq!(error.code.as_str(), "write_bare_repo");
     }
 
     #[test]

@@ -8,17 +8,12 @@
 //! snapshot attached; the banner — not an error dialog — offers the next
 //! step. Start commands refuse to run while any operation is in progress.
 
-use crate::probe::ProbeError;
+use crate::probe::{Code, ProbeError};
 use crate::runner;
 use crate::write::{self, OperationKind, OperationResult, Outcome, WriteState};
 use crate::{branches, history, inflight, model::FileGroup, repo, session};
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
-
-/// Sequencer steps can rewrite whole histories; allow far longer than the
-/// 60 s read budget while keeping the shared output limit.
-const SEQUENCE_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub(crate) fn run_git(
     work_root: &Path,
@@ -26,19 +21,9 @@ pub(crate) fn run_git(
     args: &[&str],
     state: &WriteState,
 ) -> Result<runner::CapturedOutput, ProbeError> {
-    let mut command = if noninteractive {
-        repo::user_git_command_noninteractive(work_root)
-    } else {
-        repo::user_git_command(work_root)
-    };
-    command.args(args);
-    runner::run_with_limit(
-        command,
-        state.cancel_flag(),
-        Duration::ZERO,
-        SEQUENCE_TIMEOUT,
-        runner::DEFAULT_OUTPUT_LIMIT,
-        |_, _| {},
+    repo::git(
+        work_root,
+        repo::GitRun::sequence(args, state.cancel_flag(), noninteractive),
     )
 }
 
@@ -326,7 +311,7 @@ pub(crate) fn start_in_slot(
                             snapshot,
                         });
                     }
-                    Err(error) if error.code == "process_cancelled" => {
+                    Err(error) if error.code == Code::PROCESS_CANCELLED => {
                         outcome = Outcome::Cancelled;
                         message = "Cancelled while the Git process was running.".into();
                     }
@@ -517,7 +502,7 @@ fn run_step_inner(
                                     snapshot,
                                 });
                             }
-                            Err(error) if error.code == "process_cancelled" => {
+                            Err(error) if error.code == Code::PROCESS_CANCELLED => {
                                 outcome = Outcome::Cancelled;
                                 message = "Cancelled while the Git process was running.".into();
                             }

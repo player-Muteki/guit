@@ -5,7 +5,7 @@
 //! preview → recheck → confirm ticket flow, safe `-d` first, and `-D` only
 //! behind a separately confirmed force preview bound to the same object id.
 
-use crate::probe::ProbeError;
+use crate::probe::{Code, ProbeError};
 use crate::write::{OperationKind, OperationResult, Outcome, PreviewResult, WriteState};
 use crate::{history, refs, repo, runner, session};
 use std::path::Path;
@@ -100,16 +100,7 @@ pub(crate) fn run_git(
     args: &[&str],
     cancelled: &AtomicBool,
 ) -> Result<runner::CapturedOutput, ProbeError> {
-    let mut command = repo::user_git_command(work_root);
-    command.args(args);
-    runner::run_with_limit(
-        command,
-        cancelled,
-        Duration::ZERO,
-        Duration::from_secs(60),
-        runner::DEFAULT_OUTPUT_LIMIT,
-        |_, _| {},
-    )
+    repo::git(work_root, repo::GitRun::read(args, cancelled))
 }
 
 enum BranchOp<'a> {
@@ -222,69 +213,46 @@ fn run(
     op: &BranchOp<'_>,
     kind: OperationKind,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
     // Session/version/bare gates, identical to commit-style writes.
-    match sessions.commit_context(snapshot_version) {
+    let (work_root, _unborn) = match sessions.commit_context(snapshot_version) {
+        Ok(context) => context,
         Err(error) => {
-            outcome = Outcome::Rejected;
-            message = error.message;
+            return crate::write::plain(sessions, kind, Outcome::Rejected, &error.message)
         }
-        Ok((work_root, _unborn)) => {
-            if state.cancel_flag().load(Ordering::SeqCst) {
-                outcome = Outcome::Cancelled;
-                message = "Cancelled before Git ran.".into();
-            } else {
-                match prepare(&work_root, op) {
-                    Err(PrepareError::Rejected(error)) => {
-                        // A clean refusal the user must see; the message
-                        // never contains a filesystem path.
-                        outcome = Outcome::Rejected;
-                        message = error.message;
-                    }
-                    Err(PrepareError::Failed(error)) => return Err(error),
-                    Ok(args) => {
-                        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                        match run_git(&work_root, &args, state.cancel_flag()) {
-                            Ok(output) => {
-                                exit_code = output.status.code();
-                                if output.status.success() && !output.truncated {
-                                    message = match kind {
-                                        OperationKind::BranchCreate => "Branch created.".into(),
-                                        OperationKind::BranchSwitch => "Switched branch.".into(),
-                                        _ => "Branch renamed.".into(),
-                                    };
-                                } else {
-                                    outcome = Outcome::Failed;
-                                    message = format!("{} reported a failure.", args[0]);
-                                    details = Some(crate::write::first_stderr_line(&output.stderr));
-                                }
-                            }
-                            Err(error) if error.code == "process_cancelled" => {
-                                outcome = Outcome::Cancelled;
-                                message = "Cancelled while the Git process was running.".into();
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                }
-            }
-        }
+    };
+    if state.cancel_flag().load(Ordering::SeqCst) {
+        return crate::write::plain(
+            sessions,
+            kind,
+            Outcome::Cancelled,
+            "Cancelled before Git ran.",
+        );
     }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
+    let args = match prepare(&work_root, op) {
+        Ok(args) => args,
+        // A clean refusal the user must see; the message never contains a
+        // filesystem path.
+        Err(PrepareError::Rejected(error)) => {
+            return crate::write::plain(sessions, kind, Outcome::Rejected, &error.message)
+        }
+        Err(PrepareError::Failed(error)) => return Err(error),
+    };
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let verb = args[0].to_owned();
+    crate::write::run_and_report(
+        sessions,
         kind,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+        run_git(&work_root, &args, state.cancel_flag()),
+        crate::write::Wording {
+            ok: match kind {
+                OperationKind::BranchCreate => "Branch created.".to_owned(),
+                OperationKind::BranchSwitch => "Switched branch.".to_owned(),
+                _ => "Branch renamed.".to_owned(),
+            },
+            failed: format!("{verb} reported a failure."),
+            cancelled: "Cancelled while the Git process was running.".to_owned(),
+        },
+    )
 }
 
 /// Everything that must hold before a branch Git process may start: name
@@ -306,7 +274,7 @@ fn refuse(error: ProbeError) -> PrepareError {
 /// said the *name* is bad; a broken process pipeline is not.
 fn validate_prepared(work_root: &Path, name: &str) -> Result<(), PrepareError> {
     validate_branch_name(work_root, name).map_err(|error| {
-        if error.code == "branch_name_invalid" {
+        if error.code == Code::BRANCH_NAME_INVALID {
             PrepareError::Rejected(error)
         } else {
             PrepareError::Failed(error)
@@ -395,7 +363,7 @@ pub(crate) fn preview_delete_branch(
         ));
     }
     let nonce = state.stage_ref_delete(
-        crate::write::PreviewKind::DeleteBranch,
+        crate::write::RefTarget::Branch,
         work_root,
         name.to_owned(),
         branch.oid.clone(),
@@ -434,81 +402,53 @@ fn run_delete(
     sessions: &session::SessionState,
     nonce: &str,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    let Some((work_root, name, oid, force)) =
-        state.take_ref_delete(nonce, crate::write::PreviewKind::DeleteBranch)
-    else {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(OperationResult {
-            category: None,
-            suggestion: None,
-            operation_id: 0,
-            kind: OperationKind::BranchDelete,
-            outcome: Outcome::Rejected,
-            exit_code: None,
-            message: "That confirmation has expired; preview the deletion again.".into(),
-            details: None,
-            snapshot,
-        });
-    };
-    let same_repo = sessions
-        .current_identity()
-        .is_some_and(|identity| identity.work_root.as_deref() == Some(work_root.as_path()));
-    if !same_repo {
-        outcome = Outcome::Rejected;
-        message = "The repository session changed after the preview; no branch was deleted.".into();
-    } else {
-        let listing = match refs::list(&work_root) {
-            Ok(listing) => listing,
-            Err(error) => return Err(error),
-        };
-        let unchanged = match unique_branch(&listing, &name) {
-            Ok(branch) => branch.oid == oid && !branch.head,
-            Err(_) => false,
-        };
-        if !unchanged {
-            outcome = Outcome::Rejected;
-            message =
-                "The branch changed after the preview; nothing was deleted. Confirm again.".into();
-        } else if state.cancel_flag().load(Ordering::SeqCst) {
-            outcome = Outcome::Cancelled;
-            message = "Cancelled before Git ran.".into();
-        } else {
-            let mode = if force { "-D" } else { "-d" };
-            match run_git(&work_root, &["branch", mode, &name], state.cancel_flag()) {
-                Ok(output) => {
-                    exit_code = output.status.code();
-                    if output.status.success() && !output.truncated {
-                        message = "Branch deleted.".into();
-                    } else {
-                        outcome = Outcome::Failed;
-                        message = "branch reported a failure.".into();
-                        details = Some(crate::write::first_stderr_line(&output.stderr));
-                    }
-                }
-                Err(error) if error.code == "process_cancelled" => {
-                    outcome = Outcome::Cancelled;
-                    message = "Cancelled while the Git process was running.".into();
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::BranchDelete,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+    crate::write::confirm(
+        state,
+        sessions,
+        OperationKind::BranchDelete,
+        nonce,
+        crate::write::Refusals {
+            expired: "That confirmation has expired; preview the deletion again.",
+            session_changed:
+                "The repository session changed after the preview; no branch was deleted.",
+            cancelled_before_git: "Cancelled before Git ran.",
+        },
+        |preview| match preview.bound {
+            crate::write::Bound::RefDelete {
+                target: crate::write::RefTarget::Branch,
+                name,
+                oid,
+                force,
+            } => Some((preview.work_root, (name, oid, force))),
+            _ => None,
+        },
+        |work_root, (name, oid, _)| {
+            let listing = refs::list(work_root)?;
+            let unchanged = match unique_branch(&listing, name) {
+                Ok(branch) => branch.oid == *oid && !branch.head,
+                Err(_) => false,
+            };
+            Ok(if unchanged {
+                Ok(())
+            } else {
+                Err(
+                    "The branch changed after the preview; nothing was deleted. Confirm again."
+                        .to_owned(),
+                )
+            })
+        },
+        |work_root, (name, _, force)| {
+            let mode = if *force { "-D" } else { "-d" };
+            crate::write::ran_from(
+                run_git(work_root, &["branch", mode, name], state.cancel_flag()),
+                crate::write::Wording {
+                    ok: "Branch deleted.".to_owned(),
+                    failed: "branch reported a failure.".to_owned(),
+                    cancelled: "Cancelled while the Git process was running.".to_owned(),
+                },
+            )
+        },
+    )
 }
 
 #[cfg(test)]
@@ -713,7 +653,7 @@ mod tests {
         let writes = WriteState::default();
 
         let checked_out = preview_delete_branch(&writes, &sessions, view.version, "main", false);
-        assert_eq!(checked_out.unwrap_err().code, "branch_checked_out");
+        assert_eq!(checked_out.unwrap_err().code.as_str(), "branch_checked_out");
 
         let created = create_branch(&writes, &sessions, view.version, "side", None).unwrap();
         let snapshot = created.snapshot.expect("re-read");
@@ -875,12 +815,12 @@ mod tests {
         assert_eq!(switched.outcome, Outcome::Failed);
         let version = switched.snapshot.expect("re-read").version;
         let preview = preview_delete_branch(&writes, &sessions, version, "main", false);
-        assert_eq!(preview.unwrap_err().code, "branch_missing");
+        assert_eq!(preview.unwrap_err().code.as_str(), "branch_missing");
         // `git log` would error on an unborn HEAD — guit's command layer
         // gates this on head_state, and the module keeps the structured
         // failure for anything that does reach Git.
         let error = history::page(dir, 0, None, history::PAGE_SIZE, false).unwrap_err();
-        assert_eq!(error.code, "history_page_failed");
+        assert_eq!(error.code.as_str(), "history_page_failed");
 
         // A commit made in an external terminal must flip the snapshot and
         // make every read path meaningful without reopening the repository.

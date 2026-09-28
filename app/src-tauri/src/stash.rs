@@ -10,7 +10,7 @@ use crate::probe::ProbeError;
 use crate::repo::RepoIdentity;
 use crate::status::StatusEntry;
 use crate::write::{
-    self, OperationKind, OperationResult, Outcome, PreviewKind, PreviewResult, WriteState,
+    self, OperationKind, OperationResult, Outcome, PreviewResult, StashAction, WriteState,
 };
 use crate::{branches, history, session};
 use serde::Serialize;
@@ -196,65 +196,47 @@ fn run_save(
     snapshot_version: u64,
     message: &str,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let result_message;
-    let mut details = None;
-    match sessions.commit_context(snapshot_version) {
-        Err(error) => {
-            outcome = Outcome::Rejected;
-            result_message = error.message;
-        }
-        Ok((work_root, unborn)) => {
-            if unborn {
-                outcome = Outcome::Rejected;
-                result_message = "Cannot stash before the first commit.".into();
-            } else if state.cancel_flag().load(Ordering::SeqCst) {
-                outcome = Outcome::Cancelled;
-                result_message = "Cancelled before Git ran.".into();
-            } else if let Err(refusal) = stash_preconditions(sessions) {
-                outcome = Outcome::Rejected;
-                result_message = refusal.message;
-            } else {
-                // The message travels as one argv element — never through a
-                // shell, never into logs or the serialized result body.
-                let mut args: Vec<&str> = vec!["stash", "push"];
-                let named = !message.trim().is_empty();
-                if named {
-                    args.extend(["-m", message]);
-                }
-                match branches::run_git(&work_root, &args, state.cancel_flag()) {
-                    Ok(output) => {
-                        exit_code = output.status.code();
-                        if output.status.success() && !output.truncated {
-                            result_message = "Local changes stashed.".into();
-                        } else {
-                            outcome = Outcome::Failed;
-                            result_message = "git stash reported a failure.".into();
-                            details = Some(write::first_stderr_line(&output.stderr));
-                        }
-                    }
-                    Err(error) if error.code == "process_cancelled" => {
-                        outcome = Outcome::Cancelled;
-                        result_message = "Cancelled while the Git process was running.".into();
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
+    let kind = OperationKind::StashSave;
+    let (work_root, unborn) = match sessions.commit_context(snapshot_version) {
+        Ok(context) => context,
+        Err(error) => return write::plain(sessions, kind, Outcome::Rejected, &error.message),
+    };
+    if unborn {
+        return write::plain(
+            sessions,
+            kind,
+            Outcome::Rejected,
+            "Cannot stash before the first commit.",
+        );
     }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::StashSave,
-        outcome,
-        exit_code,
-        message: result_message,
-        details,
-        snapshot,
-    })
+    if state.cancel_flag().load(Ordering::SeqCst) {
+        return write::plain(
+            sessions,
+            kind,
+            Outcome::Cancelled,
+            "Cancelled before Git ran.",
+        );
+    }
+    if let Err(refusal) = stash_preconditions(sessions) {
+        return write::plain(sessions, kind, Outcome::Rejected, &refusal.message);
+    }
+    // The message travels as one argv element — never through a shell, never
+    // into logs or the serialized result body.
+    let mut args: Vec<&str> = vec!["stash", "push"];
+    let named = !message.trim().is_empty();
+    if named {
+        args.extend(["-m", message]);
+    }
+    write::run_and_report(
+        sessions,
+        kind,
+        branches::run_git(&work_root, &args, state.cancel_flag()),
+        write::Wording {
+            ok: "Local changes stashed.".to_owned(),
+            failed: "git stash reported a failure.".to_owned(),
+            cancelled: "Cancelled while the Git process was running.".to_owned(),
+        },
+    )
 }
 
 pub(crate) fn stash_apply(
@@ -281,63 +263,43 @@ fn run_apply(
     snapshot_version: u64,
     index: u32,
 ) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    match sessions.commit_context(snapshot_version) {
-        Err(error) => {
-            outcome = Outcome::Rejected;
-            message = error.message;
-        }
-        Ok((work_root, _unborn)) => {
-            let sel = selector(index);
-            let exists = match stash_oid(&work_root, &sel) {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(error) => return Err(error),
-            };
-            if !exists {
-                outcome = Outcome::Rejected;
-                message =
-                    "That stash entry no longer exists; refresh the list and try again.".into();
-            } else if state.cancel_flag().load(Ordering::SeqCst) {
-                outcome = Outcome::Cancelled;
-                message = "Cancelled before Git ran.".into();
-            } else {
-                match branches::run_git(&work_root, &["stash", "apply", &sel], state.cancel_flag())
-                {
-                    Ok(output) => {
-                        exit_code = output.status.code();
-                        if output.status.success() && !output.truncated {
-                            message = "Stash applied; the entry stays in the list.".into();
-                        } else {
-                            outcome = Outcome::Failed;
-                            message = "git stash apply reported a failure.".into();
-                            details = Some(write::first_stderr_line(&output.stderr));
-                        }
-                    }
-                    Err(error) if error.code == "process_cancelled" => {
-                        outcome = Outcome::Cancelled;
-                        message = "Cancelled while the Git process was running.".into();
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
+    let kind = OperationKind::StashApply;
+    let (work_root, _unborn) = match sessions.commit_context(snapshot_version) {
+        Ok(context) => context,
+        Err(error) => return write::plain(sessions, kind, Outcome::Rejected, &error.message),
+    };
+    let sel = selector(index);
+    let exists = match stash_oid(&work_root, &sel) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(error) => return Err(error),
+    };
+    if !exists {
+        return write::plain(
+            sessions,
+            kind,
+            Outcome::Rejected,
+            "That stash entry no longer exists; refresh the list and try again.",
+        );
     }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::StashApply,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+    if state.cancel_flag().load(Ordering::SeqCst) {
+        return write::plain(
+            sessions,
+            kind,
+            Outcome::Cancelled,
+            "Cancelled before Git ran.",
+        );
+    }
+    write::run_and_report(
+        sessions,
+        kind,
+        branches::run_git(&work_root, &["stash", "apply", &sel], state.cancel_flag()),
+        write::Wording {
+            ok: "Stash applied; the entry stays in the list.".to_owned(),
+            failed: "git stash apply reported a failure.".to_owned(),
+            cancelled: "Cancelled while the Git process was running.".to_owned(),
+        },
+    )
 }
 
 pub(crate) fn preview_stash_drop(
@@ -346,13 +308,7 @@ pub(crate) fn preview_stash_drop(
     snapshot_version: u64,
     index: u32,
 ) -> Result<PreviewResult, ProbeError> {
-    preview_stash(
-        state,
-        sessions,
-        snapshot_version,
-        index,
-        PreviewKind::DropStash,
-    )
+    preview_stash(state, sessions, snapshot_version, index, StashAction::Drop)
 }
 
 pub(crate) fn preview_stash_pop(
@@ -361,13 +317,7 @@ pub(crate) fn preview_stash_pop(
     snapshot_version: u64,
     index: u32,
 ) -> Result<PreviewResult, ProbeError> {
-    preview_stash(
-        state,
-        sessions,
-        snapshot_version,
-        index,
-        PreviewKind::PopStash,
-    )
+    preview_stash(state, sessions, snapshot_version, index, StashAction::Pop)
 }
 
 fn preview_stash(
@@ -375,7 +325,7 @@ fn preview_stash(
     sessions: &session::SessionState,
     snapshot_version: u64,
     index: u32,
-    kind: PreviewKind,
+    action: StashAction,
 ) -> Result<PreviewResult, ProbeError> {
     let (work_root, _unborn) = sessions.commit_context(snapshot_version)?;
     let sel = selector(index);
@@ -390,7 +340,7 @@ fn preview_stash(
         .find(|entry| entry.index == index)
         .map(|entry| entry.subject)
         .ok_or_else(protocol_error)?;
-    let nonce = state.stage_ref_delete(kind, work_root, sel, oid.clone(), false);
+    let nonce = state.stage_stash_entry(action, work_root, sel, oid.clone());
     let snapshot = session::refresh(sessions)?
         .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
     Ok(PreviewResult {
@@ -408,7 +358,7 @@ pub(crate) fn stash_drop(
     nonce: String,
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_ticketed(state, sessions, &nonce, PreviewKind::DropStash, "drop");
+    let result = run_ticketed(state, sessions, &nonce, "drop");
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -422,7 +372,7 @@ pub(crate) fn stash_pop(
     nonce: String,
 ) -> Result<OperationResult, ProbeError> {
     let operation_id = state.begin()?;
-    let result = run_ticketed(state, sessions, &nonce, PreviewKind::PopStash, "pop");
+    let result = run_ticketed(state, sessions, &nonce, "pop");
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
@@ -438,87 +388,61 @@ fn run_ticketed(
     state: &WriteState,
     sessions: &session::SessionState,
     nonce: &str,
-    preview_kind: PreviewKind,
     verb: &'static str,
 ) -> Result<OperationResult, ProbeError> {
     let kind = match verb {
         "drop" => OperationKind::StashDrop,
         _ => OperationKind::StashPop,
     };
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    let Some((work_root, sel, oid, _force)) = state.take_ref_delete(nonce, preview_kind) else {
-        let snapshot = session::refresh(sessions)?;
-        return Ok(OperationResult {
-            category: None,
-            suggestion: None,
-            operation_id: 0,
-            kind,
-            outcome: Outcome::Rejected,
-            exit_code: None,
-            message: "That confirmation has expired; preview the action again.".into(),
-            details: None,
-            snapshot,
-        });
+    let action = match verb {
+        "drop" => StashAction::Drop,
+        _ => StashAction::Pop,
     };
-    let same_repo = sessions
-        .current_identity()
-        .is_some_and(|identity| identity.work_root.as_deref() == Some(work_root.as_path()));
-    if !same_repo {
-        outcome = Outcome::Rejected;
-        message =
-            "The repository session changed after the preview; the stash was untouched.".into();
-    } else {
-        let unchanged = match stash_oid(&work_root, &sel) {
-            Ok(current) => current.as_deref() == Some(oid.as_str()),
-            Err(error) => return Err(error),
-        };
-        if !unchanged {
-            outcome = Outcome::Rejected;
-            message = format!(
-                "The stash entry at that position changed after the preview; nothing was {verb}ped. Confirm again."
-            );
-        } else if state.cancel_flag().load(Ordering::SeqCst) {
-            outcome = Outcome::Cancelled;
-            message = "Cancelled before Git ran.".into();
-        } else {
-            match branches::run_git(&work_root, &["stash", verb, &sel], state.cancel_flag()) {
-                Ok(output) => {
-                    exit_code = output.status.code();
-                    if output.status.success() && !output.truncated {
-                        message = if verb == "drop" {
-                            "Stash entry dropped.".into()
-                        } else {
-                            "Stash entry popped and dropped.".into()
-                        };
-                    } else {
-                        outcome = Outcome::Failed;
-                        message = format!("git stash {verb} reported a failure.");
-                        details = Some(write::first_stderr_line(&output.stderr));
-                    }
-                }
-                Err(error) if error.code == "process_cancelled" => {
-                    outcome = Outcome::Cancelled;
-                    message = "Cancelled while the Git process was running.".into();
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
+    write::confirm(
+        state,
+        sessions,
         kind,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
+        nonce,
+        write::Refusals {
+            expired: "That confirmation has expired; preview the action again.",
+            session_changed:
+                "The repository session changed after the preview; the stash was untouched.",
+            cancelled_before_git: "Cancelled before Git ran.",
+        },
+        |preview| match preview.bound {
+            write::Bound::StashEntry {
+                action: wanted,
+                selector,
+                oid,
+            } if wanted == action => Some((preview.work_root, (selector, oid))),
+            _ => None,
+        },
+        |work_root, (sel, oid)| {
+            let current = stash_oid(work_root, sel)?;
+            Ok(if current.as_deref() == Some(oid.as_str()) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "The stash entry at that position changed after the preview; nothing was {verb}ped. Confirm again."
+                ))
+            })
+        },
+        |work_root, (sel, _)| {
+            let output = branches::run_git(work_root, &["stash", verb, sel], state.cancel_flag());
+            write::ran_from(
+                output,
+                write::Wording {
+                    ok: if verb == "drop" {
+                        "Stash entry dropped.".to_owned()
+                    } else {
+                        "Stash entry popped and dropped.".to_owned()
+                    },
+                    failed: format!("git stash {verb} reported a failure."),
+                    cancelled: "Cancelled while the Git process was running.".to_owned(),
+                },
+            )
+        },
+    )
 }
 
 #[cfg(test)]
@@ -589,7 +513,7 @@ mod tests {
             &b"\xff\x1fd\x1fs\n"[..],
         ] {
             assert_eq!(
-                parse_list_bytes(broken).unwrap_err().code,
+                parse_list_bytes(broken).unwrap_err().code.as_str(),
                 "stash_protocol_error",
                 "input: {broken:?}"
             );

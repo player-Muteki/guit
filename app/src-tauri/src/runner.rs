@@ -53,6 +53,14 @@ fn drain(mut pipe: impl Read, stderr: bool, sender: SyncSender<Chunk>) {
 /// on the killed child directly.
 fn terminate(pid: u32) {
     #[cfg(unix)]
+    // SAFETY: `pid` is the `Child::id` of a process this module spawned with
+    // `process_group(0)`, which makes that child the leader of a fresh process
+    // group whose PGID equals its PID. Negating it therefore names the group
+    // and only that group, so the signal cannot reach the app or the shell
+    // that launched it. `kill` is async-signal-safe and takes no borrowed
+    // state, so nothing here can violate a Rust safety invariant. A PID is at
+    // most `i32::MAX` on every platform Linux runs on, so the cast is exact;
+    // even a reused PID would name a group this app created, never our own.
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
@@ -267,13 +275,16 @@ mod tests {
 
     #[test]
     fn missing_executable_reports_as_git_not_found() {
-        assert_eq!(missing("git-not-on-path-7e2b").code, "git_not_found");
+        assert_eq!(
+            missing("git-not-on-path-7e2b").code.as_str(),
+            "git_not_found"
+        );
     }
 
     #[test]
     fn a_missing_external_tool_is_not_blamed_on_git() {
         let error = missing("guit-definitely-not-on-path-9f3a");
-        assert_eq!(error.code, "tool_not_found");
+        assert_eq!(error.code.as_str(), "tool_not_found");
         assert!(error.message.contains("guit-definitely-not-on-path-9f3a"));
         assert!(!error.message.to_lowercase().contains("git executable"));
     }
@@ -334,7 +345,7 @@ mod stress {
             Err(error) => error,
             Ok(_) => panic!("the sleep outruns the timeout"),
         };
-        assert_eq!(error.code, "probe_timeout");
+        assert_eq!(error.code.as_str(), "probe_timeout");
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "killed, not waited out"
@@ -362,7 +373,7 @@ mod stress {
             Err(error) => error,
             Ok(_) => panic!("cancellation must end the run"),
         };
-        assert_eq!(error.code, "process_cancelled");
+        assert_eq!(error.code.as_str(), "process_cancelled");
     }
 
     #[test]

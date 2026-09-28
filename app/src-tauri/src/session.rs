@@ -1,7 +1,7 @@
 use crate::inflight;
 use crate::model::{BranchView, FileId, FileView, PathTable};
 use crate::perf;
-use crate::probe::ProbeError;
+use crate::probe::{Code, ProbeError};
 use crate::repo::{self, RepoIdentity};
 use crate::status;
 use serde::{Deserialize, Serialize};
@@ -361,7 +361,7 @@ pub fn restore(state: &SessionState) -> Result<Option<SnapshotView>, ProbeError>
             close(state);
             if matches!(
                 error.code,
-                "repo_path_missing" | "not_a_repository" | "repo_worktree_missing"
+                Code::REPO_PATH_MISSING | Code::NOT_A_REPOSITORY | Code::REPO_WORKTREE_MISSING
             ) {
                 Ok(None)
             } else {
@@ -583,12 +583,12 @@ mod tests {
         open(&state, &fixture.repo).unwrap();
         let missing = fixture.root.path().join("nope");
         let error = open(&state, &missing).unwrap_err();
-        assert_eq!(error.code, "repo_path_missing");
+        assert_eq!(error.code.as_str(), "repo_path_missing");
         assert!(state.current_identity().is_some());
         let not_repo = fixture.root.path().join("plain");
         fs::create_dir(&not_repo).unwrap();
         assert_eq!(
-            open(&state, &not_repo).unwrap_err().code,
+            open(&state, &not_repo).unwrap_err().code.as_str(),
             "not_a_repository"
         );
         assert_eq!(state.current_identity().unwrap().candidate, fixture.repo);
@@ -775,7 +775,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         release.wait();
         let error = leader.join().unwrap().unwrap_err();
-        assert_eq!(error.code, "injected_capture_failure");
+        assert_eq!(error.code.as_str(), "injected_capture_failure");
         // The follower coalesced onto the leader's run; an errored leader
         // still wakes it with the untouched previous snapshot.
         assert_eq!(follower.join().unwrap().unwrap(), Some(good.version));
@@ -819,7 +819,7 @@ mod tests {
         assert_eq!(read_recent(&config).unwrap(), list);
         fs::write(recent_path(&config), b"not json").unwrap();
         assert_eq!(
-            read_recent(&config).unwrap_err().code,
+            read_recent(&config).unwrap_err().code.as_str(),
             "recent_decode_failed"
         );
     }
@@ -846,7 +846,8 @@ mod tests {
         assert_eq!(
             push_recent(Vec::new(), missing.to_str().unwrap())
                 .unwrap_err()
-                .code,
+                .code
+                .as_str(),
             "recent_path_invalid"
         );
         let file = root.path().join("a-file");
@@ -854,7 +855,8 @@ mod tests {
         assert_eq!(
             push_recent(Vec::new(), file.to_str().unwrap())
                 .unwrap_err()
-                .code,
+                .code
+                .as_str(),
             "recent_path_invalid"
         );
     }
@@ -869,7 +871,7 @@ mod tests {
         let bytes = br#"{"schema_version":2,"path":"/somewhere"}"#;
         fs::write(&path, bytes).unwrap();
         assert_eq!(
-            read_session(root.path()).unwrap_err().code,
+            read_session(root.path()).unwrap_err().code.as_str(),
             "session_invalid"
         );
         assert_eq!(fs::read(&path).unwrap(), bytes);
@@ -881,7 +883,10 @@ mod tests {
         let path = recent_path(root.path());
         let bytes = br#"{"schema_version":2,"paths":["/a","/b"]}"#;
         fs::write(&path, bytes).unwrap();
-        assert_eq!(read_recent(root.path()).unwrap_err().code, "recent_invalid");
+        assert_eq!(
+            read_recent(root.path()).unwrap_err().code.as_str(),
+            "recent_invalid"
+        );
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 }
