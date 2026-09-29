@@ -19,6 +19,15 @@ pub struct RepoIdentity {
     pub linked_worktree: bool,
 }
 
+/// The one sanitized git invocation every guit read and write builds on.
+/// Beyond stripping the inherited `GIT_*` variables, it pins two local-only
+/// controls: `-c submodule.recurse=false` (top-level, so it must be set
+/// before the subcommand is appended) stops `switch`/`merge`/`reset` from
+/// letting Git implicitly update — and download — submodules, and
+/// `GIT_NO_LAZY_FETCH=1` (set after the strip so it survives) stops a
+/// partial clone from fetching missing objects on demand. A git that errors
+/// because of either control fails the read or write that ran it; it is
+/// never a clean repository.
 pub fn user_git_command(path: &Path) -> Command {
     let mut command = Command::new("git");
     for (key, _) in std::env::vars_os() {
@@ -28,7 +37,10 @@ pub fn user_git_command(path: &Path) -> Command {
     }
     command
         .current_dir(path)
+        .arg("-c")
+        .arg("submodule.recurse=false")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .env("LC_ALL", "C");
     command
 }

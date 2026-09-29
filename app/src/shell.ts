@@ -1,5 +1,5 @@
-// The application shell: app bar (repo, branch chip, sync menu, commit,
-// pin), the two-page tab strip, the overlay the branch picker borrows, and
+// The application shell: app bar (repo, branch chip, commit, pin), the
+// two-page tab strip, the overlay the branch picker borrows, and
 // the status bar (running operation, watch mode, interface zoom). The shell
 // owns no Git semantics — every action is injected by `main.ts` so the views
 // stay the only place that talks to the backend.
@@ -29,22 +29,14 @@ export interface ViewDescriptor {
   element: HTMLElement;
 }
 
-export type SyncAction =
-  | "fetchAll"
-  | "push"
-  | "publish"
-  | { pull: true; strategy: "default" | "ffonly" | "merge" | "rebase" };
-
 export interface ShellActions {
   openRepository(): void;
   refresh(): void;
   closeRepository(): void;
-  clone(): void;
   commit(): void;
   cancelWrite(): void;
   cancelTool(): void;
   setOnTop(value: boolean): void;
-  sync(action: SyncAction): void;
 }
 
 export interface Shell {
@@ -123,24 +115,12 @@ export function createShell(actions: ShellActions): Shell {
     "aria-label": "Refresh status",
     title: "Refresh status (Ctrl+R)",
   }, [icon("refresh")]);
-  const cloneButton = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Clone repository",
-    title: "Clone a repository…",
-  }, [icon("clone")]);
   const closeButton = el("button", {
     class: "icon-btn",
     type: "button",
     "aria-label": "Close session",
     title: "Close the current session",
   }, [icon("close")]);
-  const syncButton = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Sync",
-    title: "Fetch, pull or push",
-  }, [icon("sync")]);
   const commitButton = el("button", {
     class: "btn btn-primary appbar-commit",
     type: "button",
@@ -160,7 +140,6 @@ export function createShell(actions: ShellActions): Shell {
   const moreMenu = el("div", { class: "menu", role: "menu", hidden: true });
   const moreItems: Array<{ label: string; run: () => void }> = [
     { label: "Open repository…", run: actions.openRepository },
-    { label: "Clone repository…", run: actions.clone },
     { label: "Refresh status", run: actions.refresh },
     { label: "Close session", run: actions.closeRepository },
   ];
@@ -179,10 +158,8 @@ export function createShell(actions: ShellActions): Shell {
     branchChip,
     openButton,
     refreshButton,
-    cloneButton,
     closeButton,
     el("div", { class: "spacer" }),
-    syncButton,
     commitButton,
     pinButton,
     moreButton,
@@ -197,8 +174,6 @@ export function createShell(actions: ShellActions): Shell {
     const opener = menuOpener;
     menuOpener = null;
     moreMenu.hidden = true;
-    syncMenu.hidden = true;
-    pullMenu.hidden = true;
     opener?.focus();
   }
   function openMenu(next: HTMLElement, opener: HTMLElement): void {
@@ -232,14 +207,8 @@ export function createShell(actions: ShellActions): Shell {
     event.stopPropagation();
     openMenu(moreMenu, moreButton);
   });
-  syncButton.addEventListener("click", (event) => {
-    event.stopPropagation();
-    openMenu(syncMenu, syncButton);
-    pullMenu.hidden = true;
-  });
   openButton.addEventListener("click", () => actions.openRepository());
   refreshButton.addEventListener("click", () => actions.refresh());
-  cloneButton.addEventListener("click", () => actions.clone());
   closeButton.addEventListener("click", () => actions.closeRepository());
   commitButton.addEventListener("click", () => actions.commit());
   pinButton.addEventListener("click", () => actions.setOnTop(!isAlwaysOnTop()));
@@ -247,39 +216,6 @@ export function createShell(actions: ShellActions): Shell {
     setActiveView("main");
     openOverlay();
   });
-
-  // --- sync menu (fetch / pull / push / publish) ---
-  const syncMenu = el("div", { class: "menu", role: "menu", hidden: true });
-  const pullMenu = el("div", { class: "menu submenu", role: "menu", hidden: true });
-  const syncItems: Array<{ label: string; run: () => void }> = [
-    { label: "Fetch all remotes", run: () => actions.sync("fetchAll") },
-    { label: "Pull…", run: () => { syncMenu.hidden = true; pullMenu.hidden = false; } },
-    { label: "Push", run: () => actions.sync("push") },
-    { label: "Publish branch…", run: () => actions.sync("publish") },
-  ];
-  for (const item of syncItems) {
-    const entry = el("button", { class: "menu-item", type: "button", role: "menuitem", text: item.label });
-    entry.addEventListener("click", () => {
-      closeMenus();
-      item.run();
-    });
-    syncMenu.append(entry);
-  }
-  const pullItems: Array<{ label: string; run: () => void }> = [
-    { label: "Git default", run: () => actions.sync({ pull: true, strategy: "default" }) },
-    { label: "Fast-forward only", run: () => actions.sync({ pull: true, strategy: "ffonly" }) },
-    { label: "Merge", run: () => actions.sync({ pull: true, strategy: "merge" }) },
-    { label: "Rebase", run: () => actions.sync({ pull: true, strategy: "rebase" }) },
-  ];
-  for (const item of pullItems) {
-    const entry = el("button", { class: "menu-item", type: "button", role: "menuitem", text: item.label });
-    entry.addEventListener("click", () => {
-      closeMenus();
-      item.run();
-    });
-    pullMenu.append(entry);
-  }
-  appbar.append(syncMenu, pullMenu);
 
   // --- tabs ---
   // Exactly two pages, both reachable from a cold start: Main is the panel
@@ -396,7 +332,6 @@ export function createShell(actions: ShellActions): Shell {
     branchChip.disabled = !session;
     refreshButton.disabled = !session;
     closeButton.disabled = !session;
-    syncButton.disabled = !session || isWriteRunning();
     commitButton.disabled = !session || isWriteRunning();
     pinButton.classList.toggle("active", isAlwaysOnTop());
     pinButton.setAttribute("aria-pressed", String(isAlwaysOnTop()));

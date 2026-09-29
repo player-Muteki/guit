@@ -1,19 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod askpass;
 mod branches;
-mod clone;
 mod diagnostics;
 mod extools;
 mod history;
 mod inflight;
 mod model;
-mod netclassify;
-mod network;
 mod perf;
 mod probe;
 mod refs;
-mod remotes;
 mod repo;
 mod reset;
 mod runner;
@@ -33,7 +28,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
+use tauri::{Manager, PhysicalPosition, PhysicalSize, State};
 
 struct ProbeState {
     cancelled: Arc<AtomicBool>,
@@ -214,6 +209,44 @@ fn write_window_settings(
         .map_err(|error| ProbeError::new("settings_write_failed", error.to_string()))
 }
 
+/// Atomic config writes (window settings here, recent/session in the
+/// session module) land through `tempfile` siblings named
+/// `<name>.tmpXXXXXX`. A kill mid-write leaves such a sibling behind; it is
+/// never read back, and after an hour no in-flight write can still own it.
+/// The suffix shape (exactly six alphanumerics) keeps unrelated user files
+/// that merely end in `.tmp` out of reach. Returns the number removed.
+fn sweep_stale_config_temps(config_dir: &std::path::Path) -> usize {
+    const OWNED: [&str; 3] = ["recent.json", "session.json", "window.json"];
+    let Ok(entries) = std::fs::read_dir(config_dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((base, suffix)) = name.split_once(".tmp") else {
+            continue;
+        };
+        if !OWNED.contains(&base)
+            || suffix.len() != 6
+            || !suffix.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let older_than_an_hour = meta
+            .modified()
+            .ok()
+            .and_then(|when| when.elapsed().ok())
+            .is_some_and(|age| age > std::time::Duration::from_secs(3600));
+        if older_than_an_hour && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Reads the stored geometry, if any. Not a command: the only caller is
 /// `restore_window_settings`, which runs before the window exists, so
 /// exposing this over IPC would publish an endpoint with no caller.
@@ -332,17 +365,6 @@ async fn probe_external_tools() -> Result<ToolProbe, ProbeError> {
 }
 
 #[tauri::command]
-async fn run_transfer_probe(app: tauri::AppHandle) -> Result<String, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        probe::transfer(|bytes| {
-            let _ = app.emit("probe-progress", bytes);
-        })
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
 async fn run_process_probe(state: State<'_, ProbeState>) -> Result<String, ProbeError> {
     state
         .running
@@ -360,42 +382,6 @@ async fn run_process_probe(state: State<'_, ProbeState>) -> Result<String, Probe
 
 #[tauri::command]
 fn cancel_process_probe(state: State<'_, ProbeState>) {
-    state.cancelled.store(true, Ordering::SeqCst);
-}
-
-#[tauri::command]
-async fn clone_repository(
-    app: tauri::AppHandle,
-    source: String,
-    parent: String,
-) -> Result<clone::CloneResult, ProbeError> {
-    {
-        let state = app.state::<clone::CloneState>();
-        state
-            .running
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .map_err(|_| ProbeError::new("clone_busy", "A clone is already running."))?;
-        state.cancelled.store(false, Ordering::SeqCst);
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<clone::CloneState>();
-        let outcome = clone::clone_repository(
-            &state,
-            &source,
-            std::path::Path::new(&parent),
-            &mut |line| {
-                let _ = app.emit("clone-progress", line);
-            },
-        );
-        state.running.store(false, Ordering::SeqCst);
-        outcome
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-fn cancel_clone(state: State<'_, clone::CloneState>) {
     state.cancelled.store(true, Ordering::SeqCst);
 }
 
@@ -1137,372 +1123,6 @@ async fn submodule_status(
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
-#[tauri::command]
-async fn submodule_init_update(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    index: Option<u32>,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        submodules::init_update(&state, &sessions, snapshot_version, index, &mut |line| {
-            let _ = app.emit("submodule-progress", line);
-        })
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn list_remotes(app: tauri::AppHandle) -> Result<Vec<remotes::RemoteView>, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let sessions = app.state::<session::SessionState>();
-        remotes::list_view(&sessions)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn add_remote(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    name: String,
-    url: String,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        remotes::remote_add(&state, &sessions, snapshot_version, name, url)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn set_remote_url(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    name: String,
-    url: String,
-    push: bool,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        remotes::remote_set_url(&state, &sessions, snapshot_version, name, url, push)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn preview_remove_remote(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    name: String,
-) -> Result<write::PreviewResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        remotes::preview_remove_remote(&state, &sessions, snapshot_version, name)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn remove_remote(
-    app: tauri::AppHandle,
-    nonce: String,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        remotes::remove_remote(&state, &sessions, nonce)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-/// The only interactive entry point for secrets. A bridge exists
-/// exactly as long as the queued operation whose command arrived with
-/// `interactive: true`; non-Unix platforms get the documented refusal
-/// from `askpass::Bridge::start`.
-fn start_askpass_bridge(
-    app: &tauri::AppHandle,
-    interactive: bool,
-) -> Result<Option<askpass::Bridge>, ProbeError> {
-    if !interactive {
-        return Ok(None);
-    }
-    let manager = app.state::<askpass::AskPassManager>();
-    let handle = app.clone();
-    askpass::Bridge::start(
-        &manager,
-        askpass::DEFAULT_TIMEOUT,
-        Box::new(move |payload| {
-            let _ = handle.emit("askpass-request", payload);
-        }),
-    )
-    .map(Some)
-}
-
-#[tauri::command]
-async fn fetch(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    target: network::FetchTarget,
-    interactive: bool,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        let bridge = start_askpass_bridge(&app, interactive)?;
-        let result = network::fetch(
-            &state,
-            &sessions,
-            snapshot_version,
-            target,
-            bridge.as_ref(),
-            &mut |operation_id, line| {
-                let _ = app.emit(
-                    "sync-progress",
-                    serde_json::json!({ "operationId": operation_id, "line": line }),
-                );
-            },
-        );
-        drop(bridge);
-        result
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn pull(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    strategy: network::PullStrategy,
-    interactive: bool,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        let bridge = start_askpass_bridge(&app, interactive)?;
-        let result = network::pull(
-            &state,
-            &sessions,
-            snapshot_version,
-            strategy,
-            bridge.as_ref(),
-            &mut |operation_id, line| {
-                let _ = app.emit(
-                    "sync-progress",
-                    serde_json::json!({ "operationId": operation_id, "line": line }),
-                );
-            },
-        );
-        drop(bridge);
-        result
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn pull_default(app: tauri::AppHandle) -> Result<network::PullDefault, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let sessions = app.state::<session::SessionState>();
-        network::pull_default(&sessions)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn push(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    interactive: bool,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        let bridge = start_askpass_bridge(&app, interactive)?;
-        let result = network::push(
-            &state,
-            &sessions,
-            snapshot_version,
-            bridge.as_ref(),
-            &mut |operation_id, line| {
-                let _ = app.emit(
-                    "sync-progress",
-                    serde_json::json!({ "operationId": operation_id, "line": line }),
-                );
-            },
-        );
-        drop(bridge);
-        result
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn publish(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    remote: String,
-    interactive: bool,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        let bridge = start_askpass_bridge(&app, interactive)?;
-        let result = network::publish(
-            &state,
-            &sessions,
-            snapshot_version,
-            remote,
-            bridge.as_ref(),
-            &mut |operation_id, line| {
-                let _ = app.emit(
-                    "sync-progress",
-                    serde_json::json!({ "operationId": operation_id, "line": line }),
-                );
-            },
-        );
-        drop(bridge);
-        result
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn preview_delete_remote_branch(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    target: String,
-) -> Result<write::PreviewResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        network::preview_delete_remote_branch(&state, &sessions, snapshot_version, target)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn delete_remote_branch(
-    app: tauri::AppHandle,
-    nonce: String,
-    interactive: bool,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        let bridge = start_askpass_bridge(&app, interactive)?;
-        let result = network::delete_remote_branch(
-            &state,
-            &sessions,
-            nonce,
-            bridge.as_ref(),
-            &mut |operation_id, line| {
-                let _ = app.emit(
-                    "sync-progress",
-                    serde_json::json!({ "operationId": operation_id, "line": line }),
-                );
-            },
-        );
-        drop(bridge);
-        result
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn preview_force_push(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-) -> Result<write::PreviewResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        network::preview_force_push(&state, &sessions, snapshot_version)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn force_push(
-    app: tauri::AppHandle,
-    nonce: String,
-    interactive: bool,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        let bridge = start_askpass_bridge(&app, interactive)?;
-        let result = network::force_push(
-            &state,
-            &sessions,
-            nonce,
-            bridge.as_ref(),
-            &mut |operation_id, line| {
-                let _ = app.emit(
-                    "sync-progress",
-                    serde_json::json!({ "operationId": operation_id, "line": line }),
-                );
-            },
-        );
-        drop(bridge);
-        result
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn set_upstream(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    branch: String,
-    upstream: Option<String>,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        network::set_upstream(&state, &sessions, snapshot_version, branch, upstream)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-/// Routes one askpass dialog answer into the blocked prompt. The secret
-/// ends its journey here: it is never echoed back, stored, or logged, and
-/// a spent prompt honestly reports "expired" rather than pretending.
-#[tauri::command]
-fn submit_askpass(
-    manager: State<'_, askpass::AskPassManager>,
-    operation_id: u64,
-    secret: String,
-) -> Result<(), ProbeError> {
-    if manager.submit(operation_id, secret) {
-        Ok(())
-    } else {
-        Err(ProbeError::new(
-            "askpass_expired",
-            "That credential prompt is no longer open; nothing was stored.",
-        ))
-    }
-}
-
 /// Writes the fixed diagnostics snapshot to the path the user chose
 /// in the save dialog (the content manifest was confirmed in the UI before
 /// this is ever invoked). The frontend sends only a path; every fact comes
@@ -1511,26 +1131,6 @@ fn submit_askpass(
 async fn export_diagnostics(app: tauri::AppHandle, path: String) -> Result<String, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let git = probe::git().ok();
-        let sessions = app.state::<session::SessionState>();
-        let credential = askpass::credential_status(&sessions).ok();
-        let remotes: Vec<(String, Option<String>, Option<String>)> = remotes::list_view(&sessions)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|view| (view.name, view.fetch_url, view.push_url))
-            .collect();
-        let schemes: Vec<(String, Vec<String>)> = credential
-            .as_ref()
-            .map(|view| {
-                view.schemes
-                    .iter()
-                    .map(|group| (group.scheme.clone(), group.remotes.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let helpers: Vec<String> = credential
-            .as_ref()
-            .map(|view| view.helpers.clone())
-            .unwrap_or_default();
         let mut config_files = Vec::new();
         if let Ok(directory) = app_config_dir(&app) {
             if let Ok(entries) = std::fs::read_dir(directory) {
@@ -1563,11 +1163,6 @@ async fn export_diagnostics(app: tauri::AppHandle, path: String) -> Result<Strin
             git_available: git.as_ref().is_some_and(|probe| probe.available),
             git_version: git.as_ref().and_then(|probe| probe.version.as_deref()),
             git_executable: git.as_ref().and_then(|probe| probe.executable.as_deref()),
-            credential_policy: credential.as_ref().map(|view| view.policy.as_str()),
-            credential_helpers: &helpers,
-            ssh_agent: credential.as_ref().is_some_and(|view| view.ssh_agent),
-            remote_schemes: &schemes,
-            remotes: &remotes,
             watch_mode: watch::last_mode(),
             config_files,
             entries: diagnostics::snapshot(),
@@ -1589,17 +1184,6 @@ async fn export_diagnostics(app: tauri::AppHandle, path: String) -> Result<Strin
 
 fn main() {
     perf::init();
-    // Git spawns this executable as its askpass helper with the
-    // prompt as argv. The helper role must be recognised before any GUI
-    // machinery runs — a second real instance would only confuse the user.
-    #[cfg(unix)]
-    {
-        let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-        if let Some(prompt) = askpass::client_prompt_from_launch(&args, |key| std::env::var_os(key))
-        {
-            std::process::exit(askpass::run_client(&prompt));
-        }
-    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(ProbeState {
@@ -1608,26 +1192,18 @@ fn main() {
         })
         .manage(session::SessionState::default())
         .manage(watch::WatchState::default())
-        .manage(clone::CloneState::default())
         .manage(write::WriteState::default())
         .manage(extools::ToolState::default())
-        .manage(askpass::AskPassManager::default())
         .setup(|app| {
-            // Reclaim what a kill -9 left behind — orphaned askpass
-            // bridge directories and abandoned atomic-write siblings. The
-            // counts are reported but startup never fails over them.
-            #[cfg(unix)]
-            let bridges = askpass::sweep_stale_bridges();
-            #[cfg(not(unix))]
-            let bridges = 0usize;
+            // Reclaim what a kill -9 left behind — abandoned atomic-write
+            // siblings of the config files. The count is reported but
+            // startup never fails over it.
             let temps = match app_config_dir(app.handle()) {
-                Ok(dir) => askpass::sweep_stale_config_temps(&dir),
+                Ok(dir) => sweep_stale_config_temps(&dir),
                 Err(_) => 0,
             };
-            if bridges + temps > 0 {
-                eprintln!(
-                    "guit startup swept {bridges} stale askpass bridge(s) and {temps} stale config temp file(s)"
-                );
+            if temps > 0 {
+                eprintln!("guit startup swept {temps} stale config temp file(s)");
             }
             Ok(())
         })
@@ -1635,7 +1211,6 @@ fn main() {
             probe_git,
             probe_external_tools,
             run_process_probe,
-            run_transfer_probe,
             cancel_process_probe,
             save_window_settings,
             restore_window_settings,
@@ -1644,8 +1219,6 @@ fn main() {
             refresh_repository,
             close_repository,
             list_recent_repositories,
-            clone_repository,
-            cancel_clone,
             stage_files,
             unstage_files,
             commit_changes,
@@ -1692,23 +1265,6 @@ fn main() {
             remove_worktree,
             prune_worktrees,
             submodule_status,
-            submodule_init_update,
-            list_remotes,
-            add_remote,
-            set_remote_url,
-            preview_remove_remote,
-            remove_remote,
-            fetch,
-            pull,
-            pull_default,
-            push,
-            publish,
-            preview_delete_remote_branch,
-            delete_remote_branch,
-            preview_force_push,
-            force_push,
-            set_upstream,
-            submit_askpass,
             export_diagnostics
         ])
         .run(tauri::generate_context!())
@@ -1778,6 +1334,46 @@ mod tests {
             "settings_invalid"
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn the_config_sweep_removes_only_old_tempfile_siblings_of_owned_names() {
+        let dir = tempfile::tempdir().expect("config dir");
+        std::fs::write(dir.path().join("session.json.tmpAb1cD2"), b"x").expect("fresh owned");
+        std::fs::write(dir.path().join("notes.tmp"), b"x").expect("foreign suffix");
+        std::fs::write(dir.path().join("session.json.tmpZZ"), b"x").expect("short suffix");
+        std::fs::write(dir.path().join("window.json.tmp123456"), b"x").expect("old owned");
+        std::fs::write(dir.path().join("recent.json.tmpABC123"), b"x").expect("old owned");
+        let old_output = std::process::Command::new("touch")
+            .args(["-d", "3 hours ago"])
+            .arg(dir.path().join("window.json.tmp123456"))
+            .arg(dir.path().join("recent.json.tmpABC123"))
+            .status()
+            .expect("touch runs");
+        assert!(old_output.success());
+        assert_eq!(sweep_stale_config_temps(dir.path()), 2);
+        assert!(dir.path().join("session.json.tmpAb1cD2").exists(), "fresh");
+        assert!(dir.path().join("notes.tmp").exists(), "foreign name");
+        assert!(
+            dir.path().join("session.json.tmpZZ").exists(),
+            "suffix shape"
+        );
+        assert!(
+            !dir.path().join("window.json.tmp123456").exists(),
+            "old owned"
+        );
+        assert!(
+            !dir.path().join("recent.json.tmpABC123").exists(),
+            "old owned"
+        );
+    }
+
+    #[test]
+    fn the_config_sweep_survives_a_missing_directory() {
+        assert_eq!(
+            sweep_stale_config_temps(std::path::Path::new("/nonexistent/guit-x")),
+            0
+        );
     }
 
     #[test]

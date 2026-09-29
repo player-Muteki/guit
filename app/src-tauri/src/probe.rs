@@ -250,69 +250,6 @@ fn isolated_git(executable: &OsStr, path: &Path) -> Command {
     command
 }
 
-pub fn transfer(mut progress: impl FnMut(usize)) -> Result<String, ProbeError> {
-    let directory = tempfile::Builder::new()
-        .prefix("guit-transfer-")
-        .tempdir()
-        .map_err(|error| ProbeError::new("temp_dir_failed", error.to_string()))?;
-    let cancelled = AtomicBool::new(false);
-    let mut execute = |args: &[&str]| -> Result<crate::runner::CapturedOutput, ProbeError> {
-        let mut command = isolated_git(OsStr::new("git"), directory.path());
-        command.args(args);
-        let output = crate::runner::run(
-            command,
-            &cancelled,
-            Duration::ZERO,
-            Duration::from_secs(10),
-            |is_stderr: bool, bytes| {
-                if is_stderr {
-                    progress(bytes.len());
-                }
-            },
-        )?;
-        if !output.status.success() || output.truncated {
-            return Err(ProbeError::new(
-                "transfer_probe_failed",
-                String::from_utf8_lossy(&output.stderr),
-            ));
-        }
-        Ok(output)
-    };
-    execute(&["init", "--quiet", "source"])?;
-    execute(&[
-        "-C",
-        "source",
-        "-c",
-        "user.name=guit probe",
-        "-c",
-        "user.email=probe@example.invalid",
-        "commit",
-        "--quiet",
-        "--allow-empty",
-        "-m",
-        "probe",
-    ])?;
-    let output = execute(&[
-        "clone",
-        "--progress",
-        "--no-local",
-        "--",
-        "source",
-        "destination",
-    ])?;
-    let status = execute(&["-C", "destination", "status", "--porcelain=v2", "-z"])?;
-    if !status.stdout.is_empty() {
-        return Err(ProbeError::new(
-            "transfer_probe_failed",
-            "The disposable clone has unexpected changes.",
-        ));
-    }
-    Ok(format!(
-        "Local clone completed; {} stderr bytes streamed; actual Git status is clean.",
-        output.stderr.len()
-    ))
-}
-
 /// Reads one user-configured tool name. This one deliberately keeps the
 /// environment untouched: it is reporting the tools the user chose, so it must
 /// read their real configuration — but it is still bounded, because a `git`
@@ -602,17 +539,6 @@ mod tests {
         assert!(!version_at_least("git version 1.9.5", (2, 23)));
         assert!(!version_at_least("git version test-old", (2, 23)));
         assert!(!version_at_least("", (2, 23)));
-    }
-
-    #[test]
-    fn clone_progress_is_streamed_and_result_is_refreshed() {
-        let bytes = std::sync::atomic::AtomicUsize::new(0);
-        let result = transfer(|count| {
-            bytes.fetch_add(count, std::sync::atomic::Ordering::SeqCst);
-        })
-        .unwrap();
-        assert!(bytes.load(std::sync::atomic::Ordering::SeqCst) > 0);
-        assert!(result.contains("actual Git status is clean"));
     }
 
     #[test]

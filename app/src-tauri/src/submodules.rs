@@ -1,4 +1,4 @@
-//! Submodule status and init/update. The index
+//! Submodule status listing. The index
 //! is the authoritative list: mode-160000 records from
 //! `git ls-files --stage -z` give each entry's raw path and recorded commit
 //! without any quoting ambiguity. Per-entry state is then verified with one
@@ -11,22 +11,19 @@
 //!
 //! The frontend addresses entries by their list position (`u32`) only; raw
 //! paths are reconstructed backend-side from a fresh index read and travel
-//! as one argv element behind `--`, never through a shell. Update never
-//! deletes anything (`--init` registers and clones; the checkout refuses
-//! when a submodule work tree is dirty), so it rides the ordinary write
-//! lane with the external-tool timeout budget and streamed, redacted
-//! progress lines. The file-transport restriction stays the user's Git
-//! configuration call; guit does not inject `-c` overrides.
+//! as one argv element behind `--`, never through a shell. This module is
+//! read-only: registering or cloning submodules downloads objects and is
+//! outside guit's local-repository scope.
 
-use crate::probe::{redact, Code, ProbeError};
+use crate::probe::{redact, ProbeError};
 use crate::repo::{self, RepoIdentity};
 use crate::runner;
-use crate::write::{self, OperationKind, OperationResult, Outcome, WriteState};
+use crate::write;
 use crate::{history, session};
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// Read-only listing helpers never participate in write cancellation; they
@@ -42,11 +39,6 @@ static NO_CANCEL: AtomicBool = AtomicBool::new(false);
 /// repositories with no submodules at all. The bound tracks the status limit,
 /// which covers a few hundred thousand files.
 const GITLINK_OUTPUT_LIMIT: usize = runner::STATUS_OUTPUT_LIMIT;
-
-/// Streaming clones can take far longer than any other write; the external
-/// tool budget (3600 s) applies, with Stop covering the gap.
-const UPDATE_TIMEOUT: Duration = Duration::from_secs(3600);
-const UPDATE_OUTPUT_LIMIT: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -417,177 +409,6 @@ pub(crate) fn list_view(
     Ok(views)
 }
 
-/// Streams complete redacted lines out of the interleaved byte chunks the
-/// runner reports, mirroring the clone progress lane. Shared with the
-/// network module's fetch streaming.
-pub(crate) fn take_progress_bytes(
-    buffer: &mut Vec<u8>,
-    bytes: &[u8],
-    on_line: &mut dyn FnMut(&str),
-) {
-    buffer.extend_from_slice(bytes);
-    while let Some(position) = buffer
-        .iter()
-        .position(|byte| *byte == b'\n' || *byte == b'\r')
-    {
-        let line: Vec<u8> = buffer.drain(..=position).collect();
-        emit_line(&line, on_line);
-    }
-}
-
-pub(crate) fn emit_line(raw: &[u8], on_line: &mut dyn FnMut(&str)) {
-    let text = String::from_utf8_lossy(raw);
-    let line = text.trim_end_matches(['\r', '\n']).trim();
-    if !line.is_empty() {
-        on_line(&redact(line));
-    }
-}
-
-/// Rebuilds the argv from a fresh index read: the position only selects a
-/// path, the backend supplies the literal pathspec.
-fn update_args(work_root: &Path, index: Option<u32>) -> Result<Vec<OsString>, String> {
-    let mut args: Vec<OsString> = ["submodule", "update", "--init", "--recursive", "--progress"]
-        .into_iter()
-        .map(OsString::from)
-        .collect();
-    let Some(index) = index else {
-        return Ok(args);
-    };
-    let links = gitlinks(work_root).map_err(|error| error.message)?;
-    let link = links
-        .into_iter()
-        .nth(index as usize)
-        .ok_or_else(|| "That submodule is no longer listed; refresh the view.".to_string())?;
-    let spec = literal_pathspec(&link.raw_path).map_err(|_| {
-        "The submodule path cannot be represented on this platform; the update was refused."
-            .to_string()
-    })?;
-    args.push(OsString::from("--"));
-    args.push(spec);
-    Ok(args)
-}
-
-pub(crate) fn init_update(
-    state: &WriteState,
-    sessions: &session::SessionState,
-    snapshot_version: u64,
-    index: Option<u32>,
-    on_line: &mut dyn FnMut(&str),
-) -> Result<OperationResult, ProbeError> {
-    let operation_id = state.begin()?;
-    let result = run_update(state, sessions, snapshot_version, index, on_line);
-    state.finish();
-    result.map(|mut result| {
-        result.operation_id = operation_id;
-        result
-    })
-}
-
-/// Assumes the queue slot is held; tests call this directly to pre-arm
-/// cancellation, mirroring the other runners. Refusals carry
-/// `exit_code: None`, proving Git never ran; every outcome ends in a forced
-/// re-read. A cancelled or failed update may leave a partially cloned
-/// entry behind — the message says so, because only the next honest list
-/// can tell what survived.
-fn run_update(
-    state: &WriteState,
-    sessions: &session::SessionState,
-    snapshot_version: u64,
-    index: Option<u32>,
-    on_line: &mut dyn FnMut(&str),
-) -> Result<OperationResult, ProbeError> {
-    let mut outcome = Outcome::Success;
-    let mut exit_code = None;
-    let message;
-    let mut details = None;
-    let gates = match sessions.commit_context(snapshot_version) {
-        Err(error) => Err(error.message),
-        Ok((work_root, _unborn)) => match update_args(&work_root, index) {
-            Err(refusal) => Err(refusal),
-            Ok(args) => {
-                if state.cancel_flag().load(Ordering::SeqCst) {
-                    let snapshot = session::refresh(sessions)?;
-                    return Ok(OperationResult {
-                        category: None,
-                        suggestion: None,
-                        operation_id: 0,
-                        kind: OperationKind::SubmoduleUpdate,
-                        outcome: Outcome::Cancelled,
-                        exit_code: None,
-                        message: "Cancelled before Git ran; no submodule was touched.".into(),
-                        details: None,
-                        snapshot,
-                    });
-                }
-                Ok((work_root, args))
-            }
-        },
-    };
-    match gates {
-        Err(refusal) => {
-            outcome = Outcome::Rejected;
-            message = refusal;
-        }
-        Ok((work_root, args)) => {
-            let mut command = repo::user_git_command(&work_root);
-            command.args(&args);
-            let mut buffer: Vec<u8> = Vec::new();
-            let mut collect = |_: bool, bytes: &[u8]| {
-                take_progress_bytes(&mut buffer, bytes, on_line);
-            };
-            let output = runner::run_with_limit(
-                command,
-                state.cancel_flag(),
-                Duration::ZERO,
-                UPDATE_TIMEOUT,
-                UPDATE_OUTPUT_LIMIT,
-                &mut collect,
-            );
-            if !buffer.is_empty() {
-                let remainder = std::mem::take(&mut buffer);
-                emit_line(&remainder, on_line);
-            }
-            match output {
-                Ok(output) => {
-                    exit_code = output.status.code();
-                    if output.status.success() && !output.truncated {
-                        message = match index {
-                            None => "All listed submodules initialized and updated.".into(),
-                            Some(_) => "Submodule initialized and updated.".into(),
-                        };
-                    } else {
-                        outcome = Outcome::Failed;
-                        message = if output.truncated {
-                            "The update output exceeded the capture limit; the submodule state may be incomplete.".into()
-                        } else {
-                            "git submodule update reported a failure; the submodule state may be incomplete.".into()
-                        };
-                        details = Some(write::first_stderr_line(&output.stderr));
-                    }
-                }
-                Err(error) if error.code == Code::PROCESS_CANCELLED => {
-                    outcome = Outcome::Cancelled;
-                    message =
-                        "Cancelled while Git ran; the submodule state may be incomplete.".into();
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    let snapshot = session::refresh(sessions)?;
-    Ok(OperationResult {
-        category: None,
-        suggestion: None,
-        operation_id: 0,
-        kind: OperationKind::SubmoduleUpdate,
-        outcome,
-        exit_code,
-        message,
-        details,
-        snapshot,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,10 +448,8 @@ mod tests {
     /// uninitialized: `git submodule add` clones (the fixture allows the
     /// file transport on its own command line — measured, Git 2.53 ignores
     /// `protocol.file.allow` set in local repo config as a security
-    /// measure, and guit injects no `-c` overrides of its own), and
-    /// `git submodule deinit --force` then empties the work tree while
-    /// `.git/modules/<name>` keeps the objects, so a later update restores
-    /// the checkout without any transport.
+    /// measure), and `git submodule deinit --force` then empties the work
+    /// tree while `.git/modules/<name>` keeps the objects.
     fn parent_with_sub(submodule_path: &str) -> (tempfile::TempDir, tempfile::TempDir) {
         let child = tempfile::tempdir().unwrap();
         repo::git_with(
@@ -672,20 +491,12 @@ mod tests {
         repo::git_with(root, &[], &["submodule", "deinit", "--force", "--", path]);
     }
 
-    fn sub_fetch(root: &Path) {
-        repo::git_with(
-            &root.join("sub"),
-            &["-c", "protocol.file.allow=always"],
-            &["fetch", "-q", "origin"],
-        );
-    }
-
     #[test]
-    fn uninitialized_then_initialized_states_follow_the_real_git() {
+    fn uninitialized_entry_is_listed_from_the_real_git() {
         let (root, child) = parent_with_sub("sub");
         let child_oid = head_oid(child.path());
         let sessions = session::SessionState::default();
-        let view = session::open(&sessions, root.path()).unwrap();
+        session::open(&sessions, root.path()).unwrap();
 
         let views = list_view(&sessions).unwrap();
         assert_eq!(views.len(), 1);
@@ -700,103 +511,26 @@ mod tests {
             views[0].url.as_deref(),
             Some(child.path().to_str().unwrap())
         );
-
-        let state = WriteState::default();
-        let mut lines: Vec<String> = Vec::new();
-        let result = init_update(&state, &sessions, view.version, None, &mut |line| {
-            lines.push(line.to_owned())
-        })
-        .unwrap();
-        assert_eq!(result.outcome, Outcome::Success, "{:?}", result.details);
-        assert_eq!(
-            result.snapshot.as_ref().unwrap().version,
-            view.version + 1,
-            "the forced re-read must bump the version"
-        );
-        assert!(root.path().join("sub").join("f.txt").exists());
-        let views = list_view(&sessions).unwrap();
-        assert_eq!(views[0].state, SubmoduleState::UpToDate);
-        assert_eq!(
-            views[0].checked_out_oid.as_deref(),
-            Some(child_oid.as_str())
-        );
     }
 
     #[test]
-    fn out_of_sync_is_spotted_by_git_and_updated_back() {
-        let (root, child) = parent_with_sub("sub");
-        let sessions = session::SessionState::default();
-        let view = session::open(&sessions, root.path()).unwrap();
-        let state = WriteState::default();
-        init_update(&state, &sessions, view.version, None, &mut |_| {}).unwrap();
-
-        // Advance the child, then move the submodule work tree to the new
-        // commit and record it in the parent index: the checkout stays on
-        // the old commit, so Git flags the entry with `+` naming the
-        // checked-out oid, while the index records the new one.
-        let old_oid = head_oid(child.path());
-        std::fs::write(child.path().join("f.txt"), "two\n").unwrap();
-        git(child.path(), &["add", "--", "f.txt"]);
-        git(child.path(), &["commit", "-q", "-m", "second"]);
-        let new_oid = head_oid(child.path());
-        sub_fetch(root.path());
-        git(root.path(), &["-C", "sub", "checkout", "-q", &new_oid]);
-        git(root.path(), &["add", "sub"]);
-        git(
-            root.path(),
-            &[
-                "-c",
-                "user.name=guit test",
-                "-c",
-                "user.email=test@example.invalid",
-                "commit",
-                "-q",
-                "-m",
-                "bump sub",
-            ],
-        );
-        // Move the submodule work tree back to the old commit: now the
-        // index records new_oid while the checkout holds old_oid.
-        git(root.path(), &["-C", "sub", "checkout", "-q", &old_oid]);
-        let view = session::refresh(&sessions).unwrap().unwrap();
-        let views = list_view(&sessions).unwrap();
-        assert_eq!(views[0].state, SubmoduleState::OutOfSync);
-        assert_eq!(views[0].recorded_oid, new_oid);
-        assert_eq!(views[0].checked_out_oid.as_deref(), Some(old_oid.as_str()));
-
-        let state = WriteState::default();
-        let result = init_update(&state, &sessions, view.version, Some(0), &mut |_| {}).unwrap();
-        assert_eq!(result.outcome, Outcome::Success, "{:?}", result.details);
-        let views = list_view(&sessions).unwrap();
-        assert_eq!(views[0].state, SubmoduleState::UpToDate);
-        assert_eq!(views[0].checked_out_oid.as_deref(), Some(new_oid.as_str()));
-    }
-
-    #[test]
-    fn literal_pathspec_survives_spaces_and_targets_one_entry() {
+    fn literal_pathspec_survives_spaces_in_the_listing() {
         let (root, child) = parent_with_sub("sp ace");
         sub_add(root.path(), child.path().to_str().unwrap(), "sub2");
         git(root.path(), &["commit", "-q", "-m", "add second"]);
         deinit_sub(root.path(), "sub2");
         let sessions = session::SessionState::default();
-        let view = session::open(&sessions, root.path()).unwrap();
+        session::open(&sessions, root.path()).unwrap();
         let views = list_view(&sessions).unwrap();
         assert_eq!(views.len(), 2);
         // Index order: "sp ace" sorts before "sub2" (space < '2').
         assert_eq!(views[0].path, "sp ace");
         assert_eq!(views[1].path, "sub2");
         assert_eq!(views[0].state, SubmoduleState::Uninitialized);
-
-        let state = WriteState::default();
-        let result = init_update(&state, &sessions, view.version, Some(0), &mut |_| {}).unwrap();
-        assert_eq!(result.outcome, Outcome::Success, "{:?}", result.details);
-        let views = list_view(&sessions).unwrap();
-        assert_eq!(views[0].state, SubmoduleState::UpToDate);
-        assert_eq!(views[1].state, SubmoduleState::Uninitialized);
     }
 
     #[test]
-    fn unmapped_gitlink_is_listed_not_fatal_and_its_update_fails_honestly() {
+    fn unmapped_gitlink_is_listed_not_fatal() {
         let (root, _child) = parent_with_sub("sub");
         // A raw gitlink staged without any .gitmodules mapping: measured to
         // make a bulk `git submodule status` die with rc=128; guit lists
@@ -812,7 +546,7 @@ mod tests {
             ],
         );
         let sessions = session::SessionState::default();
-        let view = session::open(&sessions, root.path()).unwrap();
+        session::open(&sessions, root.path()).unwrap();
         let views = list_view(&sessions).unwrap();
         assert_eq!(views.len(), 2);
         let ghost = views
@@ -825,20 +559,6 @@ mod tests {
         assert_eq!(ghost.checked_out_oid, None);
         let sub = views.iter().find(|entry| entry.path == "sub").unwrap();
         assert_eq!(sub.state, SubmoduleState::Uninitialized);
-
-        let state = WriteState::default();
-        let result = init_update(
-            &state,
-            &sessions,
-            view.version,
-            Some(ghost.index),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(result.outcome, Outcome::Failed);
-        // Git's own refusal, not a guit invention.
-        assert!(result.details.is_some());
-        assert!(result.snapshot.is_some());
     }
 
     #[test]
@@ -902,69 +622,6 @@ mod tests {
                 .0,
             SubmoduleState::Conflicted
         );
-    }
-
-    #[test]
-    fn stale_versions_missing_entries_and_cancellation_never_reach_git() {
-        let (root, _child) = parent_with_sub("sub");
-        let sessions = session::SessionState::default();
-        let view = session::open(&sessions, root.path()).unwrap();
-        let state = WriteState::default();
-
-        let result = init_update(&state, &sessions, view.version + 5, None, &mut |_| {}).unwrap();
-        assert_eq!(result.outcome, Outcome::Rejected);
-        assert_eq!(result.exit_code, None, "Git must not have run");
-        // Every refusal still forces a re-read, so versions chain.
-        let version = result.snapshot.unwrap().version;
-
-        let result = init_update(&state, &sessions, version, Some(99), &mut |_| {}).unwrap();
-        assert_eq!(result.outcome, Outcome::Rejected);
-        assert!(result.message.contains("no longer listed"));
-        assert_eq!(result.exit_code, None);
-        assert!(result.snapshot.is_some());
-        let version = result.snapshot.unwrap().version;
-
-        // A pre-armed cancellation short-circuits before the process runs,
-        // yet the snapshot version still advances (inner path, slot held).
-        let holder = state.begin().unwrap();
-        state.cancel_flag().store(true, Ordering::SeqCst);
-        let result = run_update(&state, &sessions, version, None, &mut |_| {}).unwrap();
-        state.finish();
-        assert_eq!(result.outcome, Outcome::Cancelled);
-        assert_eq!(result.exit_code, None);
-        assert_eq!(
-            result.operation_id, 0,
-            "inner path leaves stamping to the wrapper"
-        );
-        let _ = holder;
-        assert!(result.snapshot.unwrap().version > view.version);
-        // Nothing was cloned: the submodule work tree is still absent.
-        assert!(!root.path().join("sub").join(".git").exists());
-    }
-
-    #[test]
-    fn progress_lines_are_redacted_and_reassembled() {
-        let mut buffer = Vec::new();
-        let mut lines: Vec<String> = Vec::new();
-        take_progress_bytes(&mut buffer, b"Cloning into 'https://us", &mut |line| {
-            lines.push(line.to_owned())
-        });
-        assert!(lines.is_empty(), "partial lines must not be emitted");
-        take_progress_bytes(
-            &mut buffer,
-            b"er:SEKRIT@example.com/x'\rReceiving objects: 100%",
-            &mut |line| lines.push(line.to_owned()),
-        );
-        assert_eq!(lines.len(), 1);
-        assert!(!lines[0].contains("SEKRIT"), "{}", lines[0]);
-        take_progress_bytes(&mut buffer, b" done\nReceiving: 50%", &mut |line| {
-            lines.push(line.to_owned())
-        });
-        assert_eq!(lines.len(), 2);
-        assert!(!buffer.is_empty(), "trailing text stays buffered");
-        let remainder = std::mem::take(&mut buffer);
-        emit_line(&remainder, &mut |line| lines.push(line.to_owned()));
-        assert_eq!(lines.len(), 3);
     }
 
     #[test]

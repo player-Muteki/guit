@@ -68,28 +68,6 @@ export type SnapshotView = {
   operation: OperationView | null;
 };
 
-// Heuristic cause of a failed network operation, decided in Rust; the
-// frontend only displays it, never re-derives it from text.
-export type NetCategory =
-  | "auth"
-  | "network"
-  | "nonfastforward"
-  | "protectedbranch"
-  | "remotehookrejected"
-  | "stalelease"
-  | "notfound"
-  | "other";
-
-export type CloneResult = {
-  target: string;
-  success: boolean;
-  cancelled: boolean;
-  message: string;
-  category: NetCategory | null;
-  suggestion: string | null;
-  residue: string | null;
-};
-
 export type OperationResult = {
   operationId: number;
   kind:
@@ -119,23 +97,11 @@ export type OperationResult = {
     | "resethard"
     | "worktreeadd"
     | "worktreeremove"
-    | "worktreeprune"
-    | "submoduleupdate"
-    | "remoteadd"
-    | "remoteseturl"
-    | "removeremote"
-    | "fetch"
-    | "setupstream"
-    | "pull"
-    | "push"
-    | "publish"
-    | "deleteremotebranch"
-    | "forcepush";
+    | "worktreeprune";
   outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted";
   exitCode: number | null;
   message: string;
   details: string | null;
-  category: NetCategory | null;
   suggestion: string | null;
   snapshot: SnapshotView | null;
 };
@@ -283,38 +249,6 @@ export const SUBMODULE_STATE_LABELS: Readonly<Record<SubmoduleView["state"], str
   unmapped: "no .gitmodules mapping",
 };
 
-// --- remotes --------------------------------------------------
-
-export type RemoteView = {
-  name: string;
-  fetchUrl: string | null;
-  pushUrl: string | null;
-  addressable: boolean;
-};
-
-export type SyncProgress = { operationId: number; line: string };
-
-export type PullDefault = {
-  rebase: { value: string; scope: string } | null;
-  ff: { value: string; scope: string } | null;
-  effective: string;
-  note: string | null;
-};
-
-export type PublishTarget = { name: string; url: string | null };
-
-// --- askpass ------------------------------------------------------
-
-// The payload of one `askpass-request` event: categorised prompt material
-// only. The Rust side has already stripped everything else and can prove
-// the target survives URL redaction, so displaying it is safe.
-export type AskPassRequest = {
-  operationId: number;
-  kind: "username" | "password";
-  target: string;
-  user: string | null;
-};
-
 // --- destructive-operation tickets --
 
 export type PreviewKindKey =
@@ -325,10 +259,7 @@ export type PreviewKindKey =
   | "stashDrop"
   | "stashPop"
   | "resetHard"
-  | "worktreeRemove"
-  | "remoteRemove"
-  | "remoteBranchDelete"
-  | "forcePush";
+  | "worktreeRemove";
 
 export type PreviewCopy = {
   warning: string;

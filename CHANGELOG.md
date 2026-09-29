@@ -57,6 +57,31 @@ is the record of what is not verified.
 - Stash, worktree and submodule management and remote management no longer have
   a page. Their commands stay registered while their entry points are retired in
   the open, so nothing is reachable by accident.
+- The remote rows in the branch picker are a read-only listing now. They show
+  the remote-tracking refs Git recorded locally — the last state your own `git`
+  wrote down — and say so, instead of offering actions against the remote.
+
+### Removed
+
+- guit does not touch the network. Cloning, fetching, pulling, pushing, force
+  pushing, publishing a branch, adding or removing a remote, deleting a
+  remote-tracking branch and setting a branch's upstream are gone: their entry
+  points, their command registrations and their implementations left in the same
+  change, so neither the window nor a hand-written call into the process layer
+  can ask for one.
+- The credential prompt. There is no "Retry with credentials" action, no askpass
+  helper for guit to act as, and no path by which a secret could reach the
+  window. Every `git` guit runs is told not to ask, so an unreachable remote is
+  a read failure rather than a dialog that hangs until it times out.
+- The progress streams that carried those operations — clone, sync and
+  submodule-download events have no emitter left to listen for, and the settings
+  probe that measured a transfer went with them.
+- Submodule init and update. The submodule list is read-only; downloading a
+  submodule's objects is a terminal command.
+- Implicit object fetching. Submodule recursion and lazy fetching are off for
+  every process guit starts, so a partial clone or a repository that is missing
+  objects keeps them missing. What Git will not answer without those objects is
+  reported as a failure, never as a clean tree.
 
 ### Fixed
 

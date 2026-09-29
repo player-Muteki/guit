@@ -17,10 +17,10 @@ platform.
 | **macOS** | **Build configuration only.** Bundle metadata (dmg/app, minimum system version 10.13) is schema- and config-validated. The app has never been run on macOS. Treat it as an untested preview. |
 | **Windows** | **Build configuration only.** Bundle metadata (NSIS currentUser, MSI, WebView2 download bootstrapper) is schema- and config-validated. The app has never been run on Windows. Treat it as an untested preview. |
 
-The interactive HTTPS askpass bridge is **unix-only by design**; on Windows a
-credential retry is refused with guidance to use a `credential.helper`
-(see `docs/credentials.md`). SSH passphrase prompting is refused on every
-platform — ssh-agent is the only supported path.
+guit performs no network operation, so there is no credential path to verify:
+no askpass bridge, no password prompt, no authentication retry (see
+`docs/credentials.md`). SSH passphrase prompting does not exist either — there
+is nothing for it to unblock.
 
 Continuous integration is configured (`.github/workflows/`) for per-platform
 bundles. No CI pass has been confirmed; none should be inferred from the
@@ -30,10 +30,6 @@ workflow files being present.
 
 These need a human and a second machine, and are honestly outstanding:
 
-- The attended credential pass against real GitHub / GitLab / Gitea accounts.
-- An interactive fetch killed mid-flight against a credential-protected
-  remote, to confirm startup recovery removes the orphaned askpass directory
-  and leaves the repository in its real state.
 - The branch-delete ticket dialog killed mid-confirmation, to confirm a
   restart cannot resurrect the confirmation.
 - Multi-display window clamping (the verification host is single-display;
@@ -70,16 +66,19 @@ These need a human and a second machine, and are honestly outstanding:
 
 ## Long operations
 
-- A clone is bounded by **silence, not by duration**. Two minutes without any
-  progress line from Git ends the attempt, and the report says guit stopped it
-  rather than that you did — a transfer that stopped reporting cannot be
-  revived by waiting. The cost of that choice is real: a server enumerating a
-  very large repository can stay quiet for more than two minutes, and such a
-  clone gets stopped even though it was only slow. Starting it again is the
-  answer. Every other operation has a duration bound instead of a silence
-  bound — one hour for fetch and push, minutes for the write lane — so a
-  stalled clone is the one case guit decides by listening rather than by
-  counting.
+- Every operation guit can start is local, and every local operation is bounded
+  by **duration** — minutes for the write lane. The one case that used to be
+  decided by silence instead, a clone that stops reporting, no longer exists:
+  a stalled transfer is not a state the panel can reach.
+- The local-only enforcement itself — `submodule.recurse` forced off and lazy
+  object fetching disabled for every `git` guit runs — **has not been exercised
+  against a partial clone or a repository with a real submodule**. It is built
+  to fail closed: if Git refuses something because of those controls, the panel
+  reports a read or write failure rather than a clean repository. That refusal
+  shape has not been observed on a fixture yet. The guard is also only as old as
+  the variable that carries it: a Git that does not know `GIT_NO_LAZY_FETCH`
+  ignores it rather than refusing, so the bound that is actually verified is the
+  Git 2.53 this project is built against.
 
 ## Watching and responsiveness
 
@@ -93,9 +92,9 @@ These need a human and a second machine, and are honestly outstanding:
   a successful refresh.
 - Keyboard injection into the packaged window could not be automated on this
   host (GNOME Wayland drops synthetic keys for unfocused XWayland windows;
-  WebKitGTK exposes no EditableText). Typed-input flows (add remote, set
-  URL, the credential dialog's submit leg) are covered by Rust-side tests
-  but were not clicked-through end-to-end with real typing.
+  WebKitGTK exposes no EditableText). Typed-input flows (creating and renaming
+  a branch, naming a tag, writing a commit message) are covered by Rust-side
+  tests but were not clicked-through end-to-end with real typing.
 
 ## Deliberate refusals
 
@@ -105,7 +104,7 @@ These need a human and a second machine, and are honestly outstanding:
 - Failures enter a toast stack (top-right, up to four, each with its own close
   button), so a second failure does not replace the first and a watcher
   refresh cannot hide it.
-- Force pushes and destructive operations are only possible through the
+- Destructive operations are only possible through the
   preview → recheck → confirm ticket flow; tickets are single-use and die
   with the process (a restart cannot resurrect one).
 - Configuration files with a future `schema_version` are refused, not
@@ -116,11 +115,14 @@ These need a human and a second machine, and are honestly outstanding:
 - Bare repositories open for inspection, but the status view is empty: Git
   itself refuses `status` in bare repositories, and guit reports that
   rather than inventing one.
+- guit refuses to be a remote client. Clone, fetch, pull, push, force push,
+  publishing and remote administration have no entry point, no registered
+  command and no background task, so a request that names one cannot reach the
+  process layer at all — not even by calling the retired IPC by hand.
 
-## Authentication against real hosting providers
+## Objects that are not here
 
-The credential dialog was verified end-to-end against a local 401 server
-and via integration tests with real `git ls-remote`; **the manual pass
-against GitHub/GitLab/Gitea accounts is a documented remaining gate** (see
-"Manual gates still open" above). Protected-branch refusals and
-provider-specific SSO flows have not been exercised.
+A partial clone or a repository whose objects were pruned may be missing objects
+that a view would like to read. guit does not fetch them: the read fails, the
+failure is reported as a failure, and the repository is not presented as clean
+or as complete. Fetching those objects is something you do in a terminal.

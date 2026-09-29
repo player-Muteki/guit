@@ -1,51 +1,49 @@
 # Credentials and authentication
 
 **guit never stores credentials.** There is no guit-owned credential file,
-keychain entry or in-memory cache that outlives a single operation.
+keychain entry or in-memory cache.
+
+It goes further than not storing them: guit performs no network operation, so
+it never *needs* a credential. There is no password dialog, no "retry with
+credentials" path and no askpass helper, and nothing in the product can be
+given a secret to hold.
+
+## Why there is nothing to prompt for
+
+Every operation guit runs is a local one — status, staging, committing, branch
+and tag management, history, conflict hand-off, reset preview. None of them
+contacts a remote. `git fetch`, `pull`, `push`, `clone` and `ls-remote` are not
+reachable from the window, and the process guit starts is told not to ask:
+
+- `GIT_TERMINAL_PROMPT=0` is set on every `git` guit runs, so a repository with
+  an unreachable or credential-protected remote stays a readable repository
+  instead of turning into a prompt that hangs until the timeout.
+- Inherited `GIT_*` variables are stripped from guit's child processes before
+  that, so nothing about the environment leaks into an operation by accident.
+- `submodule.recurse` is forced off and lazy fetching is disabled for the same
+  reason: a repository that happens to have a partial clone must not have
+  objects pulled down behind the panel's back.
+
+Moving objects between the repository and a remote is Git's job in a terminal,
+with whatever helper, agent or key you already configured. guit does not stand
+in for that, and does not pretend to know the current state of a remote.
 
 ## What guit respects
 
-- Your `credential.helper` configuration is left alone: if Git can answer a
-  login non-interactively (osxkeychain, GCM, libsecret, a store helper),
-  operations proceed exactly as they would in a terminal. guit reads
-  `credential.helper` only to *report* the current setup in its credential
-  status panel — read-only, never modified.
-- guit invokes your system `git` with your own configuration; it strips
-  inherited `GIT_*` variables from its child processes so nothing about your
-  environment leaks into an operation by accident.
-- For SSH remotes, an existing **ssh-agent** is used automatically (Git's
-  normal path). guit only reports whether `SSH_AUTH_SOCK` is present; it
-  never reads the agent or your keys.
-
-## Interactive HTTPS authentication (Linux/macOS)
-
-When an operation hits an HTTP(S) remote that demands a login and no helper
-answers, the operation fails as an authentication error and the UI offers a
-one-time **"Retry with credentials"** action. Retrying attaches a temporary
-askpass bridge to that single operation:
-
-- Git is given `GIT_ASKPASS` pointing at guit itself, plus two guard
-  variables, over a private unix socket in `$XDG_RUNTIME_DIR` (mode-0700
-  directory, 0600 socket). The answer lives only in the process handoff —
-  nothing is written to disk or logs.
-- guit answers **only** `Username for 'http…'` / `Password for 'http…'`
-  prompts. SSH passphrase prompts are refused with guidance to use
-  ssh-agent, because passing a passphrase through a GUI prompt is exactly
-  the pattern credential managers exist to avoid.
-- The bridge lives at most as long as the operation; each unanswered prompt
-  times out after 120 seconds and the operation fails honestly.
-- The secret never appears in the UI, events, diagnostics or logs — the
-  prompt text guit displays is validated (host must match the remote's
-  redacted form) and prompts that try to smuggle a credential in their text
-  are refused wholesale.
-
-The bridge is **unix-only by design**: on Windows the retry path is refused
-(`askpass_unsupported`) — use Git Credential Manager or another
-`credential.helper`, which guit honors without touching.
+- Your `credential.helper` configuration is left alone and never read. guit has
+  nothing to authenticate, so it does not ask Git what would answer a prompt.
+- Your remotes are left alone too. guit neither adds, rewrites nor removes one,
+  and does not put their URLs in the diagnostics export.
+- Your SSH keys and your agent are out of scope entirely: guit never reads
+  `SSH_AUTH_SOCK`, never contacts an agent, and cannot type a passphrase into
+  anything, because there is no dialog for it to type into.
+- Remote-tracking refs such as `origin/main` are shown as the local metadata
+  they are: the last state Git recorded for you, never claimed as live remote
+  state.
 
 ## What guit will not do
 
-- Save a password or token anywhere.
-- Rewrite or install a `credential.helper` entry.
-- Type into, or expose, your SSH private keys.
-- Keep the askpass socket around after the operation ends.
+- Save a password or token anywhere, in memory or on disk.
+- Rewrite, install or read back a `credential.helper` entry.
+- Read your SSH agent or your private keys.
+- Ask you for a secret, or fetch an object, in order to render a view.

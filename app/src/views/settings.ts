@@ -1,13 +1,12 @@
 // Settings view: General, External tools, Environment & diagnostics and
 // Developer. The environment probes (git/tool/window checks, the
-// compact-window test, the diagnostics export manifest, the process and
-// transfer probes) live here so the everyday views stay focused on the Git
+// compact-window test, the diagnostics export manifest, the process probe)
+// live here so the everyday views stay focused on the Git
 // workflow. Theme follows the
 // system by default; the selector is stored in localStorage and applied as
 // a `data-theme` attribute on <html>.
 
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { button, el, icon } from "../dom";
 import { createConfirmDialog, type ConfirmRequest } from "../dialogs/confirm";
@@ -117,7 +116,6 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
 
   // --- developer ---
   const probeResult = el("p", { class: "setting-note", role: "status", text: "Idle" });
-  const transferResult = el("p", { class: "setting-note", role: "status", text: "Uses a disposable local clone." });
   const runProbeButton = el("button", { class: "btn", type: "button", text: "Run probe" });
   const cancelProbeButton = el("button", { class: "btn", type: "button", text: "Cancel probe", disabled: true });
   // Environment facts are probed once, the first time the view is opened.
@@ -127,8 +125,6 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     el("p", { class: "setting-note", text: "Starts a cancellable Git command to verify that the window stays responsive." }),
     el("div", { class: "view-tools" }, [runProbeButton, cancelProbeButton]),
     probeResult,
-    el("div", { class: "view-tools" }, [button("Test Git progress", () => void transferProbe(), { class: "btn" })]),
-    transferResult,
   ]);
 
   element.append(general, environment, developer);
@@ -141,14 +137,15 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     kind: "diagnostics",
     candidates: [
       "App, OS and Git versions, and the Git executable location (home folder shown as ~)",
-      "Credential posture: policy, helper names, SSH-agent presence, URL schemes in use",
-      "Remote names and their URLs with any embedded credentials redacted",
+      "The filesystem-watch mode",
       "Config file names, sizes and schema versions — never their contents",
       "The 256 most recent event summaries: phase timings, error codes and messages",
     ],
     dropped: [
       "passwords",
       "tokens",
+      "credential configuration",
+      "remotes and their URLs",
       "prompts",
       "commit messages",
       "file contents",
@@ -215,23 +212,6 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
       deps.onError(error);
     }
   });
-  const transferProbe = async (): Promise<void> => {
-    let bytes = 0;
-    let unlisten: (() => void) | undefined;
-    try {
-      unlisten = await listen<number>("probe-progress", ({ payload }) => {
-        bytes += payload;
-        transferResult.textContent = `Receiving Git progress: ${bytes} bytes`;
-      });
-      transferResult.textContent = await invoke<string>("run_transfer_probe");
-    } catch (error) {
-      deps.onError(error);
-      transferResult.textContent = "Progress probe failed";
-    } finally {
-      unlisten?.();
-    }
-  };
-
   // --- events ---
   themeSelect.addEventListener("change", () => {
     const value = themeSelect.value;

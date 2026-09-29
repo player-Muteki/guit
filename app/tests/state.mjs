@@ -5,7 +5,6 @@ import {
   currentSnapshot,
   dismissToast,
   pushToast,
-  setForcePushReady,
   setPendingPreview,
   setStatus,
   setWatchMode,
@@ -13,7 +12,6 @@ import {
   subscribe,
   toastStack,
   isWriteRunning,
-  isForcePushReady,
   watchStatus,
   statusLine,
   snapshotVersion,
@@ -65,7 +63,7 @@ test("the toast stack is capped and drops the oldest entry", () => {
   assert.deepEqual(messages, ["failure 2", "failure 3", "failure 4", "failure 5"]);
 });
 
-test("the busy lanes, watch mode, status line and force-push gate are readable", () => {
+test("the busy lanes, watch mode and status line are readable", () => {
   setWriteRunning(true);
   assert.equal(isWriteRunning(), true);
   setWriteRunning(false);
@@ -81,11 +79,6 @@ test("the busy lanes, watch mode, status line and force-push gate are readable",
   setStatus("");
   assert.equal(statusLine().message, "");
 
-  assert.equal(isForcePushReady(), false);
-  setForcePushReady(true);
-  assert.equal(isForcePushReady(), true);
-  setForcePushReady(false);
-
   setPendingPreview(null);
   assert.equal(currentSnapshot() === null, false, "a snapshot is still the live one");
 });
@@ -94,7 +87,7 @@ test("a progress line repaints the status bar, not the whole window", () => {
   const changes = [];
   const unsubscribe = subscribe((change) => changes.push(change));
   try {
-    setStatus("Receiving objects: 40%", "progress");
+    setStatus("Cleaning files: 40%", "progress");
     assert.deepEqual(changes, ["status"], "one streamed line must not cost a window render");
     setWatchMode("poll");
     assert.deepEqual(changes, ["status", "status"], "the monitor line lives in the status bar");

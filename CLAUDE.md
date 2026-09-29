@@ -34,9 +34,10 @@ current remote state. Preserve the repository's own remote and credential settin
 Hooks, signing programs and external tools retain their existing Git configuration;
 offline functionality is not an OS-level network sandbox for those programs.
 
-The source still contains legacy remote operations and seven-view UI code. These are
-migration work, not evidence that they belong in the target product. Follow the plan
-to remove their entry points and command registrations, then remove unused internals
+The remote surface has left the source: no view, command registration or
+background task for it remains. What still lingers is view code from the
+seven-view suite that no page reaches. That is migration work, not evidence that
+it belongs in the target product. Remove unused internals
 without breaking shared local services. The plan describes future work; do not claim
 it is implemented just because its documents exist.
 
@@ -80,7 +81,6 @@ Running one test:
 node --test tests/file-model.mjs                        # one file
 node --test --test-name-pattern="stale" tests/state.mjs # one test
 cargo test --manifest-path src-tauri/Cargo.toml session  # substring filter
-cargo test --manifest-path src-tauri/Cargo.toml --test askpass_e2e   # integration test
 ```
 
 Two stylesheet gates, both pure-stdlib Python, both must run **after** `npm run build`
@@ -92,9 +92,7 @@ python3 ../tools/bench/color-contrast.py dist/assets
 python3 ../tools/bench/responsive-check.py src/style.css src/style/tokens.css
 ```
 
-`app/src-tauri/tests/askpass_e2e.rs` spawns the real binary and drives a loopback 401
-server. It is `#![cfg(unix)]` and needs the bin target built, so plain `cargo test`
-covers it. `app/src-tauri/examples/watch_probe.rs` is a manual `cargo run --example`.
+`app/src-tauri/examples/watch_probe.rs` is a manual `cargo run --example`.
 
 ## Architecture
 
@@ -138,7 +136,7 @@ lane on purpose — a diff window blocks for as long as the user keeps it open, 
 must stay available meanwhile.
 
 Every destructive operation (discard, clean, branch/tag delete, stash pop/drop, hard
-reset, worktree/remote removal, remote-branch delete, force push) shares one flow:
+reset, worktree removal) shares one flow:
 
 ```
 preview_*  →  backend re-reads Git, computes the exact affected set
@@ -152,8 +150,7 @@ What a ticket binds depends on the operation: a branch delete binds the observed
 the existing hard reset binds target + observed HEAD + the tracked-dirty file set.
 That existing set is insufficient for the outline's clean-reset contract: the new
 preview must also cover target-tree differences, obstructing and explicitly cleaned
-untracked paths, and protected boundaries. Legacy force push binds the remote/branch
-pair, local oid and `--force-with-lease` lease oid; its product path is being removed.
+untracked paths, and protected boundaries.
 Nonces live in memory and die with the process. On the frontend, `preview.renew()` re-requests
 the preview after **every accepted snapshot**, so a changed candidate set is re-shown and
 must be confirmed again.
@@ -166,21 +163,23 @@ is `git_status_truncated`, not "no changes". An unidentifiable `MERGE_HEAD` is
 any Git read, decide what the failure looks like before deciding what the success looks
 like.
 
-### Legacy credentials implementation
+### No network, no credentials
 
-guit stores no credentials. The default is `GIT_TERMINAL_PROMPT=0` with no `GIT_ASKPASS`; the
-only path to a secret is the explicit "Retry with credentials", which attaches a
-`askpass::Bridge` living exactly as long as that one operation. `main()` intercepts its
-own argv before any Tauri machinery runs and acts as the helper. SSH passphrases are
-refused by design — ssh-agent is the only sanctioned path. `repo::user_git_command`
-strips every inherited `GIT_*` variable; interactive commands re-add exactly three.
+guit stores no credentials and never needs one: every operation is local, and
+clone, fetch, pull, push, force push, publishing, remote administration and the
+askpass helper have no UI entry point, no command registration and no background
+task. `repo::user_git_command` is where that is enforced. It strips every
+inherited `GIT_*` variable, sets `GIT_TERMINAL_PROMPT=0` so that a repository
+with an unreachable remote stays a readable repository instead of a hung prompt,
+and turns off submodule recursion and lazy object fetching, so no read can pull
+objects down behind the panel's back. Every other process guit starts goes
+through it. The interactive helper's argv interception is gone with it; what
+survives is the shared sweep of stale atomic-rename temporary files, because the
+window geometry file writes through the same path.
 
-This describes the existing remote implementation for safe migration, not a supported
-product direction. Remove the remote retry UI and command surface under the local-only
-scope. Preserve shared subprocess cleanup and the no-secret-storage rule wherever
-applicable. Any environment control needed to prevent implicit object downloads must
-be added deliberately after inherited Git variables are stripped and verified with
-the supported Git versions.
+A refusal caused by one of these controls is reported as a read or write failure,
+never as a clean repository. `GIT_*` stripping must stay verified against the
+supported Git versions before any further environment control is added.
 
 ## Rules that are enforced by tests — do not break them
 

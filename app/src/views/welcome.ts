@@ -1,13 +1,9 @@
-// Welcome view: the no-repository state. Offers Open, Clone and the recent
-// repository list. The clone form streams `clone-progress`, can be
-// cancelled, and never removes a failed run's residue — the user decides.
+// Welcome view: the no-repository state. It offers the repository picker and
+// the recent list, and nothing else — guit opens repositories that already
+// exist on disk.
 
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { button, el, icon } from "../dom";
-import { setActiveView, setStatus } from "../state";
-import type { CloneResult } from "../types";
+import { button, el } from "../dom";
 
 export interface WelcomeDeps {
   openRepository(path: string): Promise<void>;
@@ -36,32 +32,13 @@ export function createWelcomeView(deps: WelcomeDeps): { element: HTMLElement; re
     recentList,
   ]);
 
-  const cloneSource = el("input", {
-    class: "input",
-    type: "text",
-    placeholder: "URL or local path",
-    "aria-label": "Repository to clone",
-  });
-  const clonePickDir = el("button", { class: "btn", type: "button", text: "Into folder…" });
-  const cloneStart = el("button", { class: "btn btn-primary", type: "button", text: "Clone", disabled: true });
-  const cloneCancel = el("button", { class: "btn", type: "button", text: "Cancel clone", disabled: true });
-  const cloneStatus = el("p", { class: "welcome-clone-status", role: "status", text: "Choose a destination folder to clone a repository." });
-  const cloneBlock = el("div", { class: "welcome-block" }, [
-    el("h3", { class: "welcome-label" }, [icon("clone"), el("span", { text: "Clone" })]),
-    el("div", { class: "clone-row" }, [cloneSource, clonePickDir, cloneStart, cloneCancel]),
-    cloneStatus,
-  ]);
-
   element.append(
     headline,
     tagline,
     status,
     el("div", { class: "welcome-actions" }, [openButton]),
     recentBlock,
-    cloneBlock,
   );
-
-  let cloneParent: string | undefined;
 
   async function pickRepository(): Promise<void> {
     try {
@@ -71,73 +48,6 @@ export function createWelcomeView(deps: WelcomeDeps): { element: HTMLElement; re
       deps.onError(error);
     }
   }
-
-  clonePickDir.addEventListener("click", async () => {
-    try {
-      const selected = await open({ directory: true, multiple: false });
-      if (typeof selected === "string") {
-        cloneParent = selected;
-        cloneStart.disabled = cloneSource.value.trim() === "";
-        cloneStatus.textContent = `Destination: ${selected}`;
-      }
-    } catch (error) {
-      deps.onError(error);
-    }
-  });
-  cloneSource.addEventListener("input", () => {
-    cloneStart.disabled = cloneParent === undefined || cloneSource.value.trim() === "";
-  });
-  cloneCancel.addEventListener("click", async () => {
-    try {
-      await invoke("cancel_clone");
-      cloneStatus.textContent = "Cancellation requested; stopping Git…";
-    } catch (error) {
-      deps.onError(error);
-    }
-  });
-  cloneStart.addEventListener("click", async () => {
-    if (cloneParent === undefined) return;
-    const source = cloneSource.value.trim();
-    cloneStart.disabled = true;
-    clonePickDir.disabled = true;
-    cloneSource.disabled = true;
-    cloneCancel.disabled = false;
-    cloneStatus.textContent = "Cloning…";
-    let unlisten: (() => void) | undefined;
-    try {
-      unlisten = await listen<string>("clone-progress", ({ payload }) => {
-        cloneStatus.textContent = payload;
-      });
-      const result = await invoke<CloneResult>("clone_repository", { source, parent: cloneParent });
-      if (result.success) {
-        cloneStatus.textContent = `${result.message} Opening ${result.target}…`;
-        await deps.openRepository(result.target);
-        setActiveView("main");
-      } else {
-        cloneStatus.textContent = result.suggestion ? `${result.message} ${result.suggestion}` : result.message;
-        if (result.residue) {
-          // guit never deletes anything: the user decides what to do with it.
-          deps.onError(
-            result.cancelled
-              ? `The cancelled clone left a partial folder at ${result.residue}. guit will not remove it automatically.`
-              : `The failed clone left a folder at ${result.residue}. guit will not remove it automatically.`,
-          );
-        }
-      }
-      cloneSource.value = "";
-      setStatus("");
-    } catch (error) {
-      deps.onError(error);
-      cloneStatus.textContent = "Clone failed.";
-      setStatus("Clone failed.", "error");
-    } finally {
-      unlisten?.();
-      clonePickDir.disabled = false;
-      cloneSource.disabled = false;
-      cloneCancel.disabled = true;
-      cloneStart.disabled = cloneSource.value.trim() === "";
-    }
-  });
 
   const renderRecents = (paths: string[]): void => {
     recentBlock.hidden = paths.length === 0;

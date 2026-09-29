@@ -4,9 +4,9 @@
 // whose raw bytes do not round-trip through the display form are listed
 // but flagged non-addressable, so no write action can ever target a
 // look-alike ref name. By the density rule the everyday verbs (Switch
-// for local branches) stay visible on the row; Merge, Rebase, Rename,
-// Delete and Set upstream live in a per-row `⋯` menu, and every delete
-// goes through the shared preview ticket.
+// for local branches) stay visible on the row; Merge, Rebase, Rename and
+// Delete live in a per-row `⋯` menu, and every delete goes through the shared
+// preview ticket.
 
 import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, openMenu, plural } from "../dom";
@@ -82,7 +82,6 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
   let syncedVersion = -1;
   let listing: RefListing | null = null;
   let renaming: string | null = null;
-  let upstreamPickerFor: string | null = null;
   let branchForceTarget: string | null = null;
   let tagDetailFor: string | null = null;
   let filter = "";
@@ -97,8 +96,7 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
       | "rename_branch"
       | "create_tag"
       | "merge_start"
-      | "rebase_start"
-      | "set_upstream",
+      | "rebase_start",
     args: Record<string, unknown>,
     running: string,
   ): Promise<OperationResult | null> => {
@@ -132,17 +130,6 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
 
   const requestBranchDelete = (name: string, force: boolean): void => {
     void deps.preview.request("branch", { name, force }, null);
-  };
-
-  // --- upstream picker ---
-  const setUpstream = async (branch: string, upstream: string | null): Promise<void> => {
-    const result = await runBranch(
-      "set_upstream",
-      { branch, upstream },
-      upstream ? `Setting upstream of ${branch}…` : `Clearing upstream of ${branch}…`,
-    );
-    if (result) upstreamPickerFor = null;
-    render();
   };
 
   // --- tag detail ---
@@ -208,26 +195,6 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
     return more;
   };
 
-  const buildUpstreamPicker = (branch: BranchRef): HTMLElement => {
-    const group = el("div", { class: "file-row ref-row upstream-picker", role: "group", "aria-label": `Choose upstream for ${branch.name}` });
-    group.append(el("span", { class: "ref-name", text: `Upstream for ${branch.name}:` }));
-    // The picker lists only addressable, non-symbolic remote-tracking
-    // refs from the last read listing; the backend re-verifies both sides
-    // against its own fresh listing before Git runs.
-    const candidates = (listing?.remotes ?? []).filter((remote) => remote.addressable && remote.symref === null);
-    if (candidates.length === 0) {
-      group.append(el("span", { class: "ref-meta", text: "no fetched remote branches — run a fetch first" }));
-    }
-    for (const remote of candidates) {
-      group.append(button(remote.name, () => void setUpstream(branch.name, remote.name), { class: "row-action" }));
-    }
-    if (branch.upstream) {
-      group.append(button("No upstream", () => void setUpstream(branch.name, null), { class: "row-action" }));
-    }
-    group.append(button("Cancel", () => { upstreamPickerFor = null; render(); }, { class: "row-action" }));
-    return group;
-  };
-
   const matchesFilter = (name: string): boolean => filter === "" || name.toLowerCase().includes(filter);
 
   const renderBranches = (branches: BranchRef[]): HTMLElement[] => {
@@ -273,32 +240,24 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
               : []),
             { label: "Rename…", run: () => { renaming = branch.name; render(); } },
             ...(!branch.head ? [{ label: "Delete…", run: () => requestBranchDelete(branch.name, false), danger: true }] : []),
-            { label: "Set upstream…", run: () => { upstreamPickerFor = upstreamPickerFor === branch.name ? null : branch.name; render(); } },
           ]),
         );
       }
       rows.push(element);
-      if (upstreamPickerFor === branch.name) rows.push(buildUpstreamPicker(branch));
     }
     return rows;
   };
 
   const renderRemoteBranches = (remotes: RemoteRef[]): HTMLElement[] => {
+    // Remote-tracking refs are shown as the local metadata they are: the last
+    // state Git recorded, with no entry point that could change the remote
+    // itself. The symbolic default-branch marker and names that do not
+    // round-trip are marked the same way either way.
     const rows: HTMLElement[] = [el("div", { class: "ref-heading", text: `Remote branches (${remotes.length})` })];
     for (const remote of remotes) {
       if (!matchesFilter(remote.name)) continue;
       const meta = remote.symref ? `symref → ${remote.symref}` : remote.oid.slice(0, 8);
-      const element = refRow("", remote.name, meta, remote.addressable);
-      // Deletable targets are real remote branches only: the symbolic
-      // default-branch marker and irreversibly named refs stay read-only.
-      if (remote.addressable && remote.symref === null) {
-        element.append(
-          moreButton(remote.name, [
-            { label: "Delete on remote…", run: () => void deps.preview.request("remoteBranchDelete", { target: remote.name }, null), danger: true },
-          ]),
-        );
-      }
-      rows.push(element);
+      rows.push(refRow("", remote.name, meta, remote.addressable));
     }
     return rows;
   };
@@ -333,7 +292,6 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
   const placeholder = (message: string): void => {
     listing = null;
     renaming = null;
-    upstreamPickerFor = null;
     hideBranchForce();
     tagDetailPanel.hidden = true;
     status.textContent = "";

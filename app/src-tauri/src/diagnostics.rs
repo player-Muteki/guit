@@ -125,11 +125,6 @@ pub struct Facts<'a> {
     pub git_available: bool,
     pub git_version: Option<&'a str>,
     pub git_executable: Option<&'a str>,
-    pub credential_policy: Option<&'a str>,
-    pub credential_helpers: &'a [String],
-    pub ssh_agent: bool,
-    pub remote_schemes: &'a [(String, Vec<String>)],
-    pub remotes: &'a [(String, Option<String>, Option<String>)],
     pub watch_mode: &'a str,
     pub config_files: Vec<ConfigFile>,
     pub entries: Vec<Entry>,
@@ -152,32 +147,6 @@ pub(crate) fn export_text(facts: &Facts) -> String {
         }
     ));
     text.push_str(&format!("watch_mode: {}\n", facts.watch_mode));
-    text.push_str("credentials:\n");
-    match facts.credential_policy {
-        Some(policy) => {
-            text.push_str(&format!("  policy: {policy}\n"));
-            text.push_str(&format!(
-                "  helpers: {}\n",
-                facts.credential_helpers.join(", ")
-            ));
-            text.push_str(&format!("  ssh_agent: {}\n", facts.ssh_agent));
-            for (scheme, names) in facts.remote_schemes {
-                text.push_str(&format!("  scheme {scheme}: {}\n", names.join(", ")));
-            }
-        }
-        None => text.push_str("  no repository session (posture not probed)\n"),
-    }
-    text.push_str("remotes (redacted):\n");
-    if facts.remotes.is_empty() {
-        text.push_str("  none\n");
-    }
-    for (name, fetch, push) in facts.remotes {
-        text.push_str(&format!(
-            "  {name}: fetch={} push={}\n",
-            fetch.as_deref().unwrap_or("-"),
-            push.as_deref().unwrap_or("-")
-        ));
-    }
     text.push_str("config files (name, bytes, schema version):\n");
     if facts.config_files.is_empty() {
         text.push_str("  none\n");
@@ -328,11 +297,6 @@ mod tests {
             git_available: true,
             git_version: Some("git version 2.53.0"),
             git_executable: None,
-            credential_policy: None,
-            credential_helpers: &[],
-            ssh_agent: false,
-            remote_schemes: &[],
-            remotes: &[],
             watch_mode: "watch",
             config_files: vec![],
             entries,
@@ -345,14 +309,6 @@ mod tests {
         // of them unrepresentable; the test asserts the textual surface.
         let facts = Facts {
             git_executable: Some("/home/victim/programs/git"),
-            credential_policy: Some("askpass bridge active"),
-            credential_helpers: &["store".to_owned()],
-            remote_schemes: &[("https".to_owned(), vec!["origin".to_owned()])],
-            remotes: &[(
-                "origin".to_owned(),
-                Some("https://[redacted]@github.com/org/repo.git".to_owned()),
-                None,
-            )],
             config_files: vec![ConfigFile {
                 name: "session.json".to_owned(),
                 size: 41,

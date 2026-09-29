@@ -25,19 +25,17 @@ import {
   subscribe,
   VIEW_ORDER,
 } from "./state";
-import type { OperationResult, SnapshotView, SyncProgress } from "./types";
-import { createShell, type Shell, type SyncAction } from "./shell";
+import type { OperationResult, SnapshotView } from "./types";
+import { createShell, type Shell } from "./shell";
 import { disposeAll, onDispose } from "./lifecycle";
 import { publishSnapshot, subscribeToDomain } from "./snapshotBus";
 import { createPreviewController } from "./dialogs/preview";
-import { createAskpassDialog } from "./dialogs/askpass";
 import { createToastLayer } from "./dialogs/toast";
 import { initFontPx, currentFontPx, applyFontPx, FONT_DEFAULT } from "./font";
 import { installWindowHooks, restoreWindowState, setAlwaysOnTop } from "./window";
 import { createChangesView } from "./views/changes";
 import { createHistoryView } from "./views/history";
 import { createBranchesView } from "./views/branches";
-import { createRemotesView, type RemotesView } from "./views/remotes";
 import { createSettingsView } from "./views/settings";
 import { createWelcomeView } from "./views/welcome";
 import { createMainPanel } from "./views/mainPanel";
@@ -62,9 +60,8 @@ const showError = (error: unknown): void => {
 let shell: Shell;
 
 const preview = createPreviewController(showError, () => shell.focusTabs());
-const askpass = createAskpassDialog(showError);
 const toasts = createToastLayer();
-document.body.append(askpass.element, toasts.element);
+document.body.append(toasts.element);
 
 // --- shared cross-view state the branches view needs (branch/tag from commit) ---
 let branchStartOid: string | null = null;
@@ -158,33 +155,17 @@ const history = createHistoryView({
 });
 const settings = createSettingsView({ onError: showError });
 
-// The stash, worktree and submodule modules no longer have a page, so they are
-// not built at all: their DOM, their listeners and — the part that cost a live
-// repository six Git reads per refresh — their automatic listing all went with
-// the page. The app bar's sync menu is the one entry still wired to a module of
-// that group, and it builds its own on the first use rather than at boot.
-let remoteOps: RemotesView | null = null;
-const runSync = (action: SyncAction): void => {
-  remoteOps ??= createRemotesView({ preview, onError: showError });
-  remoteOps.run(action);
-};
-
 // --- shell ---
 shell = createShell({
   openRepository: () => void pickRepository(),
   refresh: () => void refreshSession(false),
   closeRepository: () => void closeRepository(),
-  clone: () => {
-    setActiveView("main");
-    setStatus("Use the welcome view to clone a repository.");
-  },
   commit: () => shell.focusCommit(),
   cancelWrite: () => void invoke("cancel_write"),
   cancelTool: () => void invoke("cancel_exttool"),
   setOnTop: (value) => {
     void setAlwaysOnTop(value).catch(showError);
   },
-  sync: (action) => runSync(action),
 });
 
 // The main panel and the branch overlay are the only two places a repository
@@ -234,8 +215,8 @@ onDispose(subscribeToDomain("refs", () => {
   if (shell.isOverlayOpen()) branches.sync();
 }));
 
-// A status-line change — including every streamed progress line of a fetch or
-// push — repaints the status bar only. Everything else repaints the window.
+// A status-line change — including every streamed progress line of a running
+// write — repaints the status bar only. Everything else repaints the window.
 onDispose(
   subscribe((change) => {
     if (change === "status") shell.renderStatus();
@@ -250,15 +231,12 @@ preview.onConfirm((pending) => {
     switch (kind) {
       case "discard": return confirmTicket("discard_files", nonce, "Discarding work-tree changes…");
       case "clean": return confirmTicket("clean_files", nonce, "Deleting untracked files…");
-      case "branch": return confirmTicket("delete_branch", nonce, "Deleting branch…", false, pending.branch.name);
+      case "branch": return confirmTicket("delete_branch", nonce, "Deleting branch…", pending.branch.name);
       case "tag": return confirmTicket("delete_tag", nonce, "Deleting tag…");
       case "stashDrop": return confirmTicket("stash_drop", nonce, "Deleting stash entry…");
       case "stashPop": return confirmTicket("stash_pop", nonce, "Popping stash entry…");
       case "resetHard": return confirmTicket("reset_hard", nonce, "Hard resetting…");
       case "worktreeRemove": return confirmTicket("remove_worktree", nonce, "Removing worktree…");
-      case "remoteRemove": return confirmTicket("remove_remote", nonce, "Removing remote…");
-      case "remoteBranchDelete": return confirmTicket("delete_remote_branch", nonce, "Deleting remote branch…", true);
-      case "forcePush": return confirmTicket("force_push", nonce, "Force-pushing…", true);
     }
   })();
 });
@@ -267,18 +245,13 @@ async function confirmTicket(
   command: string,
   nonce: string,
   running: string,
-  streamed = false,
   branchName: string | null = null,
 ): Promise<void> {
   if (isWriteRunning()) return;
   setWriteRunning(true);
   setStatus(running, "progress");
-  let unlisten: (() => void) | undefined;
-  if (streamed) {
-    unlisten = await listen<SyncProgress>("sync-progress", ({ payload }) => setStatus(payload.line, "progress"));
-  }
   try {
-    const result = await invoke<OperationResult>(command, { nonce, interactive: false });
+    const result = await invoke<OperationResult>(command, { nonce });
     applySnapshot(result.snapshot);
     setStatus(
       result.details ? `${result.message} ${result.details}` : result.message,
@@ -297,7 +270,6 @@ async function confirmTicket(
     showError(error);
     setStatus("The operation did not run.", "error");
   } finally {
-    unlisten?.();
     setWriteRunning(false);
   }
 }

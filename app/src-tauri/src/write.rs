@@ -1,6 +1,6 @@
 use crate::probe::{redact, Code, ProbeError};
 use crate::status::StatusEntry;
-use crate::{netclassify, repo, runner, session, status};
+use crate::{repo, runner, session, status};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -47,28 +47,6 @@ pub(crate) enum Bound {
     },
     /// Remove a worktree bound to the HEAD it had when previewed.
     WorktreeRemove { path: String, head: String },
-    /// Remove a remote: the name, its fetch URL and its tracking-ref set, all
-    /// as observed at preview time.
-    RemoveRemote {
-        name: String,
-        url: String,
-        tracking: Vec<String>,
-    },
-    /// Delete a branch on a remote, bound to the tracking oid.
-    DeleteRemoteBranch {
-        remote: String,
-        branch: String,
-        oid: String,
-    },
-    /// Force push: the (remote, branch) target, the local commit the
-    /// overwrite list was computed against, and the lease oid
-    /// `--force-with-lease` pins the remote to.
-    ForcePush {
-        remote: String,
-        branch: String,
-        local_oid: String,
-        lease_oid: String,
-    },
 }
 
 #[derive(Debug)]
@@ -213,69 +191,6 @@ impl WriteState {
         })
     }
 
-    /// Ticket for removing a remote, bound to the name, the fetch URL and
-    /// the remote-tracking ref set observed at preview time. The URL lives
-    /// only inside the backend ticket; the frontend ever sees the redacted
-    /// display form from the preview itself.
-    pub(crate) fn stage_remote_remove(
-        &self,
-        work_root: PathBuf,
-        name: String,
-        fetch_url: String,
-        tracking: Vec<String>,
-    ) -> String {
-        self.stage_preview(Preview {
-            work_root,
-            bound: Bound::RemoveRemote {
-                name,
-                url: fetch_url,
-                tracking,
-            },
-        })
-    }
-
-    /// Ticket for deleting a branch on a remote, bound to the remote name,
-    /// the branch name (which may contain slashes) and the tracking oid
-    /// observed at preview time; the delete refspec must match that oid.
-    pub(crate) fn stage_remote_branch_delete(
-        &self,
-        work_root: PathBuf,
-        remote: String,
-        branch: String,
-        oid: String,
-    ) -> String {
-        self.stage_preview(Preview {
-            work_root,
-            bound: Bound::DeleteRemoteBranch {
-                remote,
-                branch,
-                oid,
-            },
-        })
-    }
-
-    /// Ticket for a force push: the (remote, branch) target, the local
-    /// commit the overwrite list was computed against, and the lease — the
-    /// tracking oid `--force-with-lease` will pin the remote to.
-    pub(crate) fn stage_force_push(
-        &self,
-        work_root: PathBuf,
-        remote: String,
-        branch: String,
-        local_oid: String,
-        lease_oid: String,
-    ) -> String {
-        self.stage_preview(Preview {
-            work_root,
-            bound: Bound::ForcePush {
-                remote,
-                branch,
-                local_oid,
-                lease_oid,
-            },
-        })
-    }
-
     /// Removes and returns the ticket for `nonce`, whatever operation staged
     /// it. This is the single-use gate: the ticket is gone from here on, so
     /// even a re-check that goes on to refuse still forces a fresh preview.
@@ -291,15 +206,13 @@ impl WriteState {
     }
 }
 
-/// What an operation's Git invocation reports back: the outcome, the
-/// wording shown, and — for network writes — the heuristic category and
-/// advice that the shared result carries through.
+/// What an operation's Git invocation reports back: the outcome and the
+/// wording shown, carried through into the shared result.
 pub(crate) struct Ran {
     pub outcome: Outcome,
     pub message: String,
     pub details: Option<String>,
     pub exit_code: Option<i32>,
-    pub category: Option<netclassify::NetCategory>,
     pub suggestion: Option<String>,
 }
 
@@ -312,7 +225,6 @@ impl Ran {
             message: message.into(),
             details: None,
             exit_code,
-            category: None,
             suggestion: None,
         }
     }
@@ -326,7 +238,6 @@ impl Ran {
             message: message.into(),
             details: Some(first_stderr_line(&output.stderr)),
             exit_code: output.status.code(),
-            category: None,
             suggestion: None,
         }
     }
@@ -338,7 +249,6 @@ impl Ran {
             message: message.into(),
             details: None,
             exit_code: None,
-            category: None,
             suggestion: None,
         }
     }
@@ -461,7 +371,6 @@ pub(crate) fn confirm<B>(
     }
     let ran = run(&work_root, &bound)?;
     Ok(OperationResult {
-        category: ran.category,
         suggestion: ran.suggestion,
         operation_id: 0,
         kind,
@@ -483,7 +392,6 @@ pub(crate) fn plain(
     message: &str,
 ) -> Result<OperationResult, ProbeError> {
     Ok(OperationResult {
-        category: None,
         suggestion: None,
         operation_id: 0,
         kind,
@@ -506,7 +414,6 @@ pub(crate) fn report(
     ran: Ran,
 ) -> Result<OperationResult, ProbeError> {
     Ok(OperationResult {
-        category: ran.category,
         suggestion: ran.suggestion,
         operation_id: 0,
         kind,
@@ -585,24 +492,13 @@ pub enum OperationKind {
     WorktreeAdd,
     WorktreeRemove,
     WorktreePrune,
-    SubmoduleUpdate,
-    RemoteAdd,
-    RemoteSetUrl,
-    RemoteRemove,
-    Fetch,
-    SetUpstream,
-    Pull,
-    Push,
-    Publish,
-    DeleteRemoteBranch,
-    ForcePush,
 }
 
 /// The write kinds that run as a bare path-scoped `git <prefix> -- <paths>`.
 ///
 /// This set is deliberately its own type rather than a match over
 /// `OperationKind` returning an empty prefix for the kinds that own their own
-/// runners. A prefix table that maps 37 kinds to `&[]` compiles fine and then
+/// runners. A prefix table that maps 27 kinds to `&[]` compiles fine and then
 /// runs `git` with no subcommand if a kind is ever routed through it, so the
 /// routing decision is made once, here, where adding a variant forces the
 /// author to supply a real prefix or pick a different runner.
@@ -663,11 +559,8 @@ pub struct OperationResult {
     pub message: String,
     /// Redacted first line of Git's stderr on failure; never raw output.
     pub details: Option<String>,
-    /// Heuristic cause for a failed *network* operation. A
-    /// suggestion layer only: it never replaces `details` or the exit
-    /// code, and local writes leave it `None`.
-    pub category: Option<netclassify::NetCategory>,
-    /// Fixed advice text paired with `category`; `None` without one.
+    /// Fixed advice text for an operation that needs to offer one; `None`
+    /// for every local write, which reports Git's own outcome only.
     pub suggestion: Option<String>,
     pub snapshot: Option<session::SnapshotView>,
 }

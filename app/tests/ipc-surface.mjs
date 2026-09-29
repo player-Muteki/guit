@@ -18,6 +18,13 @@
 // The reverse direction matters just as much. A view that invokes a name the
 // backend does not register fails at runtime with a bare "command not found",
 // which is the least actionable message the app can produce.
+//
+// And a third direction, added when guit became local-only: the commands that
+// left the product are pinned as absent. Hiding the button is not removing the
+// endpoint — `invoke("push")` from any script in the window would still have
+// reached Git with network arguments. So a name on that list may be neither
+// registered nor named by the frontend, and this file is where "exited" is
+// recorded rather than remembered.
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -60,7 +67,7 @@ function registeredCommands() {
     names.push(entry[1]);
   }
 
-  assert.ok(names.length > 50, `only ${names.length} commands parsed; the parser is wrong`);
+  assert.ok(names.length > 40, `only ${names.length} commands parsed; the parser is wrong`);
   const seen = new Set();
   for (const name of names) {
     assert.ok(!seen.has(name), `${name} is registered twice`);
@@ -91,11 +98,65 @@ const files = frontendFiles(frontendRoot);
 const live = new Map(files.map((path) => [path, liveSource(readFileSync(path, "utf8"))]));
 const corpus = [...live.values()].join("\n");
 
+// Every one of these could reach the network: cloning, fetching, pulling,
+// pushing (plain, forced, publishing a new branch), administering remotes and
+// their branches, the credential bridge those operations prompted into, the
+// submodule download that clones what it finds uninitialised, and the probe
+// that ran a real `git clone` to exercise the transport. guit is local-only,
+// so what left the product is the endpoint as well as the entry point — a
+// hidden button still leaves `invoke("push")` one keystroke away for anything
+// that can run script in the window.
+const EXITED_COMMANDS = [
+  "clone_repository",
+  "cancel_clone",
+  "fetch",
+  "pull",
+  "pull_default",
+  "push",
+  "publish",
+  "force_push",
+  "preview_force_push",
+  "delete_remote_branch",
+  "preview_delete_remote_branch",
+  "list_remotes",
+  "add_remote",
+  "set_remote_url",
+  "preview_remove_remote",
+  "remove_remote",
+  "set_upstream",
+  "submit_askpass",
+  "submodule_init_update",
+  "run_transfer_probe",
+];
+
 test("the registry parser sees the real command list", () => {
   const names = registeredCommands();
   assert.ok(names.includes("stage_files"));
-  assert.ok(names.includes("preview_force_push"));
+  assert.ok(names.includes("list_refs"));
   assert.ok(names.includes("export_diagnostics"));
+  // The list is only meaningful if a name can be lost from it silently, so the
+  // exited set has to be non-empty and specific before its absence proves
+  // anything.
+  assert.ok(EXITED_COMMANDS.length >= 20, "the exited set itself has been emptied");
+  for (const representative of ["push", "clone_repository", "submit_askpass", "list_remotes"]) {
+    assert.ok(EXITED_COMMANDS.includes(representative), `the exited set lost ${representative}`);
+  }
+});
+
+test("an exited command is not registered, and no frontend source names it", () => {
+  const registered = new Set(registeredCommands());
+  const stillRegistered = EXITED_COMMANDS.filter((name) => registered.has(name));
+  assert.deepEqual(
+    stillRegistered,
+    [],
+    `still callable from the window: ${stillRegistered.join(", ")} — unregister it and remove its implementation`,
+  );
+  const stillNamed = EXITED_COMMANDS.filter((name) => corpus.includes(`"${name}"`));
+  assert.deepEqual(
+    stillNamed,
+    [],
+    `still named by a frontend literal: ${stillNamed.join(", ")} — a view, dialog or background path still asks for it`,
+  );
 });
 
 test("every registered command is named somewhere in the frontend", () => {

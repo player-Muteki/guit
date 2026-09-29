@@ -286,7 +286,6 @@ fn run_create(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
-        category: None,
         suggestion: None,
         operation_id: 0,
         kind,

@@ -32,7 +32,6 @@ export type PendingPreview =
       stash?: undefined;
       reset?: undefined;
       worktree?: undefined;
-      remote?: undefined;
     }
   | {
       kind: "branch";
@@ -44,7 +43,6 @@ export type PendingPreview =
       stash?: undefined;
       reset?: undefined;
       worktree?: undefined;
-      remote?: undefined;
     }
   | {
       kind: "tag";
@@ -56,7 +54,6 @@ export type PendingPreview =
       stash?: undefined;
       reset?: undefined;
       worktree?: undefined;
-      remote?: undefined;
     }
   | {
       kind: "stashDrop" | "stashPop";
@@ -68,7 +65,6 @@ export type PendingPreview =
       stash: { index: number; targetOid: string | null };
       reset?: undefined;
       worktree?: undefined;
-      remote?: undefined;
     }
   | {
       kind: "resetHard";
@@ -80,7 +76,6 @@ export type PendingPreview =
       stash?: undefined;
       reset: { target: string };
       worktree?: undefined;
-      remote?: undefined;
     }
   | {
       kind: "worktreeRemove";
@@ -92,45 +87,6 @@ export type PendingPreview =
       stash?: undefined;
       reset?: undefined;
       worktree: { index: number; targetOid: string | null };
-      remote?: undefined;
-    }
-  | {
-      kind: "remoteRemove";
-      names: string[];
-      dropped: string[];
-      nonce: string;
-      branch?: undefined;
-      tag?: undefined;
-      stash?: undefined;
-      reset?: undefined;
-      worktree?: undefined;
-      remote: { name: string };
-    }
-  | {
-      kind: "remoteBranchDelete";
-      names: string[];
-      dropped: string[];
-      nonce: string;
-      branch?: undefined;
-      tag?: undefined;
-      stash?: undefined;
-      reset?: undefined;
-      worktree?: undefined;
-      remote?: undefined;
-      remoteBranch: { target: string; targetOid: string | null };
-    }
-  | {
-      kind: "forcePush";
-      names: string[];
-      dropped: string[];
-      nonce: string;
-      branch?: undefined;
-      tag?: undefined;
-      stash?: undefined;
-      reset?: undefined;
-      worktree?: undefined;
-      remote?: undefined;
-      remoteBranch?: undefined;
     };
 
 let sessionActive = false;
@@ -144,15 +100,13 @@ let watchFailed = false;
 let status: StatusLine = { kind: "idle", message: "" };
 let nextToastId = 1;
 let toasts: Toast[] = [];
-let credentialRetryAction: (() => void) | null = null;
-let forcePushReady = false;
 
 type Listener = (change: ChangeKind) => void;
 const listeners = new Set<Listener>();
 
 // `status` repaints the status bar only; `render` repaints the whole window.
-// A streaming network operation can emit dozens of progress lines per second,
-// and each one used to cost a render of every view, hidden or not.
+// A running write can emit dozens of progress lines per second, and each one
+// used to cost a render of every view, hidden or not.
 export type ChangeKind = "status" | "render";
 
 function notify(change: ChangeKind): void {
@@ -181,8 +135,6 @@ export const watchStatus = (): "none" | "poll" | "events" => watchMode;
 export const isWatchFailed = (): boolean => watchFailed;
 export const statusLine = (): StatusLine => status;
 export const toastStack = (): readonly Toast[] => toasts;
-export const hasCredentialRetry = (): boolean => credentialRetryAction !== null;
-export const isForcePushReady = (): boolean => forcePushReady;
 
 // Accepts a snapshot only when it is strictly newer than the one on screen
 // (file IDs are per-snapshot, so an older one would address the wrong paths).
@@ -250,28 +202,6 @@ export function dismissToast(id: number): void {
   const next = toasts.filter((toast) => toast.id !== id);
   if (next.length === toasts.length) return;
   toasts = next;
-  renderNow();
-}
-
-// Git itself decided the failure is about credentials; that is the only
-// moment the explicit credential path appears, and one click spends it.
-export function offerCredentialRetry(retry: (() => void) | null): void {
-  credentialRetryAction = retry;
-  renderNow();
-}
-
-export function consumeCredentialRetry(): (() => void) | null {
-  const action = credentialRetryAction;
-  credentialRetryAction = null;
-  if (action !== null) renderNow();
-  return action;
-}
-
-// The one-time force-push preview appears only after Git itself refused an
-// update; any newer push or session change hides it again.
-export function setForcePushReady(value: boolean): void {
-  if (forcePushReady === value) return;
-  forcePushReady = value;
   renderNow();
 }
 

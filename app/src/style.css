@@ -140,8 +140,6 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   border-radius: var(--radius);
 }
 .menu[hidden] { display: none; }
-/* The pull submenu opens to the left of the sync menu. */
-.menu.submenu { right: 9.5rem; }
 .menu.float { position: fixed; top: auto; right: auto; }
 .menu-item {
   display: block;
@@ -306,9 +304,6 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .welcome-block { display: flex; flex-direction: column; gap: 0.35rem; max-width: 34rem; margin-bottom: 1rem; }
 .welcome-block[hidden] { display: none; }
 .welcome-label { display: flex; align-items: center; gap: 0.35rem; margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--text-muted); }
-.clone-row { display: flex; flex-wrap: wrap; gap: 0.35rem; }
-.clone-row .input { flex: 1 1 12rem; }
-.welcome-clone-status { margin: 0; font-size: var(--text-sm); color: var(--text-muted); overflow-wrap: anywhere; }
 .recent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
 .recent-entry { display: block; width: 100%; text-align: left; overflow-wrap: anywhere; }
 
@@ -363,7 +358,6 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .ref-row { padding-inline: 0.4rem 0.2rem; }
 .ref-row.renaming { background: var(--surface-active); }
 .ref-rename { flex: 1 1 auto; }
-.upstream-picker { flex-wrap: wrap; height: auto; padding-block: 0.25rem; background: var(--surface-sunken); }
 
 .row-action {
   flex: 0 0 auto;
@@ -376,7 +370,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   color: var(--text);
   cursor: pointer;
 }
-.file-row:hover .row-action, .file-row:focus-within .row-action, .file-row.selected .row-action, .file-row.renaming .row-action, .upstream-picker .row-action, .group-heading .row-action { opacity: 1; }
+.file-row:hover .row-action, .file-row:focus-within .row-action, .file-row.selected .row-action, .file-row.renaming .row-action, .group-heading .row-action { opacity: 1; }
 .row-action:disabled { opacity: 0.4; cursor: default; }
 .row-action.danger { color: var(--danger); border-color: var(--danger); }
 .row-action:hover:not(:disabled) { background: var(--surface-hover); }
@@ -554,10 +548,9 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .commit-message { margin: 0; padding: 0.4rem 0.5rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--text); font: inherit; font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; max-height: var(--detail-cap); overflow-y: auto; }
 .detail-actions { display: flex; flex-wrap: wrap; gap: 0.3rem; }
 
-/* --- branches / remotes / worktrees / stash --- */
-.create-row, .sync-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
+/* --- branches / worktrees / stash --- */
+.create-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
 .create-row .input { flex: 1 1 10rem; }
-.sync-row .input { flex: 0 0 auto; }
 /* The tag detail panel is appended below the list; the view scrolls so it
    never pushes the list out of the window. */
 .branches-view { overflow-y: auto; }
@@ -618,8 +611,6 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
 .dialog-title { display: flex; align-items: center; gap: 0.4rem; margin: 0; font-size: var(--text-lg); }
 .dialog-confirm .dialog-title { color: var(--danger); }
-.dialog-askpass { max-width: min(22rem, 92vw); }
-.dialog-askpass .input { width: 100%; }
 .dialog-warning { margin: 0; font-size: var(--text-sm); }
 .dialog-list { margin: 0; padding-left: 1.1rem; max-height: 12rem; overflow-y: auto; font-size: var(--text-sm); overflow-wrap: anywhere; }
 .dialog-note { margin: 0; font-size: var(--text-xs); color: var(--text-muted); overflow-wrap: anywhere; }
@@ -659,7 +650,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
      name, and the full name stays available as the button's tooltip. */
   .appbar-branch { flex: 0 1 auto; min-width: 7ch; max-width: 30%; }
   .history-detail { max-height: var(--list-cap); }
-  .view-tools, .create-row, .clone-row { gap: 0.25rem; }
+  .view-tools, .create-row { gap: 0.25rem; }
   .row-action { opacity: 1; }
   .row-more { opacity: 1; }
   .welcome-view { padding: 0.75rem; }
@@ -674,7 +665,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   /* Rows that hold an input and its action wrap by accident at this width,
      which strands a lone button on its own line. Make the wrap deliberate:
      the input takes the full width, the actions share the line below it. */
-  .create-row .input, .clone-row .input, .view-tools .input { flex: 1 1 100%; }
+  .create-row .input, .view-tools .input { flex: 1 1 100%; }
   .create-row .btn, .view-tools .btn { flex: 1 1 auto; }
 
   /* A worktree row leads with an absolute path, which is the longest thing any
@@ -756,8 +747,8 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   .commit-short { display: none; }
 }
 
-/* Content that is intrinsically one long unbreakable string — a remote URL, an
-   absolute worktree path, a commit oid — is the one thing that can still
+/* Content that is intrinsically one long unbreakable string — a remote-tracking
+   ref, an absolute worktree path, a commit oid — is the one thing that can still
    force a horizontal scrollbar on a resizable window. The layout-check gate
    cannot see an ellipsis (a truncation is a legitimate layout), so this is
    asserted here in the stylesheet instead: nothing may establish a minimum
@@ -767,7 +758,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.detail-meta dd, .setting-facts dd, .welcome-clone-status, .recent-entry {
+.detail-meta dd, .setting-facts dd, .recent-entry {
   min-width: 0;
   overflow-wrap: anywhere;
 }

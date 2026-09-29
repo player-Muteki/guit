@@ -8,20 +8,15 @@ import test, { beforeEach } from "node:test";
 import {
   activeView,
   applySnapshot,
-  consumeCredentialRetry,
   currentSnapshot,
   dismissToast,
-  hasCredentialRetry,
-  isForcePushReady,
   isSessionActive,
   isToolRunning,
   isWriteRunning,
   notifyLayoutChange,
-  offerCredentialRetry,
   pendingPreview,
   pushToast,
   setActiveView,
-  setForcePushReady,
   setPendingPreview,
   setStatus,
   setToolRunning,
@@ -56,8 +51,6 @@ function resetState() {
   setActiveView("main");
   setWatchMode("none");
   setStatus("", "idle");
-  setForcePushReady(false);
-  offerCredentialRetry(null);
 }
 
 beforeEach(resetState);
@@ -73,8 +66,6 @@ test("the fresh state matches a cold start", () => {
   assert.equal(watchStatus(), "none");
   assert.deepEqual(statusLine(), { kind: "idle", message: "" });
   assert.deepEqual(toastStack(), []);
-  assert.equal(hasCredentialRetry(), false);
-  assert.equal(isForcePushReady(), false);
   assert.equal(VIEW_ORDER.length, 2);
   assert.equal(new Set(VIEW_ORDER).size, 2, "view ids are unique");
 });
@@ -138,16 +129,13 @@ test("every setter that repaints the window is guarded against no-op writes", ()
   setStatus("", "idle");
   setActiveView("main");
   setPendingPreview(null);
-  setForcePushReady(false);
   assert.deepEqual(kinds, [], "no-ops must not notify");
   setWriteRunning(true);
   setToolRunning(true);
-  setForcePushReady(true);
-  assert.deepEqual(kinds, ["render", "render", "render"]);
+  assert.deepEqual(kinds, ["render", "render"]);
   setWriteRunning(true);
   setToolRunning(true);
-  setForcePushReady(true);
-  assert.equal(kinds.length, 3, "setting the same value twice notifies once");
+  assert.equal(kinds.length, 2, "setting the same value twice notifies once");
   stop();
 });
 
@@ -246,28 +234,6 @@ test("dismissing an absent id is silent", () => {
   assert.deepEqual(kinds, [], "a no-op dismissal does not repaint");
   dismissToast(id);
   assert.deepEqual(kinds, ["render"]);
-  stop();
-});
-
-test("a credential retry appears, is spent by one click, and offer(null) hides it", () => {
-  let fired = 0;
-  offerCredentialRetry(() => { fired += 1; });
-  assert.equal(hasCredentialRetry(), true);
-  const action = consumeCredentialRetry();
-  assert.equal(hasCredentialRetry(), false);
-  action();
-  assert.equal(fired, 1);
-  assert.equal(consumeCredentialRetry(), null, "a second consume yields nothing");
-  offerCredentialRetry(() => { fired += 1; });
-  offerCredentialRetry(null);
-  assert.equal(hasCredentialRetry(), false);
-});
-
-test("consume of an absent retry does not repaint", () => {
-  const kinds = [];
-  const stop = subscribe((change) => kinds.push(change));
-  consumeCredentialRetry();
-  assert.deepEqual(kinds, []);
   stop();
 });
 

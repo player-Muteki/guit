@@ -119,9 +119,6 @@ impl Step {
 #[derive(Clone, Copy)]
 pub(crate) enum Start {
     Merge,
-    /// Pull's honoring of `pull.ff=false`: the same merge leg, forced to
-    /// produce a merge commit even where a fast-forward is possible.
-    MergeNoFf,
     Rebase,
     CherryPick,
     Revert,
@@ -130,7 +127,7 @@ pub(crate) enum Start {
 impl Start {
     fn verb(self) -> &'static str {
         match self {
-            Start::Merge | Start::MergeNoFf => "merge",
+            Start::Merge => "merge",
             Start::Rebase => "rebase",
             Start::CherryPick => "cherry-pick",
             Start::Revert => "revert",
@@ -139,7 +136,7 @@ impl Start {
 
     fn result_kind(self) -> OperationKind {
         match self {
-            Start::Merge | Start::MergeNoFf => OperationKind::Merge,
+            Start::Merge => OperationKind::Merge,
             Start::Rebase => OperationKind::Rebase,
             Start::CherryPick => OperationKind::CherryPick,
             Start::Revert => OperationKind::Revert,
@@ -150,7 +147,7 @@ impl Start {
     /// revert ride the History detail buttons and accept only a full
     /// commit id, so a stale list row can never silently retarget.
     fn accepts_branch_names(self) -> bool {
-        matches!(self, Start::Merge | Start::MergeNoFf | Start::Rebase)
+        matches!(self, Start::Merge | Start::Rebase)
     }
 }
 
@@ -261,7 +258,6 @@ pub(crate) fn start_in_slot(
                 // (measured on Git 2.53).
                 let args: Vec<&str> = match mode {
                     Start::Merge => vec!["merge", "--no-edit", target],
-                    Start::MergeNoFf => vec!["merge", "--no-edit", "--no-ff", target],
                     Start::Rebase => vec!["rebase", target],
                     Start::CherryPick => vec!["cherry-pick", target],
                     Start::Revert => vec!["revert", "--no-edit", target],
@@ -272,13 +268,12 @@ pub(crate) fn start_in_slot(
                         let snapshot = session::refresh(sessions)?;
                         if output.status.success() && !output.truncated {
                             message = match mode {
-                                Start::Merge | Start::MergeNoFf => format!("Merged {target}."),
+                                Start::Merge => format!("Merged {target}."),
                                 Start::Rebase => format!("Rebased onto {target}."),
                                 Start::CherryPick => format!("Cherry-picked {target}."),
                                 Start::Revert => format!("Reverted {target}."),
                             };
                             return Ok(OperationResult {
-                                category: None,
                                 suggestion: None,
                                 operation_id: 0,
                                 kind,
@@ -300,7 +295,6 @@ pub(crate) fn start_in_slot(
                             details = Some(write::first_stderr_line(&output.stderr));
                         }
                         return Ok(OperationResult {
-                            category: None,
                             suggestion: None,
                             operation_id: 0,
                             kind,
@@ -322,7 +316,6 @@ pub(crate) fn start_in_slot(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
-        category: None,
         suggestion: None,
         operation_id: 0,
         kind,
@@ -460,7 +453,6 @@ fn run_step_inner(
                                 let snapshot = session::refresh(sessions)?;
                                 if output.status.success() && !output.truncated {
                                     return Ok(OperationResult {
-                                        category: None,
                                         suggestion: None,
                                         operation_id: 0,
                                         kind,
@@ -491,7 +483,6 @@ fn run_step_inner(
                                     )
                                 };
                                 return Ok(OperationResult {
-                                    category: None,
                                     suggestion: None,
                                     operation_id: 0,
                                     kind,
@@ -515,7 +506,6 @@ fn run_step_inner(
     }
     let snapshot = session::refresh(sessions)?;
     Ok(OperationResult {
-        category: None,
         suggestion: None,
         operation_id: 0,
         kind,

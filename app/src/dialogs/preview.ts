@@ -7,7 +7,7 @@
 // a changed candidate set is surfaced verbatim and the user must confirm
 // again. The confirm event carries the ticket's `kind` and `nonce`; the
 // owning view maps the kind to its backend command and only ever sends
-// `{ nonce, interactive: false }`.
+// `{ nonce }`.
 
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -69,24 +69,6 @@ const previewCopy: Record<PreviewKindKey, PreviewCopy> = {
       "Removing unregisters this linked worktree and deletes its Git metadata link. guit never forces: if the worktree has uncommitted work, Git itself refuses and nothing is removed.",
     confirm: "Remove worktree",
     cancel: "Keep worktree",
-  },
-  remoteRemove: {
-    warning:
-      "Removing this remote deletes its configuration and every remote-tracking ref listed below. Nothing on the remote itself changes; a later fetch can bring the tracking refs back.",
-    confirm: "Remove remote",
-    cancel: "Keep remote",
-  },
-  remoteBranchDelete: {
-    warning:
-      "Deleting removes this branch on the remote for everyone who pulls from it. Its commits become unreachable on the remote once it garbage-collects; this cannot be undone from guit.",
-    confirm: "Delete remote branch",
-    cancel: "Keep remote branch",
-  },
-  forcePush: {
-    warning:
-      "The lines below are what a force push erases: the remote branch named first is overwritten by the local one, the listed remote-only commits become unreachable on the remote, and anyone who already fetched them must repair their clones. guit pushes under --force-with-lease, so a remote that moved since this preview refuses.",
-    confirm: "Force push",
-    cancel: "Keep remote history",
   },
 };
 
@@ -236,9 +218,6 @@ function labelFor(kind: PreviewKindKey): string {
     case "stashPop": return "stash pop";
     case "resetHard": return "hard reset";
     case "worktreeRemove": return "worktree removal";
-    case "remoteRemove": return "remote removal";
-    case "remoteBranchDelete": return "remote branch deletion";
-    case "forcePush": return "force push";
   }
 }
 
@@ -252,9 +231,6 @@ function commandFor(kind: PreviewKindKey): string {
     case "stashPop": return "preview_stash_pop";
     case "resetHard": return "preview_reset_hard";
     case "worktreeRemove": return "preview_remove_worktree";
-    case "remoteRemove": return "preview_remove_remote";
-    case "remoteBranchDelete": return "preview_delete_remote_branch";
-    case "forcePush": return "preview_force_push";
   }
 }
 
@@ -266,11 +242,8 @@ function requestArgs(pending: PendingPreview): Record<string, unknown> {
     case "stashPop": return { index: pending.stash.index };
     case "resetHard": return { target: pending.reset.target };
     case "worktreeRemove": return { index: pending.worktree.index };
-    case "remoteRemove": return { name: pending.remote.name };
-    case "remoteBranchDelete": return { target: pending.remoteBranch.target };
     case "discard":
-    case "clean":
-    case "forcePush": return {};
+    case "clean": return {};
   }
 }
 
@@ -281,7 +254,6 @@ function targetOidOf(pending: PendingPreview): string | null {
     case "stashDrop":
     case "stashPop": return pending.stash.targetOid;
     case "worktreeRemove": return pending.worktree.targetOid;
-    case "remoteBranchDelete": return pending.remoteBranch.targetOid;
     default: return null;
   }
 }
@@ -291,7 +263,6 @@ function build(kind: PreviewKindKey, preview: PreviewResult, args: Record<string
   switch (kind) {
     case "discard": return { kind, ...base };
     case "clean": return { kind, ...base };
-    case "forcePush": return { kind, ...base };
     case "branch":
       return { kind, ...base, branch: { name: String(args.name), force: Boolean(args.force), targetOid: preview.targetOid } };
     case "tag": return { kind, ...base, tag: { name: String(args.name), targetOid: preview.targetOid } };
@@ -299,8 +270,6 @@ function build(kind: PreviewKindKey, preview: PreviewResult, args: Record<string
     case "stashPop": return { kind, ...base, stash: { index: Number(args.index), targetOid: preview.targetOid } };
     case "resetHard": return { kind, ...base, reset: { target: String(args.target) } };
     case "worktreeRemove": return { kind, ...base, worktree: { index: Number(args.index), targetOid: preview.targetOid } };
-    case "remoteRemove": return { kind, ...base, remote: { name: String(args.name) } };
-    case "remoteBranchDelete": return { kind, ...base, remoteBranch: { target: String(args.target), targetOid: preview.targetOid } };
   }
 }
 
@@ -316,14 +285,11 @@ function rebuild(pending: PendingPreview, preview: PreviewResult): PendingPrevie
   switch (pending.kind) {
     case "discard": return { kind: "discard", names, dropped, nonce };
     case "clean": return { kind: "clean", names, dropped, nonce };
-    case "forcePush": return { kind: "forcePush", names, dropped, nonce };
     case "branch": return { kind: "branch", names, dropped, nonce, branch: { ...pending.branch, targetOid: oid } };
     case "tag": return { kind: "tag", names, dropped, nonce, tag: { ...pending.tag, targetOid: oid } };
     case "stashDrop":
     case "stashPop": return { kind: pending.kind, names, dropped, nonce, stash: { ...pending.stash, targetOid: oid } };
     case "resetHard": return { kind: "resetHard", names, dropped, nonce, reset: { ...pending.reset } };
     case "worktreeRemove": return { kind: "worktreeRemove", names, dropped, nonce, worktree: { ...pending.worktree, targetOid: oid } };
-    case "remoteRemove": return { kind: "remoteRemove", names, dropped, nonce, remote: { ...pending.remote } };
-    case "remoteBranchDelete": return { kind: "remoteBranchDelete", names, dropped, nonce, remoteBranch: { ...pending.remoteBranch, targetOid: oid } };
   }
 }
