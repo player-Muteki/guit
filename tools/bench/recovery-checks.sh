@@ -195,6 +195,13 @@ be re-confirmed (unit test: tickets_never_resurrect_across_a_process_restart).
 manual 3 (multi-display clamp): with window.json restored from a two-screen
 session, unplug the secondary display, restart guit and confirm the window
 clamps back on screen (fit_window is unit-tested; this is the runtime check).
+manual 4 (typed settings across a restart): write a Latin, a Chinese and a
+code font name, set the age-line interval, paste a theme fragment and apply
+it, close guit with the window control, then start it again: the boxes must
+hold the text that was typed and the sample lines must draw with the families
+named. restart-persistence-check.py covers the scheme, the interface size and
+the window's own size, and an entry on this host exposes no writable AT-SPI
+interface, so the typed fields are only ever closed by a hand.
 TXT
 
 say "== verdict: fail=$fail =="
