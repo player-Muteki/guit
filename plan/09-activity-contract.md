@@ -29,6 +29,10 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 - 队列有上界；溢出不是“没有变化”，而是合并成一个“需要重新核对”状态。
 - 运行时 watcher 错误（创建成功但后续失败、队列溢出、休眠恢复）要产生可见的 stale 降级，
   并允许重建或降级到轮询。`choose_mode` 只覆盖“创建即失败”一条路径（`watch.rs:203`）。
+  更硬的前提是：今天**根本看不见**运行时错误——回调里写的是 `if let Ok(event) = result`
+  （`watch.rs:155-160`），`Err` 分支不存在，notify 递回来的错误直接被丢弃；同一处的
+  `let _ = events_tx.send(())` 也忽略通道已关。C01 先把这两处变成可判定的输入
+  （`Err` 进队列、发送失败视为自身失效），再谈降级文案。
 - 端到端延迟包含 Git 读取耗时，文案不能把 1 s 说成任何仓库都能达到的上限。
 
 一个必须保持的既有事实：`repo::status_output` 带 `--no-optional-locks`，因为它测到
@@ -122,15 +126,44 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 - 后端已有单调 `version`（`session.rs::publish`）与只在本快照内有效的 `FileId`；
   `state.ts::applySnapshot` 镜像同一规则。mtime 统计的有效性键必须是
   `sessionId + activityGeneration`（设计 §3.1），因此 C04 依赖 B05 的会话标识先行落地。
-- `state.ts` 的通知只有 `"status" | "render"` 两档（`state.ts:150-160`）。
+- `state.ts` 的通知只有 `"status" | "render"` 两档（`state.ts:150-170`，双 Tab 收敛后仍如此）。
   计时文本每 tick 全量 render 与设计 §3.2“普通计时 tick 只更新文本”冲突；
   需要按域通知（同 B03），C04 在 B03 的订阅模型上接线，而不是新增第三个全局档位。
 - `WatchStatus` 目前只带 `mode` 与 `failed` 两个字段（`watch.rs:168-173`）。
   C01 的“需要重新核对/降级原因”要扩展这个事件体，前端 `watchStatus()` 同步跟进；
   文案属于 shipped text，不得出现阶段编号。
 - 间隔 `x`：默认 5、整数 1–60，只控制文本重算；非法值拒绝并保留原值，
-  且同一时刻只允许一个计时器（C05）。持久化接口先按临时通道接，字段归
-  阶段 G 的版本化 preferences 所有，避免两处写同一偏好。
+  且同一时刻只允许一个计时器（C05）。
+
+### 4.1 持久化的现状与必须避开的迁移事故
+
+计时值要驱动后端环路，因此它不能存前端：
+
+| 事实 | 代码位置 | 对 C05 的约束 |
+| --- | --- | --- |
+| 接口缩放与主题存 `localStorage` | `src/font.ts:18,26`、`src/views/settings.ts:239-242` | 后端读不到，计时值不得走这条路 |
+| 后端已有一份版本化设置 | `main.rs:148-186`：`WindowSettings { schema_version, … }` → `app_config_dir/window.json` | 已有原子写（`NamedTempFile` + `write_all` + `sync_all` + `persist`），新设置沿用同一写法，不再造第三种落盘形状 |
+| 读取时 `schema_version != settings_version()` 直接返回 `settings_invalid` | `main.rs:230-238` | **升级版本号会让老用户已存的窗口几何整体作废**：现有新增字段一律用 `#[serde(default)]` 且把 `settings_version()` 保持为 1，计时字段照此办理 |
+| 写盘 helper 与 `WindowSettings` 类型耦合 | `write_window_settings(path, &settings)`（`main.rs:184`） | 泛化成按类型写 JSON 的 helper，或明确另建一份；不要为省事把计时字段塞进 `window.json` |
+
+不放进 `window.json` 的理由是失败牵连：该文件的校验把“窗口尺寸非法”和“版本不匹配”
+判成同一种错误，一个只描述窗口的文件名也解释不了为什么计时值非法会让窗口几何一起
+被丢弃。因此 C05 用同目录下另一个具名文件，沿用 `session.rs` 里
+`RECENT_SCHEMA_VERSION` 的“模块内常量 + 不匹配即拒绝”形状（`session.rs:382-420`）。
+
+### 4.2 运行时生效路径（不要假设改一个 Duration 就即时生效）
+
+`run_loop` 在进入循环**之前**就算好了 `tick` 与 `next_poll`
+（`watch.rs:74-75`），而 `supervisor` 把 `DEBOUNCE / POLL_INTERVAL / HEARTBEAT`
+三个常量硬编码传进去（`watch.rs:230-236`）。因此设置改动只有一条诚实的生效方式：
+经由已有的 `watch::restart`（`watch.rs:278`）重建 supervisor，或让环路每轮重读共享值——
+两者都要在实现说明里写明是哪一个。若选择重建，需要一并说明正在进行的有界刷新
+如何与新旧两个环路交接（`WatchState` 只保证旧线程在一个心跳内自退，不保证有序）。
+
+还有一个跨任务的等式必须固定：设计给 C01 的“最长等待”兜底与用户可设的计时间隔
+不能是两个互不知情的旋钮。若 `MAX_WAIT` 独立于设置值，用户把间隔调到 1 秒后，
+静止仓库仍按另一个常量兜底刷新，验收场景“改小间隔后刷新更频繁”就会失败。
+实现时把 `MAX_WAIT` 直接取为该设置值（或写出明确关系式），并在测试里同时驱动两端。
 
 ## 5. C01 环路原型实测（一次性 /tmp crate，非交付代码）
 
