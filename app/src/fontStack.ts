@@ -4,10 +4,18 @@
 // what the panel measures: the rows, the columns and the graph are laid out
 // in `rem`, and the glyph advance widths that make an OID readable in the history
 // list come from a stack whose tail is authored, not typed in. So the named
-// families are put in front of a fixed tail, and the tail is the whole reason a
-// missing or half-covering family is not a failure: the engine falls back per
-// character, so mixed Chinese-and-Latin text resolves from the pair, and a name
-// that is not installed on this host costs nothing but the look.
+// families are put in front of a fixed tail.
+//
+// The tail is a request, not a guarantee, and that was measured: a name the host
+// does not have does not step aside for the next entry in the list. The renderer's
+// font configuration substitutes some face for it and stops there, so the generic
+// keyword at the end is never consulted — and the face it substituted for the
+// panel's own default mono stack was proportional. `fontResolve.ts` asks the engine
+// whether the stack it is about to write lines an object ID up, and writes the
+// generic keyword when it does not. What a missing or half-covering family costs is
+// therefore decided by the drawing, not by this list; within one family the engine
+// does fall back per character, which is why mixed Chinese-and-Latin text still
+// resolves from the pair.
 //
 // Pure: no DOM, no storage, no stylesheet object. The caller writes the two custom
 // properties this feeds and re-measures afterwards.
@@ -19,8 +27,9 @@ export const UI_TAIL =
   'system-ui, -apple-system, "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif';
 
 /** Exactly the value `--font-mono` states in the stylesheet. The unquoted
- * `monospace` at the end is what keeps the columns of an OID lined up: quoted, it
- * would be a family called monospace rather than the generic keyword. */
+ * `monospace` at the end is the only entry here the engine has to honour: quoted, it
+ * would be a family called monospace rather than the generic keyword, and a family
+ * nobody has gets substituted. Nothing in front of it is promised anything. */
 export const MONO_TAIL =
   'ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace';
 

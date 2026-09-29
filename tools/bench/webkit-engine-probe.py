@@ -12,7 +12,18 @@ This opens one offscreen WebKitWebView, bundles a probe entry against the panel'
 own source, loads it over `http://127.0.0.1` (a normal origin, like the dev
 server the panel runs on), calls `__probe()` and prints the checks it returns.
 
-Usage: webkit-engine-probe.py [entry.ts ...]   (default: theme-engine-probe.ts)
+A probe that measures geometry needs the sheet the panel actually ships, so a
+`.css` argument is copied into what is served and linked before the bundle. A
+relative `@import` is followed so the served copy is the whole stylesheet, not a
+file whose tokens are missing; one that steps outside the app directory is refused
+rather than served, because a probe measuring against a sheet that is not the
+panel's is evidence about nothing.
+
+Usage: webkit-engine-probe.py [-v] [entry.ts|sheet.css ...]
+       (default entry: theme-engine-probe.ts)
+
+`-v` prints the detail of every check, not only the failed ones: a passing
+measurement is still the number the next reader wants.
 
 Needs a display, the WebKitGTK GObject bindings, and the app's installed
 node_modules for esbuild. A failure here is a rendering fact, not a flaky test:
@@ -23,6 +34,7 @@ import functools
 import http.server
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -35,6 +47,7 @@ HERE = Path(__file__).resolve().parent
 APP = HERE.parent.parent / "app"
 ESBUILD = APP / "node_modules" / ".bin" / "esbuild"
 SCRIPT = "window.__probe ? window.__probe() : 'NO-PROBE'"
+IMPORT_RE = re.compile(r"""@import\s+(?:url\()?\s*["']([^"']+)["']""")
 
 
 def fail(message: str) -> int:
@@ -58,6 +71,29 @@ def bundle(entries: list[Path], into: Path) -> list[Path]:
             raise SystemExit(f"bundling {entry.name} failed:\n{done.stderr}")
         outs.append(out)
     return outs
+
+
+def serve_sheet(source: Path, into: Path, at: str, seen: set[Path]) -> None:
+    """Copy one stylesheet, and anything it imports relatively, into what is served."""
+    resolved = source.resolve()
+    if resolved in seen:
+        return
+    if not resolved.is_file():
+        raise SystemExit(f"no stylesheet at {source}")
+    if APP not in resolved.parents:
+        raise SystemExit(f"{source} is outside app/, so the panel never loads it either")
+    seen.add(resolved)
+
+    text = resolved.read_text(encoding="utf8")
+    target = into / at
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf8")
+    for one in IMPORT_RE.finditer(text):
+        name = one.group(1)
+        if "://" in name or name.startswith("/"):
+            continue
+        linked = (resolved.parent / name).resolve()
+        serve_sheet(linked, into, f"{at.rsplit('/', 1)[0]}/{name}" if "/" in at else name, seen)
 
 
 def serve(directory: Path) -> tuple[http.server.ThreadingHTTPServer, str]:
@@ -96,13 +132,15 @@ def read_result(result) -> str:
     raise RuntimeError(f"cannot read a value of type {type(result).__name__}")
 
 
-def run_one(bundle_path: Path) -> int:
+def run_one(bundle_path: Path, sheets: list[str], verbose: bool) -> int:
     from gi.repository import GLib, Gtk, WebKit2  # noqa: PLC0415 - only after the display check
 
     directory = bundle_path.parent
+    links = "".join(f"<link rel='stylesheet' href='{one}'>" for one in sheets)
     (directory / "probe.html").write_text(
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
-        f"<title>engine probe</title></head><body><script src='{bundle_path.name}'></script></body></html>",
+        f"<title>engine probe</title>{links}</head>"
+        f"<body><script src='{bundle_path.name}'></script></body></html>",
         encoding="utf8",
     )
     server, uri = serve(directory)
@@ -160,8 +198,10 @@ def run_one(bundle_path: Path) -> int:
     print(f"engine: {report['engine']}")
     failed = 0
     for row in report["checks"]:
-        if row["ok"]:
+        if row["ok"] and not verbose:
             print(f"ok:   {row['name']}")
+        elif row["ok"]:
+            print(f"ok:   {row['name']}  [{row['detail']}]")
         else:
             failed += 1
             print(f"FAIL: {row['name']}  [{row['detail']}]")
@@ -170,15 +210,19 @@ def run_one(bundle_path: Path) -> int:
 
 
 def main() -> int:
-    names = sys.argv[1:] or ["theme-engine-probe.ts"]
-    entries = []
+    argv = [one for one in sys.argv[1:] if one != "-v"]
+    verbose = len(argv) != len(sys.argv) - 1
+    names = argv or ["theme-engine-probe.ts"]
+    entries, sheets = [], []
     for name in names:
         path = Path(name)
         if not path.is_absolute():
-            path = HERE / name
+            path = (HERE if (HERE / name).exists() else APP) / name
         if not path.exists():
-            return fail(f"no probe entry at {path}")
-        entries.append(path)
+            return fail(f"no probe entry or stylesheet at {path}")
+        (sheets if path.suffix == ".css" else entries).append(path)
+    if not entries:
+        return fail("no probe entry: a stylesheet alone cannot answer anything")
 
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         return fail("no display: this probe asks the real renderer and cannot run headless")
@@ -192,7 +236,12 @@ def main() -> int:
 
     work = Path(tempfile.mkdtemp(prefix="guit-engine-probe"))
     try:
-        codes = [run_one(out) for out in bundle(entries, work)]
+        seen: set[Path] = set()
+        served = []
+        for sheet in sheets:
+            serve_sheet(sheet, work, sheet.name, seen)
+            served.append(sheet.name)
+        codes = [run_one(out, served, verbose) for out in bundle(entries, work)]
         return max(codes)
     finally:
         shutil.rmtree(work, ignore_errors=True)
