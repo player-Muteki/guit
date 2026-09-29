@@ -19,6 +19,12 @@ const RECENT_SCHEMA_VERSION: u32 = 1;
 pub struct SessionState {
     current: Mutex<Option<ActiveRepo>>,
     next_version: AtomicU64,
+    /// Orders *sessions*, where `next_version` orders snapshots. Two clones of
+    /// one project share a head object id, a branch name and a commit graph,
+    /// so nothing inside a snapshot can tell a read asked for by one from a
+    /// read asked for by the other. Only a number the backend handed out when
+    /// the session began can.
+    next_session: AtomicU64,
     /// Serializes status refreshes: one leader captures, later callers
     /// coalesce into the leader's rerun flag instead of racing Git.
     gate: Mutex<Gate>,
@@ -39,6 +45,65 @@ struct ActiveRepo {
     paths: Arc<PathTable>,
     view: SnapshotView,
     version: u64,
+    session_id: u64,
+    history_generation: u64,
+    refs_generation: u64,
+}
+
+/// Which part of the panel a read answers for. The domain picks the counter a
+/// request is bound to; the session id is always bound.
+#[derive(Debug, Clone, Copy)]
+pub enum ReadDomain {
+    /// The commit graph and the rows read out of it.
+    Graph,
+    /// The branch, tag and remote-tracking names in the repository.
+    Refs,
+    /// A listing no refresh domain owns yet: bound to the session alone, so it
+    /// survives a refresh and dies with the session.
+    Session,
+}
+
+/// What a read was asked against. Minted by the backend, shipped inside every
+/// snapshot, carried by the frontend on each request and echoed back on each
+/// answer — the frontend only compares and carries these numbers, it never
+/// derives an identity from the fields it renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadContext {
+    pub session_id: u64,
+    /// `None` for a `ReadDomain::Session` read.
+    pub generation: Option<u64>,
+}
+
+/// A session-scoped read and the exact context it was answered under. Echoing
+/// the context is the part that closes the hole the request alone cannot: a
+/// read that started legitimately for one repository can finish after the user
+/// opened another, and its rows are then indistinguishable from the new
+/// repository's by content.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRead<T> {
+    pub context: ReadContext,
+    pub value: T,
+}
+
+impl<T> SessionRead<T> {
+    pub fn new(context: ReadContext, value: T) -> SessionRead<T> {
+        SessionRead { context, value }
+    }
+}
+
+impl ActiveRepo {
+    fn context(&self, domain: ReadDomain) -> ReadContext {
+        ReadContext {
+            session_id: self.session_id,
+            generation: match domain {
+                ReadDomain::Graph => Some(self.history_generation),
+                ReadDomain::Refs => Some(self.refs_generation),
+                ReadDomain::Session => None,
+            },
+        }
+    }
 }
 
 impl SessionState {
@@ -52,6 +117,29 @@ impl SessionState {
     /// unborn HEAD without a second Git probe.
     pub(crate) fn current_view(&self) -> Option<SnapshotView> {
         self.snapshot()
+    }
+
+    /// Resolves the repository a session-scoped read must be served from, and
+    /// the context the answer is echoed under. A context that is not the live
+    /// one is refused before Git is asked: this is not a read that failed, it
+    /// is the answer to "which session asked?", and it fails closed.
+    pub(crate) fn bind_read(
+        &self,
+        asked: ReadContext,
+        domain: ReadDomain,
+    ) -> Result<(RepoIdentity, ReadContext), ProbeError> {
+        let current = crate::util::guard(&self.current);
+        let Some(active) = current.as_ref() else {
+            return Err(ProbeError::new("read_no_session", "No repository is open."));
+        };
+        let live = active.context(domain);
+        if live.session_id != asked.session_id || live.generation != asked.generation {
+            return Err(ProbeError::new(
+                "read_stale_context",
+                "This read belongs to a view that is no longer on screen, so its result was discarded.",
+            ));
+        }
+        Ok((active.identity.clone(), live))
     }
 
     fn snapshot(&self) -> Option<SnapshotView> {
@@ -176,6 +264,13 @@ pub struct SnapshotView {
     /// Monotonic per application run; file IDs are only valid for the
     /// snapshot version that produced them.
     pub version: u64,
+    /// The session this snapshot belongs to. It changes on every open, even
+    /// when the same path is reopened, and never on a refresh.
+    pub session_id: u64,
+    /// How often the head this session's graph is drawn from has moved.
+    pub history_generation: u64,
+    /// How often a refresh could have changed the names in the repository.
+    pub refs_generation: u64,
     pub repo: RepoView,
     /// Null for bare repositories, where Git refuses to report a status.
     pub branch: Option<BranchView>,
@@ -183,6 +278,48 @@ pub struct SnapshotView {
     /// A merge/rebase/cherry-pick/revert Git is midway through; the UI
     /// renders continue/abort affordances only from this field.
     pub operation: Option<inflight::OperationView>,
+}
+
+/// The head a graph is drawn from. A detached HEAD, an unborn branch and a
+/// named branch are three different histories even when the first two share an
+/// oid; a bare repository reports no branch at all.
+fn graph_input(
+    view: &SnapshotView,
+) -> Option<(Option<&str>, crate::model::HeadState, Option<&str>)> {
+    view.branch.as_ref().map(|branch| {
+        (
+            branch.name.as_deref(),
+            branch.head_state,
+            branch.oid.as_deref(),
+        )
+    })
+}
+
+/// Everything a refresh can reveal about the names in the repository: the head
+/// the listing is anchored on, how far it sits from its upstream, and whether
+/// Git is midway through an operation. A snapshot does not report a branch
+/// elsewhere in the repository that someone else moved, so this is the whole
+/// of what a refresh can say here — the rest belongs to whoever opens the
+/// picker and reads the names again.
+type Head<'a> = Option<(Option<&'a str>, crate::model::HeadState, Option<&'a str>)>;
+
+fn refs_input(
+    view: &SnapshotView,
+) -> (
+    Head<'_>,
+    Option<&str>,
+    Option<u64>,
+    Option<u64>,
+    Option<crate::inflight::OperationKindView>,
+) {
+    let branch = view.branch.as_ref();
+    (
+        graph_input(view),
+        branch.and_then(|branch| branch.upstream.as_deref()),
+        branch.and_then(|branch| branch.ahead),
+        branch.and_then(|branch| branch.behind),
+        view.operation.as_ref().map(|operation| operation.kind),
+    )
 }
 
 struct Capture {
@@ -223,6 +360,9 @@ fn capture_inner(identity: &RepoIdentity) -> Result<Capture, ProbeError> {
     };
     let view = SnapshotView {
         version: 0,
+        session_id: 0,
+        history_generation: 0,
+        refs_generation: 0,
         repo: RepoView::from_identity(identity),
         branch,
         files,
@@ -251,11 +391,34 @@ fn publish(
     let version = state.next_version.fetch_add(1, Ordering::SeqCst) + 1;
     let mut view = snapshot.view;
     view.version = version;
+    // A guarded publish refreshes the session that is already live, so the
+    // session keeps its identity and only the domains whose own input moved
+    // advance. Every other publish begins a session: a new identity number,
+    // even when the path, the head and every file are exactly as they were
+    // before, because reopening a repository is a new look at it.
+    let (session_id, history_generation, refs_generation) = match current.as_ref() {
+        Some(active) if guard => {
+            let head_moved = graph_input(&active.view) != graph_input(&view);
+            let names_moved = head_moved || refs_input(&active.view) != refs_input(&view);
+            (
+                active.session_id,
+                active.history_generation + u64::from(head_moved),
+                active.refs_generation + u64::from(names_moved),
+            )
+        }
+        _ => (state.next_session.fetch_add(1, Ordering::SeqCst) + 1, 0, 0),
+    };
+    view.session_id = session_id;
+    view.history_generation = history_generation;
+    view.refs_generation = refs_generation;
     *current = Some(ActiveRepo {
         identity: identity.clone(),
         paths: Arc::new(snapshot.paths),
         view: view.clone(),
         version,
+        session_id,
+        history_generation,
+        refs_generation,
     });
     Some(view)
 }
@@ -646,6 +809,182 @@ mod tests {
         assert!(third.version > second.version);
         assert!(second.files.iter().any(|f| f.display == "new-file.txt"));
         assert_eq!(third.files, second.files);
+    }
+
+    fn commit(repo: &Path, name: &str) {
+        fs::write(repo.join(name), "line\n").unwrap();
+        repo::git_with(repo, &[], &["add", "--", name]);
+        repo::git_with(repo, &[], &["commit", "-q", "-m", name]);
+    }
+
+    #[test]
+    fn every_open_starts_a_new_session_even_for_the_same_path() {
+        let fixture = fixture();
+        let state = SessionState::default();
+        let first = open(&state, &fixture.repo).unwrap();
+        let reopened = open(&state, &fixture.repo).unwrap();
+        assert_eq!(reopened.session_id, first.session_id + 1);
+        // A session's domains start at zero: the same head reached through a
+        // second open is a new look at the repository, not a continuation.
+        assert_eq!(reopened.history_generation, 0);
+        assert_eq!(reopened.refs_generation, 0);
+        let refreshed = refresh(&state).unwrap().expect("session open");
+        assert_eq!(refreshed.session_id, reopened.session_id);
+        assert_eq!(refreshed.history_generation, reopened.history_generation);
+        // The snapshot the first open produced still describes this repository
+        // perfectly well, and it is still refused.
+        let error = state
+            .bind_read(
+                ReadContext {
+                    session_id: first.session_id,
+                    generation: Some(first.history_generation),
+                },
+                ReadDomain::Graph,
+            )
+            .unwrap_err();
+        assert_eq!(error.code.as_str(), "read_stale_context");
+    }
+
+    #[test]
+    fn a_clone_shares_a_head_but_never_a_session() {
+        let fixture = fixture();
+        commit(&fixture.repo, "first.txt");
+        repo::git_with(
+            fixture.root.path(),
+            &[],
+            &["clone", "--quiet", "repo", "clone"],
+        );
+        let clone = fixture.root.path().join("clone");
+        let state = SessionState::default();
+        let original = open(&state, &fixture.repo).unwrap();
+        let other = open(&state, &clone).unwrap();
+        // The two snapshots agree on everything the panel draws about a head.
+        let head = |view: &SnapshotView| {
+            view.branch
+                .as_ref()
+                .map(|branch| (branch.name.clone(), branch.head_state, branch.oid.clone()))
+        };
+        assert_eq!(head(&original), head(&other));
+        assert_ne!(original.session_id, other.session_id);
+        // So a read asked for by the first repository cannot be answered by the
+        // second, which is the whole of the point.
+        let asked = ReadContext {
+            session_id: original.session_id,
+            generation: Some(original.history_generation),
+        };
+        assert_eq!(
+            state
+                .bind_read(asked, ReadDomain::Graph)
+                .unwrap_err()
+                .code
+                .as_str(),
+            "read_stale_context"
+        );
+        let (identity, answered) = state
+            .bind_read(
+                ReadContext {
+                    session_id: other.session_id,
+                    generation: Some(other.history_generation),
+                },
+                ReadDomain::Graph,
+            )
+            .unwrap();
+        assert_eq!(identity.candidate, clone);
+        assert_eq!(answered.generation, Some(0));
+    }
+
+    #[test]
+    fn only_the_domain_whose_input_moved_advances() {
+        let fixture = fixture();
+        commit(&fixture.repo, "first.txt");
+        let state = SessionState::default();
+        let opened = open(&state, &fixture.repo).unwrap();
+        assert_eq!((opened.history_generation, opened.refs_generation), (0, 0));
+        // A plain file edit moves the version and nothing else: the same
+        // commits, the same names.
+        fs::write(fixture.repo.join("second.txt"), "line\n").unwrap();
+        let edited = refresh(&state).unwrap().expect("session open");
+        assert!(edited.version > opened.version);
+        assert_eq!(edited.session_id, opened.session_id);
+        assert_eq!(edited.history_generation, opened.history_generation);
+        assert_eq!(edited.refs_generation, opened.refs_generation);
+        // A new commit moves the head every history starts at.
+        repo::git_with(&fixture.repo, &[], &["add", "--", "second.txt"]);
+        repo::git_with(&fixture.repo, &[], &["commit", "-q", "-m", "second"]);
+        let committed = refresh(&state).unwrap().expect("session open");
+        assert_eq!(committed.history_generation, opened.history_generation + 1);
+        assert_eq!(committed.refs_generation, opened.refs_generation + 1);
+        let stale = ReadContext {
+            session_id: opened.session_id,
+            generation: Some(opened.history_generation),
+        };
+        assert_eq!(
+            state
+                .bind_read(stale, ReadDomain::Graph)
+                .unwrap_err()
+                .code
+                .as_str(),
+            "read_stale_context"
+        );
+        // An operation Git is midway through is something the name listing can
+        // say and the history cannot: it advances refs alone.
+        fs::write(
+            fixture.repo.join(".git/MERGE_HEAD"),
+            format!(
+                "{}\n",
+                committed.branch.as_ref().unwrap().oid.as_deref().unwrap()
+            ),
+        )
+        .unwrap();
+        let merging = refresh(&state).unwrap().expect("session open");
+        assert_eq!(merging.history_generation, committed.history_generation);
+        assert_eq!(merging.refs_generation, committed.refs_generation + 1);
+        // A name that no snapshot reports — a tag on some other commit — moves
+        // neither. The picker reads the names again the moment it opens, which
+        // is the honest place to notice it.
+        repo::git_with(
+            &fixture.repo,
+            &[],
+            &["update-ref", "refs/tags/later", "HEAD"],
+        );
+        let tagged = refresh(&state).unwrap().expect("session open");
+        assert_eq!(tagged.refs_generation, merging.refs_generation);
+    }
+
+    #[test]
+    fn an_unowned_listing_is_bound_to_the_session_alone() {
+        let fixture = fixture();
+        let state = SessionState::default();
+        let opened = open(&state, &fixture.repo).unwrap();
+        commit(&fixture.repo, "first.txt");
+        refresh(&state).unwrap().expect("session open");
+        let asked = ReadContext {
+            session_id: opened.session_id,
+            generation: None,
+        };
+        assert!(state.bind_read(asked, ReadDomain::Session).is_ok());
+        close(&state);
+        assert_eq!(
+            state
+                .bind_read(asked, ReadDomain::Session)
+                .unwrap_err()
+                .code
+                .as_str(),
+            "read_no_session"
+        );
+        let reopened = open(&state, &fixture.repo).unwrap();
+        let (identity, answered) = state
+            .bind_read(
+                ReadContext {
+                    session_id: reopened.session_id,
+                    generation: None,
+                },
+                ReadDomain::Session,
+            )
+            .unwrap();
+        assert_eq!(identity.candidate, fixture.repo);
+        assert_eq!(answered.session_id, reopened.session_id);
+        assert_eq!(answered.generation, None);
     }
 
     #[test]

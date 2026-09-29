@@ -83,13 +83,6 @@ fn protocol_error(detail: &str) -> ProbeError {
     )
 }
 
-fn session_directory(sessions: &session::SessionState) -> Result<PathBuf, ProbeError> {
-    let identity = sessions
-        .current_identity()
-        .ok_or_else(|| ProbeError::new("submodules_no_session", "No repository is open."))?;
-    bare_or_work_dir(&identity)
-}
-
 /// Read-only listings resolve in a bare repository from its git dir, like
 /// the worktree list does; Git's own work-tree requirements then surface
 /// as honest failures.
@@ -381,8 +374,10 @@ fn gitlinks(dir: &Path) -> Result<Vec<Gitlink>, ProbeError> {
 
 pub(crate) fn list_view(
     sessions: &session::SessionState,
-) -> Result<Vec<SubmoduleView>, ProbeError> {
-    let dir = session_directory(sessions)?;
+    context: session::ReadContext,
+) -> Result<session::SessionRead<Vec<SubmoduleView>>, ProbeError> {
+    let (identity, answered) = sessions.bind_read(context, session::ReadDomain::Session)?;
+    let dir = bare_or_work_dir(&identity)?;
     let links = gitlinks(&dir)?;
     let mappings = gitmodules_mappings(&dir)?;
     let mut views = Vec::new();
@@ -406,7 +401,7 @@ pub(crate) fn list_view(
             state,
         });
     }
-    Ok(views)
+    Ok(session::SessionRead::new(answered, views))
 }
 
 #[cfg(test)]
@@ -422,6 +417,14 @@ mod tests {
 
     fn git(dir: &Path, args: &[&str]) {
         repo::git_with(dir, COMMIT_ID, args);
+    }
+
+    /// The context a live session-scoped listing must be asked with.
+    fn session_context(view: &session::SnapshotView) -> session::ReadContext {
+        session::ReadContext {
+            session_id: view.session_id,
+            generation: None,
+        }
     }
 
     fn head_oid(dir: &Path) -> String {
@@ -496,9 +499,9 @@ mod tests {
         let (root, child) = parent_with_sub("sub");
         let child_oid = head_oid(child.path());
         let sessions = session::SessionState::default();
-        session::open(&sessions, root.path()).unwrap();
+        let view = session::open(&sessions, root.path()).unwrap();
 
-        let views = list_view(&sessions).unwrap();
+        let views = list_view(&sessions, session_context(&view)).unwrap().value;
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].state, SubmoduleState::Uninitialized);
         assert_eq!(views[0].name.as_deref(), Some("sub"));
@@ -520,8 +523,8 @@ mod tests {
         git(root.path(), &["commit", "-q", "-m", "add second"]);
         deinit_sub(root.path(), "sub2");
         let sessions = session::SessionState::default();
-        session::open(&sessions, root.path()).unwrap();
-        let views = list_view(&sessions).unwrap();
+        let view = session::open(&sessions, root.path()).unwrap();
+        let views = list_view(&sessions, session_context(&view)).unwrap().value;
         assert_eq!(views.len(), 2);
         // Index order: "sp ace" sorts before "sub2" (space < '2').
         assert_eq!(views[0].path, "sp ace");
@@ -546,8 +549,8 @@ mod tests {
             ],
         );
         let sessions = session::SessionState::default();
-        session::open(&sessions, root.path()).unwrap();
-        let views = list_view(&sessions).unwrap();
+        let view = session::open(&sessions, root.path()).unwrap();
+        let views = list_view(&sessions, session_context(&view)).unwrap().value;
         assert_eq!(views.len(), 2);
         let ghost = views
             .iter()
@@ -633,12 +636,24 @@ mod tests {
             &["init", "--quiet", "--initial-branch=main"],
         );
         let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root.path()).unwrap();
+        let asked = session_context(&view);
+        // A read asked by a session that has since closed is refused, not
+        // answered with the empty listing this repository would get.
+        session::close(&sessions);
         assert_eq!(
-            list_view(&sessions).unwrap_err().code.as_str(),
-            "submodules_no_session"
+            list_view(&sessions, asked).unwrap_err().code.as_str(),
+            "read_no_session"
         );
-        session::open(&sessions, root.path()).unwrap();
-        assert!(list_view(&sessions).unwrap().is_empty());
+        let reopened = session::open(&sessions, root.path()).unwrap();
+        assert_eq!(
+            list_view(&sessions, asked).unwrap_err().code.as_str(),
+            "read_stale_context"
+        );
+        assert!(list_view(&sessions, session_context(&reopened))
+            .unwrap()
+            .value
+            .is_empty());
     }
 
     /// The index listing is read to find gitlinks, so its size is the
@@ -685,8 +700,8 @@ mod tests {
         );
 
         let sessions = session::SessionState::default();
-        session::open(&sessions, root.path()).unwrap();
-        let views = list_view(&sessions).unwrap();
+        let view = session::open(&sessions, root.path()).unwrap();
+        let views = list_view(&sessions, session_context(&view)).unwrap().value;
         assert!(
             views.is_empty(),
             "no submodules is a real answer, not an error"

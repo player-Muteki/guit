@@ -19,6 +19,9 @@ import {
 
 const snapshot = (version) => ({
   version,
+  sessionId: 1,
+  historyGeneration: 0,
+  refsGeneration: 0,
   repo: { openPath: "/tmp/r", root: "/tmp/r", gitDir: "/tmp/r/.git", bare: false, linkedWorktree: false },
   branch: { name: "main", headState: "branch", oid: "a".repeat(40), upstream: null, ahead: null, behind: null },
   files: [],

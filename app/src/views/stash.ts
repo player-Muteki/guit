@@ -7,6 +7,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { el, icon, openMenu } from "../dom";
+import { contextMatches, sessionContext } from "../snapshotBus";
 import {
   applySnapshot,
   currentSnapshot,
@@ -14,9 +15,8 @@ import {
   isWriteRunning,
   setStatus,
   setWriteRunning,
-  snapshotVersion,
 } from "../state";
-import type { OperationResult, StashEntry } from "../types";
+import type { OperationResult, ReadContext, SessionRead, StashEntry } from "../types";
 import type { PreviewController } from "../dialogs/preview";
 
 export interface StashDeps {
@@ -48,6 +48,11 @@ export function createStashView(deps: StashDeps): StashView {
   let entries: StashEntry[] = [];
   let requestSeq = 0;
   let syncedVersion = -1;
+  // The stash list is not one of the two counted domains, so its read is bound
+  // to the session alone. Nothing about a refresh tells this list apart from
+  // the last one, so the view keeps re-asking per version and lets only the
+  // session number decide whether an answer still has a view to belong to.
+  let askedContext: ReadContext | null = null;
 
   // Save and apply are ordinary queued writes (apply keeps the entry), so
   // they ride the shared write lane; the backend re-reads and the returned
@@ -110,12 +115,15 @@ export function createStashView(deps: StashDeps): StashView {
     list.replaceChildren(el("div", { class: "file-row placeholder", text: message }));
   };
 
-  const load = async (): Promise<void> => {
+  const load = async (asked: ReadContext): Promise<void> => {
     const seq = ++requestSeq;
     status.textContent = "Loading stashes…";
     try {
-      const result = await invoke<StashEntry[]>("stash_list");
+      const read = await invoke<SessionRead<StashEntry[]>>("stash_list", { context: asked });
       if (seq !== requestSeq) return;
+      if (askedContext === null || !contextMatches(asked, askedContext)) return;
+      if (!contextMatches(asked, read.context)) return;
+      const result = read.value;
       entries = result;
       render();
       status.textContent = result.length === 0
@@ -123,6 +131,7 @@ export function createStashView(deps: StashDeps): StashView {
         : `${result.length} stash ${result.length === 1 ? "entry" : "entries"}.`;
     } catch (error) {
       if (seq !== requestSeq) return;
+      if (askedContext === null || !contextMatches(asked, askedContext)) return;
       deps.onError(error);
       placeholder("The stash list could not be loaded.");
     }
@@ -132,13 +141,17 @@ export function createStashView(deps: StashDeps): StashView {
   // re-reads the stash list once; a re-render of the same version never
   // touches Git.
   const sync = (): void => {
-    if (currentSnapshot() === null) {
-      if (syncedVersion !== -1) placeholder("Open a repository to list its stashes.");
+    const snapshot = currentSnapshot();
+    if (snapshot === null) {
+      if (askedContext !== null) placeholder("Open a repository to list its stashes.");
+      askedContext = null;
+      syncedVersion = -1;
       return;
     }
-    if (snapshotVersion() === syncedVersion) return;
-    syncedVersion = snapshotVersion();
-    void load();
+    if (snapshot.version === syncedVersion) return;
+    syncedVersion = snapshot.version;
+    askedContext = sessionContext(snapshot);
+    void load(askedContext);
   };
 
   saveButton.addEventListener("click", () => {

@@ -29,6 +29,7 @@ import {
 } from "../historyModel";
 import { revealScroll, rowHeightPx, visibleWindow, HISTORY_ROW_REM } from "../fileModel";
 import { currentFontPx } from "../font";
+import { contextMatches, readContextFor } from "../snapshotBus";
 import {
   applySnapshot,
   currentSnapshot,
@@ -39,7 +40,15 @@ import {
   setToolRunning,
   setWriteRunning,
 } from "../state";
-import type { CommitFileView, CommitView, HistoryPage, OperationResult, ToolResult } from "../types";
+import type {
+  CommitFileView,
+  CommitView,
+  HistoryPage,
+  OperationResult,
+  ReadContext,
+  SessionRead,
+  ToolResult,
+} from "../types";
 import type { PreviewController } from "../dialogs/preview";
 
 // The assumed row height must be the height the stylesheet gives a commit row
@@ -141,9 +150,11 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // live lane count would not fit the gutter. It is said in words, because a
   // silently linearised graph would claim a shape the history does not have.
   let graphFolded = false;
-  // undefined = no session; null = session without commits (unborn HEAD or
-  // bare repo); a string = the repository and head the loaded pages belong to.
-  let repoKey: string | null | undefined;
+  // The session and history generation the loaded pages belong to; undefined
+  // while no repository is on screen. Both come from the backend, because a
+  // page of commits for one repository is indistinguishable — commit for commit
+  // — from a page for a copy of it.
+  let graphContext: ReadContext | undefined;
   let selected: CommitView | null = null;
   let selectedIndex = -1;
   let detailHeight = 240;
@@ -238,9 +249,24 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     );
     detailFiles.replaceChildren(el("li", { class: "muted", text: "Loading files…" }));
     renderActions();
+    const asked = graphContext;
+    if (asked === undefined) return;
     try {
-      const files = await invoke<CommitFileView[]>("commit_files", { oid: commit.oid });
-      if (selected !== commit) return;
+      const read = await invoke<SessionRead<CommitFileView[]>>("commit_files", {
+        context: asked,
+        oid: commit.oid,
+      });
+      // The detail panel describes one row of one history. Files that arrive for
+      // a head which has since moved, or for a copy of this repository opened
+      // while the read ran, belong to no row on this screen.
+      if (
+        selected !== commit ||
+        graphContext === undefined ||
+        !contextMatches(asked, graphContext) ||
+        !contextMatches(asked, read.context)
+      )
+        return;
+      const files = read.value;
       if (files.length === 0) {
         detailFiles.replaceChildren(el("li", { class: "muted", text: "No files changed against its first parent." }));
       } else {
@@ -288,12 +314,21 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // Shares the external-tool lane with file diffs: one blocking tool at a
   // time, while staging and committing stay available.
   const runCommitDiff = async (): Promise<void> => {
-    if (selected === null || isToolRunning()) return;
+    const asked = graphContext;
+    if (selected === null || asked === undefined || isToolRunning()) return;
     setToolRunning(true);
     setStatus("Waiting for the diff tool to close…", "progress");
     renderActions();
     try {
-      const result = await invoke<ToolResult>("open_commit_diff", { oid: selected.oid });
+      const read = await invoke<SessionRead<ToolResult>>("open_commit_diff", {
+        context: asked,
+        oid: selected.oid,
+      });
+      // This answer is an action, not a read. The backend refused it if the row
+      // had already left the screen when the tool was asked for; from then on
+      // the result stands whatever the head moved to while the window was open,
+      // because the tool ran against the repository the user was looking at.
+      const result = read.value;
       applySnapshot(result.snapshot);
       setStatus(result.details ? `${result.message} ${result.details}` : result.message, result.outcome === "success" ? "success" : "error");
     } catch (error) {
@@ -560,29 +595,26 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     emptyState.textContent = message;
   };
 
-  // Which history a page of commits belongs to: the repository, and the head
-  // inside it. Two clones of the same project share an object id and nothing
-  // else, so the path is part of the answer.
-  const graphIdentity = (): string | undefined => {
-    const snapshot = currentSnapshot();
-    if (snapshot === null) return undefined;
-    return `${snapshot.repo.openPath}\u0000${snapshot.branch?.oid ?? ""}`;
-  };
-
   const loadPage = async (reset: boolean): Promise<void> => {
-    if (loading || currentSnapshot() === null) return;
+    const asked = graphContext;
+    if (loading || asked === undefined) return;
     if (!reset && !hasMore) return;
     loading = true;
     moreButton.disabled = true;
-    const asked = graphIdentity();
     try {
-      const page = await invoke<HistoryPage>("history_page", {
+      const read = await invoke<SessionRead<HistoryPage>>("history_page", {
+        context: asked,
         start: historyPageStart(commits.length, reset),
         oid: null,
         firstParent,
       });
-      // The session may have closed or moved on while this request ran.
-      if (repoKey !== asked) return;
+      // Two questions, and both have to answer yes: is the screen still the one
+      // that asked, and did the backend answer the session that asked? A page
+      // can arrive after a refresh moved the head, and it can arrive from a
+      // repository opened while this request was already running.
+      if (graphContext === undefined || !contextMatches(asked, graphContext)) return;
+      if (!contextMatches(asked, read.context)) return;
+      const page = read.value;
       commits = reset ? page.commits : commits.concat(page.commits);
       hasMore = page.hasMore;
       gutterColumns = graphColumns(commits);
@@ -754,19 +786,22 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
 
   // --- lifecycle ---
   // Whether the graph has to be read again is not this view's question to
-  // answer: the snapshot fan-out only reaches the graph domain when the branch
-  // it draws, or that branch's head, is a new one. This answers what to do when
-  // it does — drop the selection and the loaded pages, because both belonged to
-  // a history that is no longer on screen.
+  // answer: the snapshot fan-out only reaches the graph domain when the backend
+  // says that domain's own generation moved. This answers what to do when it
+  // does — drop the selection and the loaded pages, because both belonged to a
+  // history that is no longer on screen.
   const sync = (): void => {
     const snapshot = currentSnapshot();
     if (snapshot === null) {
+      // Nothing on screen owns a context any more, so a page that arrives for
+      // the session that just closed has no screen to arrive on.
+      graphContext = undefined;
       placeholder("Open a repository to browse its history.");
       render();
       return;
     }
     const head = snapshot.branch?.oid ?? null;
-    repoKey = graphIdentity();
+    graphContext = readContextFor(snapshot, "graph");
     selected = null;
     selectedIndex = -1;
     detail.hidden = true;

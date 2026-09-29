@@ -10,6 +10,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, openMenu, plural } from "../dom";
+import { contextMatches, readContextFor } from "../snapshotBus";
 import {
   applySnapshot,
   currentSnapshot,
@@ -17,13 +18,14 @@ import {
   isWriteRunning,
   setStatus,
   setWriteRunning,
-  snapshotVersion,
 } from "../state";
 import type {
   BranchRef,
   OperationResult,
+  ReadContext,
   RefListing,
   RemoteRef,
+  SessionRead,
   TagDetail,
   TagRef,
 } from "../types";
@@ -79,7 +81,11 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
   );
 
   let requestSeq = 0;
-  let syncedVersion = -1;
+  // The refs context the listing on screen was asked for. One number per
+  // session, minted by the backend, replaces the snapshot version this view
+  // used to compare: a refresh that leaves the names alone must not re-read,
+  // and opening a second clone of the same repository must.
+  let syncedContext: ReadContext | null = null;
   let listing: RefListing | null = null;
   let renaming: string | null = null;
   let branchForceTarget: string | null = null;
@@ -141,10 +147,17 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
   element.append(tagDetailPanel);
 
   const showTagDetail = (name: string): void => {
+    // The row was drawn from this context, so the annotation is asked for as
+    // it too. A picker that has since moved on gets an answer it drops.
+    const asked = syncedContext;
+    if (asked === null) return;
     void (async () => {
       setStatus(`Reading tag ${name}…`);
       try {
-        const detail = await invoke<TagDetail>("show_tag", { name });
+        const read = await invoke<SessionRead<TagDetail>>("show_tag", { context: asked, name });
+        if (syncedContext === null || !contextMatches(asked, syncedContext)) return;
+        if (!contextMatches(asked, read.context)) return;
+        const detail = read.value;
         const row = (term: string, value: string): HTMLElement[] => [el("dt", { text: term }), el("dd", { text: value })];
         tagDetailMeta.replaceChildren(
           ...row("Tag", detail.name),
@@ -326,33 +339,48 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
     status.textContent = `${plural(branches.length, "branch")} shown, ${plural(listing.remotes.length, "remote ref")}, ${plural(listing.tags.length, "tag")}.`;
   };
 
-  const load = async (): Promise<void> => {
+  const load = async (asked: ReadContext): Promise<void> => {
     const seq = ++requestSeq;
     status.textContent = "Loading references…";
     try {
-      const result = await invoke<RefListing>("list_refs");
-      if (seq !== requestSeq) return; // a newer request took over
+      const read = await invoke<SessionRead<RefListing>>("list_refs", { context: asked });
+      // Both halves: a newer request in this view took over, and the answer
+      // has to come back under the context it was asked for. The second one is
+      // what drops a listing of the repository the user already left behind.
+      if (seq !== requestSeq) return;
+      if (syncedContext === null || !contextMatches(asked, syncedContext)) return;
+      if (!contextMatches(asked, read.context)) return;
+      const result = read.value;
       listing = result;
       render();
       status.textContent = `${plural(result.branches.length, "branch")}, ${plural(result.remotes.length, "remote ref")}, ${plural(result.tags.length, "tag")}.`;
     } catch (error) {
       if (seq !== requestSeq) return;
+      if (syncedContext === null || !contextMatches(asked, syncedContext)) return;
       deps.onError(error);
       placeholder("The ref listing could not be loaded.");
     }
   };
 
   // The picker reads the names when it opens, and again when a snapshot moves
-  // the refs it is showing. `syncedVersion` is what keeps those two triggers
-  // down to one read per accepted snapshot; a re-render never touches Git.
+  // the refs it is showing. The backend's refs generation is what keeps those
+  // two triggers down to one read per move; a re-render never touches Git.
   const sync = (): void => {
-    if (currentSnapshot() === null) {
-      if (syncedVersion !== -1) placeholder("Open a repository to list its branches and tags.");
+    const snapshot = currentSnapshot();
+    if (snapshot === null) {
+      // Clear before checking: an in-flight read must find nothing to return
+      // to, or a closed session would keep showing its branches.
+      if (syncedContext !== null) placeholder("Open a repository to list its branches and tags.");
+      // The context and the names it described clear together, so a later
+      // filter keystroke cannot repaint a closed session's refs.
+      syncedContext = null;
+      listing = null;
       return;
     }
-    if (snapshotVersion() === syncedVersion) return;
-    syncedVersion = snapshotVersion();
-    void load();
+    const context = readContextFor(snapshot, "refs");
+    if (syncedContext !== null && contextMatches(syncedContext, context)) return;
+    syncedContext = context;
+    void load(context);
   };
 
   // --- events ---

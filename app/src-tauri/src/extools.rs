@@ -169,28 +169,32 @@ fn classify_merge_resolution(
     })
 }
 
-/// Commit-wide diff: one slot in the tool lane, then the same
+/// Commit-wide diff: the read is bound before the lane is taken, so a refused
+/// request never blocks the tools that follow it. Then the same
 /// execute → run → always-refresh contract as the file-scoped tools.
 pub fn execute_commit_diff(
     state: &ToolState,
     sessions: &session::SessionState,
+    context: session::ReadContext,
     oid: &str,
-) -> Result<ToolResult, ProbeError> {
+) -> Result<session::SessionRead<ToolResult>, ProbeError> {
+    let (identity, answered) = sessions.bind_read(context, session::ReadDomain::Graph)?;
     let operation_id = state.begin()?;
-    let result = run_commit_diff(state, sessions, oid);
+    let result = run_commit_diff(state, sessions, &identity, oid);
     state.finish();
     result.map(|mut result| {
         result.operation_id = operation_id;
-        result
+        session::SessionRead::new(answered, result)
     })
 }
 
 fn run_commit_diff(
     state: &ToolState,
     sessions: &session::SessionState,
+    identity: &repo::RepoIdentity,
     oid: &str,
 ) -> Result<ToolResult, ProbeError> {
-    let (outcome, exit_code, message, details) = match commit_diff_baseline(sessions, oid) {
+    let (outcome, exit_code, message, details) = match commit_diff_baseline(identity, oid) {
         Err(error) => (Outcome::Rejected, None, error.message, None),
         Ok((work_root, baseline)) => {
             if state.cancelled.load(Ordering::SeqCst) {
@@ -248,13 +252,10 @@ fn run_commit_diff(
 /// since the history was rendered is rejected instead of diffing a
 /// lookalike object.
 fn commit_diff_baseline(
-    sessions: &session::SessionState,
+    identity: &repo::RepoIdentity,
     oid: &str,
 ) -> Result<(std::path::PathBuf, String), ProbeError> {
-    let identity = sessions
-        .current_identity()
-        .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
-    let work_root = identity.work_root.ok_or_else(|| {
+    let work_root = identity.work_root.clone().ok_or_else(|| {
         ProbeError::new(
             "write_bare_repo",
             "A bare repository has no working copy for external tools.",
@@ -583,6 +584,14 @@ mod tests {
         "user.email=test@example.invalid",
     ];
 
+    /// The context a live graph read must be asked with.
+    fn graph_context(view: &session::SnapshotView) -> session::ReadContext {
+        session::ReadContext {
+            session_id: view.session_id,
+            generation: Some(view.history_generation),
+        }
+    }
+
     #[test]
     fn difftool_success_and_failure_follow_the_tool_exit_code() {
         let repository = init_repo();
@@ -795,10 +804,12 @@ mod tests {
         // baseline were wrong, Git itself would fail before the tool.
         configure_fake_tool(root, "echo launched >&2; exit 4");
         let sessions = session::SessionState::default();
-        session::open(&sessions, root).unwrap();
+        let view = session::open(&sessions, root).unwrap();
         let tools = ToolState::default();
 
-        let result = execute_commit_diff(&tools, &sessions, &commit).unwrap();
+        let read = execute_commit_diff(&tools, &sessions, graph_context(&view), &commit).unwrap();
+        assert_eq!(read.context, graph_context(&view));
+        let result = read.value;
         assert_eq!(
             (result.outcome, result.exit_code),
             (Outcome::Failed, Some(128)),
@@ -811,24 +822,56 @@ mod tests {
     }
 
     #[test]
-    fn commit_diff_refuses_without_a_session_or_a_live_commit() {
+    fn commit_diff_refuses_a_session_that_is_gone_or_replaced() {
         let repository = init_repo();
         let root = repository.path();
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
         let tools = ToolState::default();
         let sessions = session::SessionState::default();
-
-        let result = execute_commit_diff(&tools, &sessions, &"f".repeat(40)).unwrap();
-        assert_eq!(result.outcome, Outcome::Rejected);
-        assert!(result.message.contains("No repository session"));
-
         let view = session::open(&sessions, root).unwrap();
-        let result = execute_commit_diff(&tools, &sessions, &"f".repeat(40)).unwrap();
+        let asked = graph_context(&view);
+
+        session::close(&sessions);
+        assert_eq!(
+            execute_commit_diff(&tools, &sessions, asked, &"f".repeat(40))
+                .unwrap_err()
+                .code
+                .as_str(),
+            "read_no_session"
+        );
+        // Reopening the same path is a new session: identical contents, and
+        // still not the session that asked.
+        let reopened = session::open(&sessions, root).unwrap();
+        assert_ne!(asked.session_id, reopened.session_id);
+        assert_eq!(
+            execute_commit_diff(&tools, &sessions, asked, &"f".repeat(40))
+                .unwrap_err()
+                .code
+                .as_str(),
+            "read_stale_context"
+        );
+        // Neither refusal entered the lane: the slot is free and its counter
+        // has never moved, so no tool ever occupied it.
+        assert_eq!(tools.begin().unwrap(), 1);
+        tools.finish();
+    }
+
+    #[test]
+    fn commit_diff_refuses_a_commit_that_is_no_longer_present() {
+        let repository = init_repo();
+        let root = repository.path();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        let tools = ToolState::default();
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+
+        let read =
+            execute_commit_diff(&tools, &sessions, graph_context(&view), &"f".repeat(40)).unwrap();
+        let result = read.value;
         assert_eq!(result.outcome, Outcome::Rejected);
         assert!(result.message.contains("no longer present"));
         // The rejection re-read status like every other tool outcome.
         assert!(result.snapshot.is_some());
-        let _ = view;
     }
 
     #[test]

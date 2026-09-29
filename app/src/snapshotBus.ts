@@ -10,13 +10,15 @@
 // nothing. A session that closes is the exception: it is not a read but a
 // clearing, and every domain has to be told.
 //
-// What this does *not* claim matters as much as what it does. A snapshot
-// reports the current head, its upstream counts and the operation in progress;
-// it does not report a branch elsewhere in the repository that someone else
-// moved. So the ref listing never promises to notice that on its own — the
-// picker that shows the names reads them again the moment it opens.
+// The domains are counted by the backend rather than worked out here. It ships
+// one number per domain per session, and only it can decide what counts as that
+// domain having moved — which matters because nothing drawn from Git can tell
+// two copies of one repository apart. The same numbers bind every asynchronous
+// read the panel makes: a page of commits is asked *as* a domain's current
+// context, and an answer that comes back under another one has left the screen
+// it belongs to.
 
-import type { SnapshotView } from "./types";
+import type { ReadContext, SnapshotView } from "./types";
 
 export type SnapshotDomain = "graph" | "refs";
 
@@ -24,44 +26,37 @@ export const SNAPSHOT_DOMAINS: readonly SnapshotDomain[] = ["graph", "refs"];
 
 export type DomainHandler = (snapshot: SnapshotView | null) => void;
 
+// The context a read of this domain has to be asked with.
+export const readContextFor = (snapshot: SnapshotView, domain: SnapshotDomain): ReadContext => ({
+  sessionId: snapshot.sessionId,
+  generation: domain === "graph" ? snapshot.historyGeneration : snapshot.refsGeneration,
+});
+
+// A listing no domain owns: bound to the session alone, so a refresh leaves it
+// valid and opening another repository does not.
+export const sessionContext = (snapshot: SnapshotView): ReadContext => ({
+  sessionId: snapshot.sessionId,
+  generation: null,
+});
+
+// Whether an answer arrived from the session and generation the request was
+// asked against. A mismatch is not a failure: the view has moved on, so the
+// result is dropped and the next notification for that domain asks again.
+export const contextMatches = (asked: ReadContext, answered: ReadContext): boolean =>
+  asked.sessionId === answered.sessionId && asked.generation === answered.generation;
+
 // A character no repository path, ref name or object id can contain, so two
 // different snapshots cannot collide by having their parts concatenated.
 const FIELD_SEPARATOR = "\u0000";
 
-// The graph is drawn from one branch's history, so it has to be read again only
-// when the branch it is drawn from, or that branch's head, is a different one.
-// The head's *state* is part of the answer as well: a bare repository, an unborn
-// branch and a detached head are three different things to say about a history
-// that has no commits in them.
-const graphKey = (snapshot: SnapshotView): string =>
-  [
-    snapshot.repo.openPath,
-    snapshot.branch?.name ?? "",
-    snapshot.branch?.headState ?? "",
-    snapshot.branch?.oid ?? "",
-  ].join(FIELD_SEPARATOR);
-
-// The ref listing shows every name in the repository, but a snapshot reports
-// only the current head, its upstream counts and the operation in progress.
-// Those are what a refresh can reveal here; the rest is the picker's problem,
-// and it reads the names again on open.
-const refsKey = (snapshot: SnapshotView): string => {
-  const branch = snapshot.branch;
-  return [
-    snapshot.repo.openPath,
-    branch?.name ?? "",
-    branch?.headState ?? "",
-    branch?.oid ?? "",
-    branch?.upstream ?? "",
-    branch?.ahead ?? "",
-    branch?.behind ?? "",
-    snapshot.operation?.kind ?? "",
-  ].join(FIELD_SEPARATOR);
+const domainKey = (snapshot: SnapshotView, domain: SnapshotDomain): string => {
+  const context = readContextFor(snapshot, domain);
+  return `${context.sessionId}${FIELD_SEPARATOR}${context.generation ?? ""}`;
 };
 
 const DOMAIN_KEY: Record<SnapshotDomain, (snapshot: SnapshotView) => string> = {
-  graph: graphKey,
-  refs: refsKey,
+  graph: (snapshot) => domainKey(snapshot, "graph"),
+  refs: (snapshot) => domainKey(snapshot, "refs"),
 };
 
 const handlers = new Map<SnapshotDomain, Set<DomainHandler>>();

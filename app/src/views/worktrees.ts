@@ -16,6 +16,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { button, el, icon } from "../dom";
+import { contextMatches, sessionContext } from "../snapshotBus";
 import {
   applySnapshot,
   currentSnapshot,
@@ -23,10 +24,9 @@ import {
   isWriteRunning,
   setStatus,
   setWriteRunning,
-  snapshotVersion,
 } from "../state";
 import { SUBMODULE_STATE_LABELS } from "../types";
-import type { OperationResult, SubmoduleView, WorktreeView } from "../types";
+import type { OperationResult, ReadContext, SessionRead, SubmoduleView, WorktreeView } from "../types";
 import type { PreviewController } from "../dialogs/preview";
 
 
@@ -74,6 +74,7 @@ export function createWorktreesView(deps: WorktreesDeps): WorktreesView {
   let worktreeSeq = 0;
   let submoduleSeq = 0;
   let syncedVersion = -1;
+  let askedContext: ReadContext | null = null;
 
   // Add and prune are ordinary queued writes; the backend re-reads and the
   // returned snapshot refreshes the list.
@@ -182,12 +183,15 @@ export function createWorktreesView(deps: WorktreesDeps): WorktreesView {
     submoduleList.replaceChildren(el("div", { class: "file-row placeholder", text: message }));
   };
 
-  const loadWorktrees = async (): Promise<void> => {
+  const loadWorktrees = async (asked: ReadContext): Promise<void> => {
     const seq = ++worktreeSeq;
     worktreeStatus.textContent = "Loading worktrees…";
     try {
-      const result = await invoke<WorktreeView[]>("list_worktrees");
+      const read = await invoke<SessionRead<WorktreeView[]>>("list_worktrees", { context: asked });
       if (seq !== worktreeSeq) return;
+      if (askedContext === null || !contextMatches(asked, askedContext)) return;
+      if (!contextMatches(asked, read.context)) return;
+      const result = read.value;
       worktrees = result;
       render();
       worktreeStatus.textContent = result.length === 0
@@ -195,17 +199,21 @@ export function createWorktreesView(deps: WorktreesDeps): WorktreesView {
         : `${result.length} worktree ${result.length === 1 ? "entry" : "entries"}.`;
     } catch (error) {
       if (seq !== worktreeSeq) return;
+      if (askedContext === null || !contextMatches(asked, askedContext)) return;
       deps.onError(error);
       worktreePlaceholder("The worktree list could not be loaded.");
     }
   };
 
-  const loadSubmodules = async (): Promise<void> => {
+  const loadSubmodules = async (asked: ReadContext): Promise<void> => {
     const seq = ++submoduleSeq;
     submoduleStatus.textContent = "Loading submodules…";
     try {
-      const result = await invoke<SubmoduleView[]>("submodule_status");
+      const read = await invoke<SessionRead<SubmoduleView[]>>("submodule_status", { context: asked });
       if (seq !== submoduleSeq) return;
+      if (askedContext === null || !contextMatches(asked, askedContext)) return;
+      if (!contextMatches(asked, read.context)) return;
+      const result = read.value;
       submodules = result;
       render();
       submoduleStatus.textContent = result.length === 0
@@ -213,26 +221,35 @@ export function createWorktreesView(deps: WorktreesDeps): WorktreesView {
         : `${result.length} submodule ${result.length === 1 ? "entry" : "entries"}.`;
     } catch (error) {
       if (seq !== submoduleSeq) return;
+      if (askedContext === null || !contextMatches(asked, askedContext)) return;
       deps.onError(error);
       submodulePlaceholder("The submodule list could not be loaded.");
     }
   };
 
   const sync = (): void => {
-    if (currentSnapshot() === null) {
-      if (syncedVersion !== -1) {
+    const snapshot = currentSnapshot();
+    if (snapshot === null) {
+      if (askedContext !== null) {
         worktreePlaceholder("Open a repository to list its worktrees.");
         submodulePlaceholder("Open a repository to list its submodules.");
       }
+      askedContext = null;
+      syncedVersion = -1;
       return;
     }
-    if (snapshotVersion() === syncedVersion) {
+    if (snapshot.version === syncedVersion) {
       render();
       return;
     }
-    syncedVersion = snapshotVersion();
-    void loadWorktrees();
-    void loadSubmodules();
+    syncedVersion = snapshot.version;
+    // Neither list belongs to a counted domain, so both are asked as the
+    // session: a re-render of the same version never touches Git, and an
+    // answer from a repository that is no longer open has nowhere to go.
+    const context = sessionContext(snapshot);
+    askedContext = context;
+    void loadWorktrees(context);
+    void loadSubmodules(context);
   };
 
   addButton.addEventListener("click", () => void addWorktree());

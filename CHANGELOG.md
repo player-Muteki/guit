@@ -49,6 +49,12 @@ is the record of what is not verified.
   only while that listing is on screen, because it reads the names again the
   moment it opens. A refresh that changed nothing you can see asks Git for
   nothing.
+- A repository read now carries the identity of the session it was asked
+  from, and answers with it. Opening a second repository that happens to sit
+  at the same commit as the first no longer inherits the first one's commit
+  page or branch listing: a read asked by a session that has closed, or after
+  the thing it was reading moved, is refused by the backend and dropped by the
+  panel. What stays on screen is the current repository's answer, or nothing.
 - Watchers, document-level handlers and the listeners on the repository's own
   events are registered for release at the moment they are attached, and the
   releases run when the window is asked to close. Switching between the two

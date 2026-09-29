@@ -184,8 +184,15 @@ pub(crate) fn worktree_list(dir: &Path) -> Result<Vec<WorktreeView>, ProbeError>
     parse_porcelain(&output.stdout)
 }
 
-pub(crate) fn list_view(sessions: &session::SessionState) -> Result<Vec<WorktreeView>, ProbeError> {
-    worktree_list(&session_directory(sessions)?)
+pub(crate) fn list_view(
+    sessions: &session::SessionState,
+    context: session::ReadContext,
+) -> Result<session::SessionRead<Vec<WorktreeView>>, ProbeError> {
+    let (identity, answered) = sessions.bind_read(context, session::ReadDomain::Session)?;
+    Ok(session::SessionRead::new(
+        answered,
+        worktree_list(&bare_or_work_dir(&identity)?)?,
+    ))
 }
 
 /// Validates the dialog-returned path before it ever reaches an argv slot:
@@ -498,6 +505,14 @@ mod tests {
         repo::git_with(dir, COMMIT_ID, args);
     }
 
+    /// The context a live session-scoped listing must be asked with.
+    fn session_context(view: &session::SnapshotView) -> session::ReadContext {
+        session::ReadContext {
+            session_id: view.session_id,
+            generation: None,
+        }
+    }
+
     fn seeded_repo() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
@@ -593,7 +608,7 @@ mod tests {
         assert_eq!(result.outcome, Outcome::Success, "msg: {}", result.message);
         let gitfile = std::fs::read_to_string(wt.join(".git")).unwrap();
         assert!(gitfile.starts_with("gitdir: "), "linked worktree marker");
-        let list = list_view(&sessions).unwrap();
+        let list = list_view(&sessions, session_context(&view)).unwrap().value;
         assert_eq!(list.len(), 2);
         assert_eq!(list[1].branch.as_deref(), Some("side"));
         assert_eq!(list[1].path, wt.display().to_string());
@@ -712,7 +727,13 @@ mod tests {
             removed.message
         );
         assert!(!wt.exists());
-        assert_eq!(list_view(&sessions).unwrap().len(), 1);
+        assert_eq!(
+            list_view(&sessions, session_context(&view))
+                .unwrap()
+                .value
+                .len(),
+            1
+        );
         let replay = remove_worktree(&state, &sessions, preview.nonce).unwrap();
         assert_eq!(replay.outcome, Outcome::Rejected);
         assert!(replay.message.contains("expired"));
@@ -755,8 +776,8 @@ mod tests {
             &["init", "--quiet", "--bare", "--initial-branch=main"],
         );
         let sessions = session::SessionState::default();
-        session::open(&sessions, root).unwrap();
-        let list = list_view(&sessions).unwrap();
+        let view = session::open(&sessions, root).unwrap();
+        let list = list_view(&sessions, session_context(&view)).unwrap().value;
         assert_eq!(list.len(), 1);
         assert!(list[0].bare);
         let state = WriteState::default();
@@ -768,6 +789,43 @@ mod tests {
             .version;
         let error = preview_remove_worktree(&state, &sessions, version, 0).unwrap_err();
         assert_eq!(error.code.as_str(), "write_bare_repo");
+    }
+
+    // A listing bound to a session that is gone, or that the user replaced with
+    // a second look at the same path, is refused rather than answered: a closed
+    // read must never come back as an empty worktree list.
+    #[test]
+    fn list_refuses_a_closed_or_reopened_session() {
+        let repository = seeded_repo();
+        let root = repository.path();
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let asked = session_context(&view);
+        assert_eq!(
+            list_view(&sessions, asked).unwrap().context,
+            asked,
+            "a live session answers its own read"
+        );
+
+        session::close(&sessions);
+        assert_eq!(
+            list_view(&sessions, asked).unwrap_err().code.as_str(),
+            "read_no_session"
+        );
+        let reopened = session::open(&sessions, root).unwrap();
+        assert_ne!(asked.session_id, reopened.session_id);
+        assert_eq!(
+            list_view(&sessions, asked).unwrap_err().code.as_str(),
+            "read_stale_context"
+        );
+        // The listing the reopened session asked for is served normally.
+        assert_eq!(
+            list_view(&sessions, session_context(&reopened))
+                .unwrap()
+                .value
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -793,7 +851,13 @@ mod tests {
         let result = prune_worktrees(&state, &sessions, version).unwrap();
         assert_eq!(result.outcome, Outcome::Success, "msg: {}", result.message);
         assert_eq!(result.message, "Pruned 1 stale worktree record(s).");
-        assert_eq!(list_view(&sessions).unwrap().len(), 1);
+        assert_eq!(
+            list_view(&sessions, session_context(&view))
+                .unwrap()
+                .value
+                .len(),
+            1
+        );
         let version = result.snapshot.expect("re-read").version;
         let again = prune_worktrees(&state, &sessions, version).unwrap();
         assert_eq!(again.message, "No stale worktree records.");
@@ -830,7 +894,13 @@ mod tests {
 
         let sessions = session::SessionState::default();
         let view = session::open(&sessions, &wt).unwrap();
-        assert_eq!(list_view(&sessions).unwrap().len(), 2);
+        assert_eq!(
+            list_view(&sessions, session_context(&view))
+                .unwrap()
+                .value
+                .len(),
+            2
+        );
         let writes = WriteState::default();
         let merged = sequencer::merge_start(&writes, &sessions, view.version, "side").unwrap();
         assert_eq!(

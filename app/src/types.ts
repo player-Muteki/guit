@@ -62,10 +62,37 @@ export type OperationView = {
 
 export type SnapshotView = {
   version: number;
+  // Which repository session produced this snapshot. It changes on every open,
+  // even reopening the same path, and never on a refresh: two clones of one
+  // project agree on the head, the branch name and every commit, so no field
+  // drawn from Git can carry the identity. These three numbers do.
+  sessionId: number;
+  // How many times the head this session's graph is drawn from has moved.
+  historyGeneration: number;
+  // How many times a refresh could have changed the names in the repository.
+  refsGeneration: number;
   repo: RepoView;
   branch: BranchView | null;
   files: FileView[];
   operation: OperationView | null;
+};
+
+// What a read was asked against, minted by the backend and shipped inside every
+// snapshot. The frontend only carries and compares it — it never derives an
+// identity from the fields it renders. `generation` is null for a listing that
+// no refresh domain owns, which binds it to the session alone.
+export type ReadContext = {
+  sessionId: number;
+  generation: number | null;
+};
+
+// A session-scoped read and the exact context it was answered under. The echo
+// is what closes the hole the request alone cannot: a read that started
+// legitimately for one repository can finish after the user opened another,
+// and its rows are then indistinguishable by content.
+export type SessionRead<T> = {
+  context: ReadContext;
+  value: T;
 };
 
 export type OperationResult = {

@@ -115,13 +115,6 @@ fn stash_oid(work_root: &Path, selector: &str) -> Result<Option<String>, ProbeEr
     Ok(Some(oid))
 }
 
-fn session_directory(sessions: &session::SessionState) -> Result<PathBuf, ProbeError> {
-    let identity = sessions
-        .current_identity()
-        .ok_or_else(|| ProbeError::new("stash_no_session", "No repository is open."))?;
-    bare_or_work_dir(&identity)
-}
-
 /// Read-only stash views resolve in a bare repository from its git dir,
 /// mirroring the tag detail command.
 fn bare_or_work_dir(identity: &RepoIdentity) -> Result<PathBuf, ProbeError> {
@@ -135,8 +128,15 @@ fn bare_or_work_dir(identity: &RepoIdentity) -> Result<PathBuf, ProbeError> {
     }
 }
 
-pub(crate) fn list_view(sessions: &session::SessionState) -> Result<Vec<StashEntry>, ProbeError> {
-    stash_list(&session_directory(sessions)?)
+pub(crate) fn list_view(
+    sessions: &session::SessionState,
+    context: session::ReadContext,
+) -> Result<session::SessionRead<Vec<StashEntry>>, ProbeError> {
+    let (identity, answered) = sessions.bind_read(context, session::ReadDomain::Session)?;
+    Ok(session::SessionRead::new(
+        answered,
+        stash_list(&bare_or_work_dir(&identity)?)?,
+    ))
 }
 
 fn tracked_dirty(entry: &StatusEntry) -> bool {
@@ -477,6 +477,14 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "dirty\n").unwrap();
     }
 
+    /// The context a live session-scoped listing must be asked with.
+    fn session_context(view: &session::SnapshotView) -> session::ReadContext {
+        session::ReadContext {
+            session_id: view.session_id,
+            generation: None,
+        }
+    }
+
     fn version_of(result: &OperationResult) -> u64 {
         result
             .snapshot
@@ -744,10 +752,53 @@ mod tests {
         git(dir, &["init", "--quiet", "--bare", "--initial-branch=main"]);
         let sessions = session::SessionState::default();
         let view = session::open(&sessions, dir).unwrap();
-        assert!(list_view(&sessions).is_ok_and(|entries| entries.is_empty()));
+        assert!(
+            list_view(&sessions, session_context(&view)).is_ok_and(|read| read.value.is_empty())
+        );
         let writes = WriteState::default();
         let refused = stash_save(&writes, &sessions, view.version, "m").unwrap();
         assert_eq!(refused.outcome, Outcome::Rejected);
         assert!(refused.message.contains("bare"));
+    }
+
+    // The stash list is served from the session that asked for it: a reopened
+    // repository is a new session, and a read bound to the old one is refused
+    // instead of coming back as an empty list.
+    #[test]
+    fn list_refuses_a_session_that_is_gone_or_replaced() {
+        let root = fixture();
+        let dir = root.path();
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, dir).unwrap();
+        let asked = session_context(&view);
+        dirty(dir);
+        git(dir, &["stash", "push", "-q", "-m", "kept"]);
+        assert_eq!(
+            list_view(&sessions, asked)
+                .unwrap()
+                .value
+                .iter()
+                .map(|entry| entry.subject.clone())
+                .collect::<Vec<_>>(),
+            vec!["On main: kept".to_string()]
+        );
+
+        session::close(&sessions);
+        assert_eq!(
+            list_view(&sessions, asked).unwrap_err().code.as_str(),
+            "read_no_session"
+        );
+        let reopened = session::open(&sessions, dir).unwrap();
+        assert_eq!(
+            list_view(&sessions, asked).unwrap_err().code.as_str(),
+            "read_stale_context"
+        );
+        assert_eq!(
+            list_view(&sessions, session_context(&reopened))
+                .unwrap()
+                .value
+                .len(),
+            1
+        );
     }
 }

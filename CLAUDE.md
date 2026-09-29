@@ -126,6 +126,17 @@ sleeping, and output limits that truncate the capture while still streaming ever
 - The frontend mirrors the version rule in `state.ts::applySnapshot` — an older snapshot
   never replaces a newer one.
 
+`publish` also mints a `sessionId` — a new number on every session, including a second
+repository whose head equals the first — and counts `historyGeneration` /
+`refsGeneration` separately, each bumped only when its own domain's input moved.
+A repository read is asked with a `ReadContext { sessionId, generation }` and answers
+inside `SessionRead { context, value }`; `session::bind_read` refuses an answer whose
+session has closed or whose generation has been superseded, and the panel drops one that
+arrives anyway. The echo is what makes the check possible: without it a late reply is
+indistinguishable from a current one. A listing no domain owns asks with
+`ReadDomain::Session` (`generation: null`) — bound to the session, never invalidated by a
+refresh — rather than inventing a counter nothing maintains.
+
 Refresh requests coalesce through a leader/rerun gate, so a burst of watcher events runs
 one Git capture, not one per event.
 
@@ -196,6 +207,14 @@ the code they scan is how you break them.
   `decision N` references. The historical development plan was deleted. The current
   `plan/` directory is internal engineering guidance; neither its paths nor task labels
   belong in shipped text. Name behaviour, not schedule. Keep the existing gate intact.
+- **Every command answers to the thing it is bound to.** `app/tests/ipc-surface.mjs` reads
+  the real signatures out of `main.rs` and `src-tauri/src/*.rs` and sorts the registered
+  commands four ways: a repository read bound to a session and a generation (asked with a
+  `ReadContext`, answering with a `SessionRead`), a write bound to a `snapshot_version`, a
+  destructive confirmation bound to a one-time `nonce`, and an explicit exemption. The four
+  lists must cover the registry without overlapping, and an exempt command may not quietly
+  take on a per-repository read. Reclassifying one is a deliberate edit to that table, not
+  an accident in a signature.
 - **Row heights track the stylesheet.** `fileModel.ts` exports `FILE_ROW_REM` /
   `HISTORY_ROW_REM` that must equal `--row-height` / `--row-height-history` in
   `style/tokens.css`; a test gates it. The virtual lists derive row height from the root

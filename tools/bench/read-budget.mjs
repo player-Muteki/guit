@@ -12,10 +12,19 @@
 //   refresh   a snapshot whose content did not move, reads nothing
 //   coverage  only the domains that moved are read, and only while they are on
 //             screen — a closed picker does not list the names it is not showing
+//   identity  a second repository that reports the same branch, head and counts
+//             is still a second repository, and it is read again
 //   round trip  switching pages repeatedly leaves the listeners, watchers,
 //             timers and DOM node count where it found them
 //   close     ending the session reads nothing and stops showing what the
 //             repository that is no longer open had on screen
+//
+// The coverage and identity cases patch the snapshot the way the backend
+// publishes it — a domain that moved carries its new generation with it. That is
+// the whole contract this probe can check: the panel no longer works out from
+// Git-shaped fields whether a listing is stale, so a patch that changes those
+// fields without the numbers must cost nothing, and a change of numbers alone
+// must cost exactly the read that owns it.
 //
 // Usage: node read-budget.mjs <dist-dir> [port]
 //   e.g. node read-budget.mjs ../../app/dist 9222
@@ -39,9 +48,11 @@ const CDP = `http://127.0.0.1:${PORT}`;
 
 // Every read that a refresh could ask for, and the domain it belongs to. A name
 // that appears in neither is a read the panel has no screen for at all.
+// `commit_files` is in none of the three: it answers a selection rather than a
+// snapshot, so a refresh must never cause one.
 const GRAPH_READS = ["history_page"];
 const REFS_READS = ["list_refs"];
-const NEVER_READ = ["stash_list", "list_remotes", "pull_default", "list_worktrees", "submodule_status"];
+const NEVER_READ = ["stash_list", "list_worktrees", "submodule_status", "commit_files"];
 
 const fileView = (id, group, display, extra) => ({
   id,
@@ -86,6 +97,11 @@ const COMMITS = Array.from({ length: 40 }, (_, index) => commit(index));
 
 const BASE = {
   version: 1,
+  // Minted by the backend, never derived from what Git reported: two clones of
+  // one repository agree on every field below and disagree on this one.
+  sessionId: 1,
+  historyGeneration: 0,
+  refsGeneration: 0,
   repo: {
     openPath: "/home/dev/project",
     root: "/home/dev/project",
@@ -110,6 +126,16 @@ const REFS = {
   remotes: [],
   tags: [],
 };
+
+// A page of commits that can be told apart from the real one by looking at the
+// rendered text. This is what makes the stale-answer case decidable: the panel
+// has to drop the page it asked for as another repository, and a check that only
+// counts rows cannot tell a dropped page from a page that was never asked for.
+const STALE_COMMITS = COMMITS.map((entry) => ({
+  ...entry,
+  subject: "a page from the repository that was left behind",
+  message: "a page from the repository that was left behind",
+}));
 
 // Counting what the page attaches, before any of the application's code runs.
 // Element-level listeners are not counted: those live and die with a row that is
@@ -179,29 +205,58 @@ const STUB = `(() => {
   window.__HEAD__ = ${JSON.stringify(commit(0).oid)};
   const REFS = ${JSON.stringify(REFS)};
   const COMMITS = ${JSON.stringify(COMMITS)};
+  const STALE_COMMITS = ${JSON.stringify(STALE_COMMITS)};
+  // Bound reads answer as the backend does: the value wrapped in the context the
+  // request carried. __HOLD__ parks an answer in flight so a case can move the
+  // screen while the read is still out, and release it afterwards.
+  const held = [];
   const table = {
     restore_repository: () => window.__SNAPSHOT__,
     refresh_repository: () => Object.assign({}, window.__SNAPSHOT__, { version: ++window.__VERSION__ }),
     list_recent_repositories: () => ["/home/dev/project"],
-    list_refs: () => REFS,
-    history_page: () => ({ commits: COMMITS, hasMore: false }),
-    commit_files: () => ({ files: [] }),
-    stash_list: () => [],
-    list_remotes: () => [],
-    list_worktrees: () => [],
-    submodule_status: () => [],
-    pull_default: () => ({ rebase: null, ff: null, effective: "merge", note: null }),
+    list_refs: (A) => ({ context: A.context, value: REFS }),
+    history_page: (A) => {
+      const answer = { context: A.context, value: { commits: window.__STALE__ ? STALE_COMMITS : COMMITS, hasMore: false } };
+      if (!window.__HOLD__) return answer;
+      return new Promise((done) => { held.push(() => done(answer)); });
+    },
+    commit_files: (A) => ({ context: A.context, value: [] }),
+    show_tag: (A) => ({ context: A.context, value: { name: "v1", oid: "c".repeat(40), targetOid: "0".repeat(40), annotated: false, message: "" } }),
+    stash_list: (A) => ({ context: A.context, value: [] }),
+    list_worktrees: (A) => ({ context: A.context, value: [] }),
+    submodule_status: (A) => ({ context: A.context, value: [] }),
     probe_git: () => ({ available: true, version: "2.53.0", executable: "/usr/bin/git", supported: true, hasRestore: true, message: "" }),
     probe_external_tools: () => ({ difftool: "meld", mergetool: "meld", opener: "xdg-open" }),
-    diagnostics_summary: () => ({ events: [], files: [] }),
     load_window_settings: () => null,
     save_window_settings: () => null,
     restore_window_settings: () => null,
-    set_always_on_top: () => null,
   };
   window.__VERSION__ = 1;
   window.__CALLS__ = Object.create(null);
   window.__RESET__ = () => { window.__CALLS__ = Object.create(null); };
+  window.__RELEASE__ = () => { held.splice(0).forEach((finish) => finish()); };
+  window.__RESET_ALL__ = (patch) => {
+    Object.assign(window.__SNAPSHOT__, { sessionId: 1, historyGeneration: 0, refsGeneration: 0 }, patch);
+    window.__HOLD__ = false;
+    window.__STALE__ = false;
+    document.querySelector('.appbar [aria-label="Refresh status"]').click();
+  };
+  // Move one domain the way the backend does: a new number, and the Git-shaped
+  // fields that number was counted from.
+  window.__MOVE__ = (domain, patch) => {
+    const next = Object.assign({}, window.__SNAPSHOT__, patch || {});
+    if (domain === "graph" || domain === "both") next.historyGeneration += 1;
+    if (domain === "refs" || domain === "both") next.refsGeneration += 1;
+    window.__SNAP__(next);
+  };
+  // A second repository: a new session over the same branch, head and counts.
+  window.__OPEN__ = (patch) => {
+    window.__SNAP__(Object.assign({}, window.__SNAPSHOT__, {
+      sessionId: (window.__SNAPSHOT__.sessionId || 1) + 1,
+      historyGeneration: 0,
+      refsGeneration: 0,
+    }, patch));
+  };
   window.__SNAP__ = (patch) => {
     Object.assign(window.__SNAPSHOT__, patch);
     document.querySelector('.appbar [aria-label="Refresh status"]').click();
@@ -388,15 +443,13 @@ async function main() {
   `);
   check("a refresh that moved nothing reads nothing", total(refreshed, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0, JSON.stringify(refreshed));
 
-  const moved = await spent(`window.__SNAP__({ branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(1).padStart(40, "0")}" }) })`);
+  const moved = await spent(`window.__MOVE__("graph", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(1).padStart(40, "0")}" }) })`);
   check("a moved head re-reads the graph only", total(moved, GRAPH_READS) === 1 && total(moved, REFS_READS) === 0, JSON.stringify(moved));
 
   const opened = await spent(`document.querySelector('.appbar-branch').click()`);
   check("opening the picker reads the names once", total(opened, REFS_READS) === 1, JSON.stringify(opened));
 
-  const whileOpen = await spent(`
-    window.__SNAP__({ branch: Object.assign({}, window.__SNAPSHOT__.branch, { behind: 3 }) });
-  `);
+  const whileOpen = await spent(`window.__MOVE__("refs", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { behind: 3 }) });`);
   check("a picker on screen follows the counts it shows", total(whileOpen, REFS_READS) === 1, JSON.stringify(whileOpen));
 
   const filesOnly = await spent(`
@@ -404,10 +457,49 @@ async function main() {
   `);
   check("changed files alone ask for no listing", total(filesOnly, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0, JSON.stringify(filesOnly));
 
+  // The Git-shaped fields say the same thing as before; only the session differs.
+  // Nothing the panel can see in a snapshot tells these two repositories apart,
+  // which is the entire reason the backend counts them.
+  const second = await spent(`window.__OPEN__({});`);
+  check("a second repository with the same head is re-read, not inherited",
+    total(second, GRAPH_READS) === 1 && total(second, REFS_READS) === 1, JSON.stringify(second));
+
   await evaluate(`document.querySelector('.appbar [aria-label="Main"]').click(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); "closed"`);
-  const closed = await spent(`window.__SNAP__({ branch: Object.assign({}, window.__SNAPSHOT__.branch, { ahead: 9 }) })`);
+  const closed = await spent(`window.__MOVE__("refs", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { ahead: 9 }) })`);
   check("a closed picker is not re-read by a refresh", total(closed, REFS_READS) === 0, JSON.stringify(closed));
 
+  // A read asked for one repository that answers after the panel has moved to
+  // another. The answer carries the context it was asked with, so the view can
+  // drop it; a page of commits from the repository that was left behind must not
+  // appear in the graph of the one now open.
+  const stale = await spent(`
+    window.__HOLD__ = true;
+    window.__STALE__ = true;
+    window.__MOVE__("graph", {});
+  `);
+  check("the held read asked for the page", total(stale, GRAPH_READS) === 1, JSON.stringify(stale));
+  await spent(`
+    window.__HOLD__ = false;
+    window.__STALE__ = false;
+    window.__OPEN__({});
+  `);
+  const freshRows = await evaluate(`(() => {
+    const pane = document.querySelector('.history-view');
+    return [pane.querySelectorAll('[id^="commit-row-"]').length, /repository that was left behind/.test(pane.textContent)];
+  })()`);
+  check("the new repository's page is what the graph shows", freshRows[0] > 0 && !freshRows[1], JSON.stringify(freshRows));
+  await spent(`window.__RELEASE__();`);
+  const afterRelease = await evaluate(`(() => {
+    const pane = document.querySelector('.history-view');
+    return [/repository that was left behind/.test(pane.textContent), pane.querySelectorAll('[id^="commit-row-"]').length];
+  })()`);
+  check("a page that answers after the screen moved is dropped",
+    !afterRelease[0] && afterRelease[1] === freshRows[0], JSON.stringify(afterRelease));
+  await spent(`
+    window.__HOLD__ = false;
+    window.__STALE__ = false;
+    window.__RESET_ALL__(${JSON.stringify(BASE)});
+  `);
   const before = await counts();
   await spent(`
     for (let round = 0; round < 12; round++) {
@@ -425,7 +517,7 @@ async function main() {
   // show one that was released and re-attached by a rebuilt component. Cost is
   // the observable form of that bug: a stack of subscriptions asks Git once per
   // subscriber, so the same move must still cost exactly one read here.
-  const afterRounds = await spent(`window.__SNAP__({ branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(2).padStart(40, "0")}" }) })`);
+  const afterRounds = await spent(`window.__MOVE__("graph", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(2).padStart(40, "0")}" }) })`);
   check("a moved head still costs one graph read after twelve round trips",
     total(afterRounds, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 1, JSON.stringify(afterRounds));
 

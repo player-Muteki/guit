@@ -520,10 +520,11 @@ fn cancel_exttool(state: State<'_, extools::ToolState>) {
 #[tauri::command]
 async fn history_page(
     app: tauri::AppHandle,
+    context: session::ReadContext,
     start: u64,
     oid: Option<String>,
     first_parent: Option<bool>,
-) -> Result<history::HistoryPage, ProbeError> {
+) -> Result<session::SessionRead<history::HistoryPage>, ProbeError> {
     if let Some(target) = &oid {
         if !history::valid_oid(target) {
             return Err(ProbeError::new(
@@ -534,9 +535,7 @@ async fn history_page(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let sessions = app.state::<session::SessionState>();
-        let identity = sessions
-            .current_identity()
-            .ok_or_else(|| ProbeError::new("history_no_session", "No repository is open."))?;
+        let (identity, answered) = sessions.bind_read(context, session::ReadDomain::Graph)?;
         let directory = if identity.is_bare {
             identity.git_dir.as_path()
         } else {
@@ -551,11 +550,14 @@ async fn history_page(
                 .is_some_and(|branch| branch.head_state == model::HeadState::Unborn)
         {
             // Unborn HEAD has no commits; Git would refuse the log outright.
-            return Ok(history::HistoryPage {
-                start,
-                commits: Vec::new(),
-                has_more: false,
-            });
+            return Ok(session::SessionRead::new(
+                answered,
+                history::HistoryPage {
+                    start,
+                    commits: Vec::new(),
+                    has_more: false,
+                },
+            ));
         }
         history::page(
             directory,
@@ -564,6 +566,7 @@ async fn history_page(
             history::PAGE_SIZE,
             first_parent.unwrap_or(false),
         )
+        .map(|page| session::SessionRead::new(answered, page))
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -572,8 +575,9 @@ async fn history_page(
 #[tauri::command]
 async fn commit_files(
     app: tauri::AppHandle,
+    context: session::ReadContext,
     oid: String,
-) -> Result<Vec<history::CommitFileView>, ProbeError> {
+) -> Result<session::SessionRead<Vec<history::CommitFileView>>, ProbeError> {
     if !history::valid_oid(&oid) {
         return Err(ProbeError::new(
             "history_target_invalid",
@@ -582,9 +586,7 @@ async fn commit_files(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let sessions = app.state::<session::SessionState>();
-        let identity = sessions
-            .current_identity()
-            .ok_or_else(|| ProbeError::new("history_no_session", "No repository is open."))?;
+        let (identity, answered) = sessions.bind_read(context, session::ReadDomain::Graph)?;
         // Read-only listing: a bare repository has objects even without a
         // working copy, so only the tool lane stays work-tree bound.
         let directory = if identity.is_bare {
@@ -595,6 +597,7 @@ async fn commit_files(
                 .map_err(|_| ProbeError::new("repo_worktree_missing", "The work tree is gone."))?
         };
         history::commit_files(directory, &oid)
+            .map(|files| session::SessionRead::new(answered, files))
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -603,8 +606,9 @@ async fn commit_files(
 #[tauri::command]
 async fn open_commit_diff(
     app: tauri::AppHandle,
+    context: session::ReadContext,
     oid: String,
-) -> Result<extools::ToolResult, ProbeError> {
+) -> Result<session::SessionRead<extools::ToolResult>, ProbeError> {
     if !history::valid_oid(&oid) {
         return Err(ProbeError::new(
             "history_target_invalid",
@@ -614,19 +618,20 @@ async fn open_commit_diff(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<extools::ToolState>();
         let sessions = app.state::<session::SessionState>();
-        extools::execute_commit_diff(&state, &sessions, &oid)
+        extools::execute_commit_diff(&state, &sessions, context, &oid)
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
 #[tauri::command]
-async fn list_refs(app: tauri::AppHandle) -> Result<refs::RefListing, ProbeError> {
+async fn list_refs(
+    app: tauri::AppHandle,
+    context: session::ReadContext,
+) -> Result<session::SessionRead<refs::RefListing>, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let sessions = app.state::<session::SessionState>();
-        let identity = sessions
-            .current_identity()
-            .ok_or_else(|| ProbeError::new("refs_no_session", "No repository is open."))?;
+        let (identity, answered) = sessions.bind_read(context, session::ReadDomain::Refs)?;
         let directory = if identity.is_bare {
             identity.git_dir.as_path()
         } else {
@@ -634,7 +639,7 @@ async fn list_refs(app: tauri::AppHandle) -> Result<refs::RefListing, ProbeError
                 .work_dir()
                 .map_err(|_| ProbeError::new("repo_worktree_missing", "The work tree is gone."))?
         };
-        refs::list(directory)
+        refs::list(directory).map(|listing| session::SessionRead::new(answered, listing))
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -748,12 +753,14 @@ async fn create_tag(
 }
 
 #[tauri::command]
-async fn show_tag(app: tauri::AppHandle, name: String) -> Result<tags::TagDetail, ProbeError> {
+async fn show_tag(
+    app: tauri::AppHandle,
+    context: session::ReadContext,
+    name: String,
+) -> Result<session::SessionRead<tags::TagDetail>, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let sessions = app.state::<session::SessionState>();
-        let identity = sessions
-            .current_identity()
-            .ok_or_else(|| ProbeError::new("refs_no_session", "No repository is open."))?;
+        let (identity, answered) = sessions.bind_read(context, session::ReadDomain::Refs)?;
         // Read-only view: a bare repository resolves tags from its git dir.
         let directory = if identity.is_bare {
             identity.git_dir.as_path()
@@ -762,7 +769,7 @@ async fn show_tag(app: tauri::AppHandle, name: String) -> Result<tags::TagDetail
                 .work_dir()
                 .map_err(|_| ProbeError::new("repo_worktree_missing", "The work tree is gone."))?
         };
-        tags::tag_detail(directory, &name)
+        tags::tag_detail(directory, &name).map(|detail| session::SessionRead::new(answered, detail))
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -798,10 +805,13 @@ async fn delete_tag(
 }
 
 #[tauri::command]
-async fn stash_list(app: tauri::AppHandle) -> Result<Vec<stash::StashEntry>, ProbeError> {
+async fn stash_list(
+    app: tauri::AppHandle,
+    context: session::ReadContext,
+) -> Result<session::SessionRead<Vec<stash::StashEntry>>, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let sessions = app.state::<session::SessionState>();
-        stash::list_view(&sessions)
+        stash::list_view(&sessions, context)
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -1043,10 +1053,13 @@ async fn reset_hard(
 }
 
 #[tauri::command]
-async fn list_worktrees(app: tauri::AppHandle) -> Result<Vec<worktrees::WorktreeView>, ProbeError> {
+async fn list_worktrees(
+    app: tauri::AppHandle,
+    context: session::ReadContext,
+) -> Result<session::SessionRead<Vec<worktrees::WorktreeView>>, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let sessions = app.state::<session::SessionState>();
-        worktrees::list_view(&sessions)
+        worktrees::list_view(&sessions, context)
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
@@ -1114,10 +1127,11 @@ async fn prune_worktrees(
 #[tauri::command]
 async fn submodule_status(
     app: tauri::AppHandle,
-) -> Result<Vec<submodules::SubmoduleView>, ProbeError> {
+    context: session::ReadContext,
+) -> Result<session::SessionRead<Vec<submodules::SubmoduleView>>, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let sessions = app.state::<session::SessionState>();
-        submodules::list_view(&sessions)
+        submodules::list_view(&sessions, context)
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
