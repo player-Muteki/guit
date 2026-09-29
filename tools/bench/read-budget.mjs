@@ -91,8 +91,9 @@ const commit = (index) => ({
   authorDate: "2026-09-26T12:00:00+08:00",
   committerName: "dev",
   commitDate: "2026-09-26T12:00:00+08:00",
-  refs: index === 0 ? ["HEAD -> master"] : [],
-  labels: { branches: index === 0 ? ["master"] : [], tags: [], remotes: [], head: index === 0 },
+  // A row carries no name. What a commit is called arrives from `list_refs`,
+  // which is a second read on a second counter, so `refsAt` below is where the
+  // labels come from rather than anything in here.
   graph: {
     node: 0, entry: index === 0, exit: index !== 39, merge: false, root: index === 39,
     lanes: [], branches: [], incoming: [], dangling: false, folded: false,
@@ -124,12 +125,6 @@ const BASE = {
   },
   files: FILES,
   operation: null,
-};
-
-const REFS = {
-  branches: [{ name: "master", current: true, oid: "bb655b5b", upstream: "origin/master", ahead: 0, behind: 0, remote: "origin", upstreamGone: false, addressable: true }],
-  remotes: [],
-  tags: [],
 };
 
 // A page of commits that can be told apart from the real one by looking at the
@@ -239,9 +234,30 @@ const STUB = `(() => {
   window.__CALLS__ = Object.create(null);
   window.__SNAPSHOT__ = ${JSON.stringify(BASE)};
   window.__HEAD__ = ${JSON.stringify(commit(0).oid)};
-  const REFS = ${JSON.stringify(REFS)};
   const COMMITS = ${JSON.stringify(COMMITS)};
   const STALE_COMMITS = ${JSON.stringify(STALE_COMMITS)};
+  // Where each name points, held in the page rather than frozen in a literal: a
+  // case moves a branch and the one listing read that follows carries the new
+  // answer. Rebuilt per read, so an answer the page mutated cannot shape the next.
+  window.__MASTER__ = COMMITS[0].oid;
+  window.__TOPIC__ = COMMITS[0].oid;
+  window.__TAG__ = COMMITS[1].oid;
+  const refsValue = () => ({
+    branches: [
+      { name: "master", oid: window.__MASTER__, head: true, upstream: "origin/master",
+        ahead: 0, behind: 0, upstreamGone: false, addressable: true },
+      { name: "topic", oid: window.__TOPIC__, head: false, upstream: null,
+        ahead: 0, behind: 0, upstreamGone: false, addressable: true },
+    ],
+    remotes: [
+      { name: "origin/master", oid: window.__MASTER__, symref: null, addressable: true },
+      { name: "origin/topic", oid: window.__TOPIC__, symref: null, addressable: true },
+    ],
+    tags: [
+      { name: "v1", oid: "f".repeat(40), targetType: "commit", commitOid: window.__TAG__,
+        annotated: true, addressable: true },
+    ],
+  });
   // Bound reads answer as the backend does: the value wrapped in the context the
   // request carried. __HOLD__ parks an answer in flight so a case can move the
   // screen while the read is still out, and release it afterwards.
@@ -250,14 +266,17 @@ const STUB = `(() => {
     restore_repository: () => window.__SNAPSHOT__,
     refresh_repository: () => Object.assign({}, window.__SNAPSHOT__, { version: ++window.__VERSION__ }),
     list_recent_repositories: () => ["/home/dev/project"],
-    list_refs: (A) => ({ context: A.context, value: REFS }),
+    list_refs: (A) => {
+      if (window.__FAIL__) return new Promise((done, fail) => fail(new Error("git refused to list the refs")));
+      return { context: A.context, value: refsValue() };
+    },
     history_page: (A) => {
       const answer = { context: A.context, value: { commits: window.__STALE__ ? STALE_COMMITS : COMMITS, hasMore: false } };
       if (!window.__HOLD__) return answer;
       return new Promise((done) => { held.push(() => done(answer)); });
     },
     commit_files: (A) => ({ context: A.context, value: [] }),
-    show_tag: (A) => ({ context: A.context, value: { name: "v1", oid: "c".repeat(40), targetOid: "0".repeat(40), annotated: false, message: "" } }),
+    show_tag: (A) => ({ context: A.context, value: { name: "v1", oid: "c".repeat(40), targetType: "commit", commitOid: window.__TAG__, annotated: true, message: "" } }),
     stash_list: (A) => ({ context: A.context, value: [] }),
     list_worktrees: (A) => ({ context: A.context, value: [] }),
     submodule_status: (A) => ({ context: A.context, value: [] }),
@@ -273,8 +292,12 @@ const STUB = `(() => {
   window.__RELEASE__ = () => { held.splice(0).forEach((finish) => finish()); };
   window.__RESET_ALL__ = (patch) => {
     Object.assign(window.__SNAPSHOT__, { sessionId: 1, historyGeneration: 0, refsGeneration: 0 }, patch);
+    window.__MASTER__ = COMMITS[0].oid;
+    window.__TOPIC__ = COMMITS[0].oid;
+    window.__TAG__ = COMMITS[1].oid;
     window.__HOLD__ = false;
     window.__STALE__ = false;
+    window.__FAIL__ = false;
     document.querySelector('.appbar [aria-label="Refresh status"]').click();
   };
   // Move one domain the way the backend does: a new number, and the Git-shaped
@@ -470,13 +493,29 @@ async function main() {
     return calls();
   };
   const total = (tally, names) => names.reduce((sum, name) => sum + (tally[name] || 0), 0);
+  // Which names a drawn row carries. A listing arrives as the chips in a row's
+  // first cell, so this is the only channel that can see a name move from one
+  // commit to another — a count of reads cannot tell a moved name from a redraw.
+  const chips = async (index) => evaluate(`(() => {
+    const row = document.querySelector('#commit-row-${index}');
+    if (row === null) return null;
+    return [...row.querySelectorAll('.commit-ref')].map((node) => node.textContent);
+  })()`);
 
   if (!(await evaluate("!!document.querySelector('.shell')"))) throw new Error("the shell did not boot");
 
   const boot = await calls();
   check("boot reads the history it shows, once", total(boot, GRAPH_READS) === 1, JSON.stringify(boot));
-  check("boot does not list refs for a closed picker", total(boot, REFS_READS) === 0);
+  check("boot reads the names it shows, once", total(boot, REFS_READS) === 1, JSON.stringify(boot));
   check("boot reads nothing that has no page", total(boot, NEVER_READ) === 0, NEVER_READ.filter((n) => boot[n]).join(","));
+  // The join is by the commit each name points at, so a listing that arrived is
+  // only worth having if its names sit on the right rows.
+  const [atBoot0, atBoot1, atBoot2] = await Promise.all([chips(0), chips(1), chips(2)]);
+  check("a name lands on the commit it points at",
+    atBoot0 !== null && atBoot0.includes("master") && atBoot0.includes("topic")
+      && atBoot1 !== null && atBoot1.includes("v1")
+      && atBoot2 !== null && atBoot2.length === 0,
+    JSON.stringify([atBoot0, atBoot1, atBoot2]));
 
   const refreshed = await spent(`
     window.__SNAPSHOT__.files = ${JSON.stringify([...FILES, fileView(5, "worktree", "app/src/state.ts")])};
@@ -487,13 +526,26 @@ async function main() {
   check("a refresh that moved nothing reads nothing", total(refreshed, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0, JSON.stringify(refreshed));
 
   const moved = await spent(`window.__MOVE__("graph", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(1).padStart(40, "0")}" }) })`);
-  check("a moved head re-reads the graph only", total(moved, GRAPH_READS) === 1 && total(moved, REFS_READS) === 0, JSON.stringify(moved));
+  check("a move that only bumps the history counter asks for the graph alone",
+    total(moved, GRAPH_READS) === 1 && total(moved, REFS_READS) === 0, JSON.stringify(moved));
+
+  // The two counters are the backend's own split: a commit moves the head, which
+  // is a graph input *and* explains a name, so both advance together and both
+  // reads are asked. Nothing here re-reads the other domain by accident.
+  const committed = await spent(`window.__MOVE__("both", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(2).padStart(40, "0")}" }) })`);
+  check("a head move that advances both counters costs one read each",
+    total(committed, GRAPH_READS) === 1 && total(committed, REFS_READS) === 1, JSON.stringify(committed));
 
   const opened = await spent(`document.querySelector('.appbar-branch').click()`);
-  check("opening the picker reads the names once", total(opened, REFS_READS) === 1, JSON.stringify(opened));
+  check("opening the picker over a listing already read asks for nothing",
+    total(opened, REFS_READS) === 0, JSON.stringify(opened));
 
   const whileOpen = await spent(`window.__MOVE__("refs", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { behind: 3 }) });`);
-  check("a picker on screen follows the counts it shows", total(whileOpen, REFS_READS) === 1, JSON.stringify(whileOpen));
+  check("two views on one refs generation share one listing read",
+    total(whileOpen, REFS_READS) === 1, JSON.stringify(whileOpen));
+
+  const names = await spent(`window.__MOVE__("refs", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { behind: 4 }) });`);
+  check("a picker on screen follows the counts it shows", total(names, REFS_READS) === 1, JSON.stringify(names));
 
   const filesOnly = await spent(`
     window.__SNAP__({ files: ${JSON.stringify(FILES)} });
@@ -508,8 +560,52 @@ async function main() {
     total(second, GRAPH_READS) === 1 && total(second, REFS_READS) === 1, JSON.stringify(second));
 
   await evaluate(`document.querySelector('.appbar [aria-label="Main"]').click(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); "closed"`);
-  const closed = await spent(`window.__MOVE__("refs", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { ahead: 9 }) })`);
-  check("a closed picker is not re-read by a refresh", total(closed, REFS_READS) === 0, JSON.stringify(closed));
+
+  // The exit gate for a structured listing: a branch that moved somewhere the
+  // head did not follow. Nothing about the history changed — the topology, the
+  // pages and the row heights are all as they were — and only the names answer
+  // differently. This is the case a `%D` decoration in the page could not make,
+  // because the label lived in the page it was claiming did not move.
+  const relabel = await spent(`
+    window.__TOPIC__ = "${String(2).padStart(40, "0")}";
+    window.__MOVE__("refs", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { ahead: 9 }) });
+  `);
+  check("a moved branch without a head move re-reads the names and no history",
+    total(relabel, REFS_READS) === 1 && total(relabel, GRAPH_READS) === 0, JSON.stringify(relabel));
+  const [atMoved0, atMoved1, atMoved2] = await Promise.all([chips(0), chips(1), chips(2)]);
+  check("the moved name repaints onto its new commit and the tag stays where it was",
+    atMoved0 !== null && !atMoved0.includes("topic") && atMoved0.includes("master")
+      && atMoved1 !== null && atMoved1.includes("v1")
+      && atMoved2 !== null && atMoved2.includes("topic"),
+    JSON.stringify([atMoved0, atMoved1, atMoved2]));
+
+  // A listing that Git refused is a fact about these rows, not an empty column.
+  // The read is not cached on failure, so the retry the panel offers is a real
+  // second read and the names come back onto the rows they name.
+  const refused = await spent(`
+    window.__FAIL__ = true;
+    window.__MOVE__("refs", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { ahead: 10 }) });
+  `);
+  check("a refused listing asks once and is said out loud",
+    total(refused, REFS_READS) === 1
+      && (await evaluate(`(() => {
+        const line = document.querySelector('.history-count');
+        const retry = document.querySelector('.history-list-head [aria-label="Read the branch and tag names again"]');
+        return !line.hidden && /names could not be read/.test(line.textContent) && retry !== null && !retry.hidden;
+      })()`)),
+    JSON.stringify(refused));
+  const silentRows = await Promise.all([chips(0), chips(1)]);
+  check("a refused listing labels no row, and does not pretend the rows are unlabelled",
+    silentRows.every((list) => list !== null && list.length === 0), JSON.stringify(silentRows));
+
+  const repaired = await spent(`
+    window.__FAIL__ = false;
+    document.querySelector('.history-list-head [aria-label="Read the branch and tag names again"]').click();
+  `);
+  check("the retry asks for the listing again", total(repaired, REFS_READS) === 1, JSON.stringify(repaired));
+  const backAgain = await chips(2);
+  check("and the names come back onto the rows they name",
+    backAgain !== null && backAgain.includes("topic"), JSON.stringify(backAgain));
 
   // A read asked for one repository that answers after the panel has moved to
   // another. The answer carries the context it was asked with, so the view can

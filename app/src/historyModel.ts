@@ -11,7 +11,7 @@
 // DOM. A row's drawing depends on no other row, which is what keeps the list
 // virtual: a windowed row is drawn without consulting its neighbours.
 
-import type { CommitView, GraphRow } from "./types";
+import type { CommitView, GraphRow, RefListing } from "./types";
 
 export type HistoryRow = { kind: "commit"; commit: CommitView };
 
@@ -243,9 +243,55 @@ export function graphWidth(columns: number, laneWidth: number): number {
   return Math.max(columns, 1) * laneWidth;
 }
 
-// --- which refs contain a commit -----------------------------------
+// --- which names sit on a commit -----------------------------------
 
-// The answer to "where does this commit appear": the ref names sitting on
+// The names are not in a page of history. Each is a fact about a reference —
+// which commit it points at, and a reference can be pointed somewhere else
+// while every commit of the loaded history stays exactly as it was — so they
+// arrive from the names read and are joined here, by the commit each one names.
+// Joining on the id rather than re-reading the page is what lets a new tag
+// appear on an already drawn row without the graph being laid out again.
+export type RefChip = { kind: "branch" | "tag" | "remote"; name: string };
+
+/// Names by the commit they name, plus the one thing a listing cannot say: that
+/// there is no listing. `unknown` is not an empty index — a repository with no
+/// tags is a fact the panel can draw, while a names read Git refused says
+/// nothing, and drawing its rows as unlabelled would claim the second as the
+/// first.
+export interface NameIndex {
+  byOid: Map<string, RefChip[]>;
+  unknown: boolean;
+}
+
+export const unknownNames = (): NameIndex => ({ byOid: new Map(), unknown: true });
+
+/// The join itself. A branch or a remote-tracking ref names a commit directly;
+/// a tag names one only through `commitOid`, which the backend peels — a tag on
+/// a tree or a blob is a real name with no row to sit on, and it is left out of
+/// the index rather than guessed onto a commit.
+export function indexNames(listing: RefListing): NameIndex {
+  const byOid = new Map<string, RefChip[]>();
+  const add = (oid: string, chip: RefChip): void => {
+    const list = byOid.get(oid);
+    if (list === undefined) byOid.set(oid, [chip]);
+    else list.push(chip);
+  };
+  for (const branch of listing.branches) add(branch.oid, { kind: "branch", name: branch.name });
+  for (const tag of listing.tags) {
+    if (tag.commitOid !== null) add(tag.commitOid, { kind: "tag", name: tag.name });
+  }
+  for (const remote of listing.remotes) add(remote.oid, { kind: "remote", name: remote.name });
+  return { byOid, unknown: false };
+}
+
+/// The names on one commit, branches first, then tags, then remote-tracking
+/// refs. The order is fixed so a column of chips does not shuffle between rows
+/// or between two reads of the same repository.
+export function namesAt(index: NameIndex, oid: string): RefChip[] {
+  return index.byOid.get(oid) ?? [];
+}
+
+// The answer to "where does this commit appear": the names sitting on
 // this commit or on any descendant of it that is loaded. A commit cannot be
 // reached from a ref that has not been loaded yet, so the list is honest
 // about its edge by being offered only while the page is on screen.
@@ -282,19 +328,26 @@ export function buildRefMap(commits: readonly CommitView[]): RefMap {
 /// The names found on the commit and its loaded descendants, nearest tips
 /// first, deduplicated. `limit` caps the list rather than the search, so
 /// `truncated` says there were more names, not that there might have been.
-export function refsIncluding(map: RefMap, oid: string, limit = 10): RefSummary {
-  const names: string[] = [];
+/// With no listing to join, nothing is claimed about the descendants either:
+/// an unknown namespace is unknown all the way down.
+export function refsIncluding(
+  map: RefMap,
+  names: NameIndex,
+  oid: string,
+  limit = 10,
+): RefSummary {
+  const found: string[] = [];
   const seen = new Set<string>();
   const start = map.byOid.get(oid);
-  if (start === undefined) return { names, truncated: false };
+  if (start === undefined) return { names: found, truncated: false };
   const queue = [start];
   const walked = new Set<string>([oid]);
   for (let head = 0; head < queue.length; head++) {
     const commit = queue[head];
-    for (const name of [...commit.labels.branches, ...commit.labels.tags, ...commit.labels.remotes]) {
-      if (!seen.has(name)) {
-        seen.add(name);
-        names.push(name);
+    for (const chip of namesAt(names, commit.oid)) {
+      if (!seen.has(chip.name)) {
+        seen.add(chip.name);
+        found.push(chip.name);
       }
     }
     for (const child of map.children.get(commit.oid) ?? []) {
@@ -304,7 +357,7 @@ export function refsIncluding(map: RefMap, oid: string, limit = 10): RefSummary 
       }
     }
   }
-  return { names: names.slice(0, limit), truncated: names.length > limit };
+  return { names: found.slice(0, limit), truncated: found.length > limit };
 }
 
 // --- finding a commit in what is loaded ---
@@ -322,17 +375,21 @@ export interface FindQuery {
 /// Whether one commit matches. The subject, the author, the object id and
 /// the names of the refs sitting on it are all searched, because a reader
 /// typing a branch name wants the commits that name points at, and a reader
-/// pasting an id from a bug report wants that commit.
-export function commitMatches(commit: CommitView, query: FindQuery): boolean {
+/// pasting an id from a bug report wants that commit. The names come from the
+/// index rather than from the row, so a search run while the namespace is
+/// unknown simply has no names to match — which is what the view says out loud.
+export function commitMatches(
+  commit: CommitView,
+  query: FindQuery,
+  names: NameIndex,
+): boolean {
   if (query.text === "") return true;
   const needle = query.caseSensitive ? query.text : query.text.toLowerCase();
   const haystacks = [
     commit.subject,
     commit.authorName,
     commit.oid,
-    ...commit.labels.branches,
-    ...commit.labels.tags,
-    ...commit.labels.remotes,
+    ...namesAt(names, commit.oid).map((chip) => chip.name),
   ];
   if (query.regex) {
     let pattern: RegExp;
@@ -352,8 +409,12 @@ export function commitMatches(commit: CommitView, query: FindQuery): boolean {
 
 /// The commits a query keeps, in the order they were loaded. Filtering never
 /// reorders: the graph only makes sense top to bottom.
-export function filterCommits(commits: readonly CommitView[], query: FindQuery): CommitView[] {
-  return commits.filter((commit) => commitMatches(commit, query));
+export function filterCommits(
+  commits: readonly CommitView[],
+  query: FindQuery,
+  names: NameIndex,
+): CommitView[] {
+  return commits.filter((commit) => commitMatches(commit, query, names));
 }
 
 /// Whether a query is one the reader could have got wrong — a regular
@@ -371,10 +432,15 @@ export function findError(query: FindQuery): string | null {
 
 /// Where the reader is among the matches: the index of the current one, and
 /// how many there are. `current` is -1 when nothing matches yet.
-export function matchPosition(commits: readonly CommitView[], query: FindQuery, currentOid: string | null): { index: number; total: number } {
-  const matches = filterCommits(commits, query);
-  const index = currentOid === null ? -1 : matches.findIndex((commit) => commit.oid === currentOid);
-  return { index, total: matches.length };
+export function matchPosition(
+  commits: readonly CommitView[],
+  query: FindQuery,
+  names: NameIndex,
+  currentOid: string | null,
+): { index: number; total: number } {
+  const matches = filterCommits(commits, query, names);
+  const at = currentOid === null ? -1 : matches.findIndex((commit) => commit.oid === currentOid);
+  return { index: at, total: matches.length };
 }
 
 /// The next match's object id, wrapping at both ends, or null when there are
@@ -383,10 +449,11 @@ export function matchPosition(commits: readonly CommitView[], query: FindQuery, 
 export function stepMatch(
   commits: readonly CommitView[],
   query: FindQuery,
+  names: NameIndex,
   currentOid: string | null,
   delta: 1 | -1,
 ): string | null {
-  const matches = filterCommits(commits, query);
+  const matches = filterCommits(commits, query, names);
   if (matches.length === 0) return null;
   const at = currentOid === null ? -1 : matches.findIndex((commit) => commit.oid === currentOid);
   const next = (at + delta + matches.length) % matches.length;

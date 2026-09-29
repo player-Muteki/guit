@@ -10,6 +10,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, openMenu, plural } from "../dom";
+import { readRefListing } from "../refsStore";
 import { contextMatches, readContextFor } from "../snapshotBus";
 import {
   applySnapshot,
@@ -163,7 +164,11 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
           ...row("Tag", detail.name),
           ...row("Type", detail.annotated ? "annotated" : "lightweight"),
           ...row("Tag object", detail.oid),
-          ...row("Commit", detail.targetOid),
+          // A tag is not assumed to name a commit, because it may not. When it
+          // names something else, what it names is the whole answer.
+          ...(detail.commitOid === null
+            ? row("Names", `a ${detail.targetType}, not a commit`)
+            : row("Commit", detail.commitOid)),
         );
         tagDetailMessage.textContent = detail.annotated
           ? detail.message
@@ -279,11 +284,17 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
     const rows: HTMLElement[] = [el("div", { class: "ref-heading", text: `Tags (${tags.length})` })];
     for (const tag of tags) {
       if (!matchesFilter(tag.name)) continue;
-      const target = tag.targetOid ?? tag.oid;
+      // What the tag names, peeled by the backend: a commit gives its id, and a
+      // tag on anything else says what kind of object it points at rather than
+      // implying a commit that is not there.
+      const target =
+        tag.commitOid === null
+          ? `${tag.targetType} ${tag.oid.slice(0, 8)}`
+          : tag.commitOid.slice(0, 8);
       const element = refRow(
         tag.annotated ? "T" : "",
         tag.name,
-        `${tag.annotated ? "annotated" : "lightweight"} → ${target.slice(0, 8)}`,
+        `${tag.annotated ? "annotated" : "lightweight"} → ${target}`,
         tag.addressable,
       );
       // View reads the annotation through the backend's exact-ref query;
@@ -343,7 +354,9 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
     const seq = ++requestSeq;
     status.textContent = "Loading references…";
     try {
-      const read = await invoke<SessionRead<RefListing>>("list_refs", { context: asked });
+      // The shared names read: the graph is labelled from the same listing, and
+      // one generation of names is one read however many views draw it.
+      const read = await readRefListing(asked);
       // Both halves: a newer request in this view took over, and the answer
       // has to come back under the context it was asked for. The second one is
       // what drops a listing of the repository the user already left behind.
@@ -364,7 +377,9 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
 
   // The picker reads the names when it opens, and again when a snapshot moves
   // the refs it is showing. The backend's refs generation is what keeps those
-  // two triggers down to one read per move; a re-render never touches Git.
+  // two triggers down to one read per move; a re-render never touches Git. The
+  // commit graph asks for the same listing on the same counter, and the shared
+  // read behind it means the two views cost one Git process between them.
   const sync = (): void => {
     const snapshot = currentSnapshot();
     if (snapshot === null) {

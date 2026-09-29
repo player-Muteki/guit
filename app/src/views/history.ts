@@ -12,7 +12,6 @@ import { onDispose } from "../lifecycle";
 import {
   buildHistoryRows,
   buildRefMap,
-  commitMatches,
   filterCommits,
   findError,
   graphColumns,
@@ -20,16 +19,21 @@ import {
   graphLanePx,
   graphNodePx,
   historyPageStart,
+  indexNames,
   matchPosition,
+  namesAt,
   refsIncluding,
   rowGeometry,
   stepMatch,
+  unknownNames,
   type FindQuery,
+  type NameIndex,
   type RefSummary,
 } from "../historyModel";
 import { revealScroll, rowHeightPx, visibleWindow, HISTORY_ROW_REM } from "../fileModel";
 import { currentFontPx } from "../font";
-import { contextMatches, readContextFor } from "../snapshotBus";
+import { readRefListing } from "../refsStore";
+import { contextMatches, readContextFor, subscribeToDomain } from "../snapshotBus";
 import {
   applySnapshot,
   currentSnapshot,
@@ -113,8 +117,17 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     "Follow only each commit's first parent: the straight line of the branch, with the branches it merged left out.";
   const moreButton = el("button", { class: "btn", type: "button", text: "Load older", disabled: true });
   const countLabel = el("span", { class: "history-count", role: "status" });
+  // A names read Git refused leaves every row unlabelled, which is drawn
+  // exactly like a repository with no branches or tags. The count line says
+  // which of the two it is; this asks again without waiting for a refresh.
+  const namesRetry = button("Names again", () => void readNames(true), {
+    class: "btn btn-quiet",
+    ariaLabel: "Read the branch and tag names again",
+    title: "The names on these commits could not be read.",
+  });
+  namesRetry.hidden = true;
   const listHead = el("div", { class: "history-list-head" }, [
-    countLabel, el("div", { class: "spacer" }), firstParentLabel, findBox, moreButton,
+    countLabel, namesRetry, el("div", { class: "spacer" }), firstParentLabel, findBox, moreButton,
   ]);
 
   const rowsHost = el("div", { class: "virtual-rows" });
@@ -146,6 +159,17 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // says. Rebuilt with every page, and answers cached per commit until then.
   let refMap = buildRefMap([]);
   const refSummaries = new Map<string, RefSummary>();
+  // The names the rows carry, joined by the commit each one points at. They
+  // come from their own read on their own counter, because a branch moving is
+  // a change of names and not of history: the graph under a moved label is
+  // the same graph, and re-reading a page of commits to move one chip would
+  // claim otherwise.
+  let refTips: NameIndex = unknownNames();
+  // The listing on screen and the last request sent, kept apart so a refused
+  // read is not asked again on every repaint while still being retried by the
+  // reader or by the next move of the names.
+  let namesContext: ReadContext | undefined;
+  let namesAsked: ReadContext | undefined;
   // Set when the backend had to draw the history first-parent because the
   // live lane count would not fit the gutter. It is said in words, because a
   // silently linearised graph would claim a shape the history does not have.
@@ -184,6 +208,10 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // --- detail rendering ---
   const detailMessage = el("pre", { class: "commit-message" });
   const detailMeta = el("dl", { class: "detail-meta" });
+  // The names row is the one row of the detail pane that is not a fact about
+  // the commit, so it is filled from the listing rather than from the row and
+  // refilled whenever a new listing arrives.
+  const detailNames = el("dd", { class: "detail-names" });
   const detailFiles = el("ul", { class: "detail-files" });
   const closeDetail = button("Close", () => hideDetail(), { class: "btn" });
   const copyOid = button("Copy OID", () => void copyOidNow(), { class: "btn" });
@@ -230,6 +258,23 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     renderRows();
   };
 
+  // A commit nothing names and a names read that failed are two different
+  // facts, and an empty row drawn for the second would hide the failure the
+  // reader needs.
+  const paintDetailNames = (): void => {
+    if (selected === null) return;
+    const chips = refTips.unknown ? null : namesAt(refTips, selected.oid);
+    const lines =
+      chips === null
+        ? ["The names could not be read."]
+        : chips.length === 0
+          ? ["No branch or tag names this commit."]
+          : chips.map((chip) => chip.name);
+    detailNames.replaceChildren(
+      ...lines.map((line) => el("span", { class: "detail-line", text: line })),
+    );
+  };
+
   const showDetail = async (commit: CommitView): Promise<void> => {
     detail.hidden = false;
     detail.style.height = `${detailHeight}px`;
@@ -239,14 +284,16 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       ["Author", [commit.authorName, `<${commit.authorEmail}>`, commit.authorDate]],
       ["Committer", [commit.committerName, commit.commitDate]],
     ];
-    if (commit.refs.length > 0) meta.push(["Refs", commit.refs]);
     detailMeta.replaceChildren(
       ...meta.flatMap(([term, lines]) => {
         const dt = el("dt", { text: term });
         const dd = el("dd", {}, lines.map((line) => el("span", { class: "detail-line", text: line })));
         return [dt, dd];
       }),
+      el("dt", { text: "Names" }),
+      detailNames,
     );
+    paintDetailNames();
     detailFiles.replaceChildren(el("li", { class: "muted", text: "Loading files…" }));
     renderActions();
     const asked = graphContext;
@@ -367,13 +414,13 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
 
   // --- finding ---
   const applyFind = (): void => {
-    visible = filterCommits(commits, find);
+    visible = filterCommits(commits, find, refTips);
     const error = findError(find);
     if (error !== null) {
       findCount.textContent = error;
       findCount.dataset.state = "error";
     } else {
-      const { index, total } = matchPosition(commits, find, selected?.oid ?? null);
+      const { index, total } = matchPosition(commits, find, refTips, selected?.oid ?? null);
       findCount.dataset.state = "ok";
       findCount.textContent =
         find.text === "" ? "" : total === 0 ? "No match" : `${index + 1} of ${total}`;
@@ -414,7 +461,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   };
 
   const stepFind = (delta: 1 | -1): void => {
-    const next = stepMatch(commits, find, selected?.oid ?? null, delta);
+    const next = stepMatch(commits, find, refTips, selected?.oid ?? null, delta);
     if (next === null) return;
     const index = visible.findIndex((commit) => commit.oid === next);
     if (index < 0) return;
@@ -441,13 +488,17 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // the row cannot — which loaded ref tips contain this commit. When none
   // do yet, it says so rather than leaving the line blank.
   const graphTooltip = (commit: CommitView): string => {
-    let summary = refSummaries.get(commit.oid);
+    // Nothing is cached while the names are unknown: the next listing changes
+    // the answer, and a cached failure would keep the tooltip silent about the
+    // names that arrived since.
+    let summary = refTips.unknown ? undefined : refSummaries.get(commit.oid);
     if (summary === undefined) {
-      summary = refsIncluding(refMap, commit.oid);
-      refSummaries.set(commit.oid, summary);
+      summary = refsIncluding(refMap, refTips, commit.oid);
+      if (!refTips.unknown) refSummaries.set(commit.oid, summary);
     }
-    const included =
-      summary.names.length === 0
+    const included = refTips.unknown
+      ? "the names could not be read"
+      : summary.names.length === 0
         ? "nothing loaded"
         : summary.names.join(", ") + (summary.truncated ? " …" : "");
     return `${commit.authorName} — ${commit.subject}\nIncluded in: ${included}`;
@@ -542,20 +593,24 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     return svg;
   };
 
-  // The decorations on a commit, each kind given its own shape so a branch, a
-  // tag and a remote-tracking branch can be told apart at a glance. Order is
-  // fixed (branch, tag, remote) so the column does not shuffle between rows.
+  // The names sitting on a commit, each kind given its own shape so a branch,
+  // a tag and a remote-tracking branch can be told apart at a glance. The
+  // order is fixed (branch, tag, remote) so the column does not shuffle
+  // between rows. While the names are unknown the column is simply empty —
+  // the count line above the list says why, rather than every row claiming the
+  // repository has no names.
   const refChips = (commit: CommitView): HTMLElement[] => {
-    const { labels } = commit;
     const chips: HTMLElement[] = [];
-    for (const branch of labels.branches) {
-      chips.push(el("span", { class: "commit-ref ref-branch", text: branch, title: `Branch ${branch}` }));
-    }
-    for (const tag of labels.tags) {
-      chips.push(el("span", { class: "commit-ref ref-tag", text: tag, title: `Tag ${tag}` }));
-    }
-    for (const remote of labels.remotes) {
-      chips.push(el("span", { class: "commit-ref ref-remote", text: remote, title: `Remote branch ${remote}` }));
+    for (const chip of namesAt(refTips, commit.oid)) {
+      const label =
+        chip.kind === "branch" ? `Branch ${chip.name}` : chip.kind === "tag" ? `Tag ${chip.name}` : `Remote branch ${chip.name}`;
+      chips.push(
+        el("span", {
+          class: `commit-ref ref-${chip.kind}`,
+          text: chip.name,
+          title: label,
+        }),
+      );
     }
     return chips;
   };
@@ -595,6 +650,41 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     emptyState.textContent = message;
   };
 
+  // --- what the list says about itself ---
+  // Whether a failed names read is on screen: before the first read there is
+  // nothing to report, and while a re-read is in flight the rows still carry
+  // the listing that described them.
+  const namesUnknown = (): boolean => refTips.unknown && namesContext !== undefined;
+
+  const countSentence = (): string =>
+    plural(commits.length, "commit") +
+    (hasMore ? " so far." : " — all loaded.") +
+    (firstParent ? " on the mainline." : "") +
+    // A folded graph is drawn on the first-parent line, so the shape on screen
+    // is simpler than the history. Say which it is rather than let the drawing
+    // imply a history with no branches in it.
+    (graphFolded
+      ? " Branches are not drawn: this history has more lines open at once than the graph has room for."
+      : "") +
+    // An unlabelled column of rows is also what a repository with no branches
+    // or tags looks like, so the two have to be told apart somewhere.
+    (namesUnknown() ? " The names could not be read, so no row is labelled." : "");
+
+  const updateCount = (): void => {
+    // A placeholder owns the line while the list itself is hidden.
+    if (!listPane.hidden) countLabel.textContent = countSentence();
+  };
+
+  // Everything the listing is drawn into: the chips, the tooltip that answers
+  // "included in", the detail row and the line that says why a column is empty.
+  const renderNames = (): void => {
+    refSummaries.clear();
+    namesRetry.hidden = !namesUnknown();
+    updateCount();
+    paintDetailNames();
+    if (visible.length > 0) renderRows();
+  };
+
   const loadPage = async (reset: boolean): Promise<void> => {
     const asked = graphContext;
     if (loading || asked === undefined) return;
@@ -621,18 +711,11 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       refMap = buildRefMap(commits);
       refSummaries.clear();
       graphFolded = commits.some((commit) => commit.graph.folded);
-      visible = filterCommits(commits, find);
+      visible = filterCommits(commits, find, refTips);
       listPane.hidden = false;
       splitter.hidden = false;
       emptyState.hidden = true;
-      countLabel.textContent =
-        plural(commits.length, "commit") +
-        (hasMore ? " so far." : " — all loaded.") +
-        (firstParent ? " on the mainline." : "") +
-        // A folded graph is drawn on the first-parent line, so the shape on
-        // screen is simpler than the history. Say which it is rather than let
-        // the drawing imply a history with no branches in it.
-        (graphFolded ? " Branches are not drawn: this history has more lines open at once than the graph has room for." : "");
+      updateCount();
       renderRows();
     } catch (error) {
       deps.onError(error);
@@ -641,6 +724,47 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       loading = false;
       moreButton.disabled = !hasMore;
     }
+  };
+
+  // The names are read on their own counter and joined onto the rows already
+  // drawn, so a tag created since the last capture lands on its commit without
+  // a page of history being read again. A refusal is drawn as a refusal: the
+  // rows keep their shape, the chips stay off, and the line above the list says
+  // which of the two empty cases this is.
+  const readNames = async (retry = false): Promise<void> => {
+    const snapshot = currentSnapshot();
+    if (snapshot === null) {
+      namesAsked = undefined;
+      namesContext = undefined;
+      refTips = unknownNames();
+      renderNames();
+      return;
+    }
+    const asked = readContextFor(snapshot, "refs");
+    if (namesAsked !== undefined && namesAsked.sessionId !== asked.sessionId) {
+      // Another repository: its commits can be identical, commit for commit, to
+      // the ones just drawn, and its names cannot be assumed to be, so the
+      // listing of the session that closed joins nothing here.
+      namesContext = undefined;
+      refTips = unknownNames();
+    }
+    if (!retry && namesAsked !== undefined && contextMatches(namesAsked, asked)) return;
+    namesAsked = asked;
+    try {
+      const read = await readRefListing(asked);
+      if (namesAsked === undefined || !contextMatches(asked, namesAsked)) return;
+      if (!contextMatches(asked, read.context)) return;
+      namesContext = asked;
+      refTips = indexNames(read.value);
+    } catch {
+      if (namesAsked === undefined || !contextMatches(asked, namesAsked)) return;
+      // The read was asked and nothing came of it. That is a fact about these
+      // rows, and the line above the list says it: a toast would be the same
+      // failure reported twice if the branch picker is open over this view.
+      namesContext = asked;
+      refTips = unknownNames();
+    }
+    renderNames();
   };
 
   const renderRows = (): void => {
@@ -796,12 +920,16 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       // Nothing on screen owns a context any more, so a page that arrives for
       // the session that just closed has no screen to arrive on.
       graphContext = undefined;
+      void readNames();
       placeholder("Open a repository to browse its history.");
       render();
       return;
     }
     const head = snapshot.branch?.oid ?? null;
     graphContext = readContextFor(snapshot, "graph");
+    // The listing is asked for the same session the page is about to be read
+    // for, so the rows are never drawn with the previous repository's names.
+    void readNames();
     selected = null;
     selectedIndex = -1;
     detail.hidden = true;
@@ -809,6 +937,11 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     else void loadPage(true);
     render();
   };
+
+  // The names are this view's own subscription, not the shell's: the labels are
+  // a second read on a second counter, so a branch that moved repaints the
+  // chips while the graph under them is the one already on screen.
+  onDispose(subscribeToDomain("refs", () => void readNames()));
 
   const render = (): void => {
     const locked = !isSessionActive();

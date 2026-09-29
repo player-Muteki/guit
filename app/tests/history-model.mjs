@@ -14,10 +14,13 @@ import {
   graphNodePx,
   graphWidth,
   historyPageStart,
+  indexNames,
   matchPosition,
+  namesAt,
   refsIncluding,
   rowGeometry,
   stepMatch,
+  unknownNames,
   GRAPH_LANE_REM,
   GRAPH_NODE_REM,
   GRAPH_GUTTER_MAX_REM,
@@ -43,7 +46,6 @@ const commit = (n, extra = {}) => ({
   authorDate: "2026-09-25T10:00:00Z",
   committerName: "a",
   commitDate: "2026-09-25T10:00:00Z",
-  refs: [],
   // A straight first-parent line, so a test that is not about the graph still
   // has a graph to carry.
   graph: {
@@ -58,7 +60,8 @@ const commit = (n, extra = {}) => ({
     dangling: false,
     folded: false,
   },
-  labels: { branches: [], tags: [], remotes: [], head: false },
+  // A row carries no name: what a commit is called is a fact about a
+  // reference, and it arrives from the listing joined by `oid`.
   ...extra,
 });
 
@@ -485,60 +488,146 @@ test("buildHistoryRows carries the graph through without touching it", () => {
   assert.equal(row.commit.graph, g, "the row hands the backend's graph on unchanged");
 });
 
-// --- which refs contain a commit ---
+// --- which names sit on a commit ---
 
 const oid = (n) => String(n).padStart(40, "0");
+
+// The listing the names read answers with, in the shape the backend sends it:
+// every name carrying the object it points at. A tag peels to a commit unless
+// it names something else, which is the third element of its triple.
+const listing = ({ branches = [], tags = [], remotes = [] } = {}) =>
+  indexNames({
+    branches: branches.map(([name, n]) => ({
+      name,
+      oid: oid(n),
+      head: false,
+      upstream: null,
+      ahead: null,
+      behind: null,
+      upstreamGone: false,
+      addressable: true,
+    })),
+    tags: tags.map(([name, n, type = "commit"]) => ({
+      name,
+      oid: oid(n),
+      targetType: type,
+      commitOid: type === "commit" ? oid(n) : null,
+      annotated: false,
+      addressable: true,
+    })),
+    remotes: remotes.map(([name, n]) => ({
+      name,
+      oid: oid(n),
+      symref: null,
+      addressable: true,
+    })),
+  });
+
+const noNames = listing();
 
 test("the ref map names the loaded refs that contain a commit", () => {
   // 1 is the shared base; 2 and 3 are topic tips; 4 is the merge that
   // carries them into main. The pages arrive newest first, exactly as the
   // backend loads them.
-  const named = (n, parents, branches) =>
-    commit(n, { parents, labels: { branches, tags: [], remotes: [], head: false } });
   const loaded = [
-    named(4, [oid(2), oid(3)], ["main"]),
-    named(2, [oid(1)], ["feature-a"]),
-    named(3, [oid(1)], ["feature-b"]),
-    named(1, [], []),
+    commit(4, { parents: [oid(2), oid(3)] }),
+    commit(2, { parents: [oid(1)] }),
+    commit(3, { parents: [oid(1)] }),
+    commit(1, { parents: [] }),
   ];
+  const names = listing({ branches: [["main", 4], ["feature-a", 2], ["feature-b", 3]] });
   const map = buildRefMap(loaded);
   assert.deepEqual(
-    refsIncluding(map, oid(1)).names,
+    refsIncluding(map, names, oid(1)).names,
     ["feature-a", "feature-b", "main"],
     "the base is named by every tip above it, nearer tips first",
   );
-  assert.deepEqual(refsIncluding(map, oid(4)).names, ["main"], "a tip names itself");
+  assert.deepEqual(refsIncluding(map, names, oid(4)).names, ["main"], "a tip names itself");
   assert.deepEqual(
-    refsIncluding(map, oid(2)).names,
+    refsIncluding(map, names, oid(2)).names,
     ["feature-a", "main"],
     "a descendant's name does not leak down onto an ancestor",
   );
   assert.deepEqual(
-    refsIncluding(map, oid(99)).names,
+    refsIncluding(map, names, oid(99)).names,
     [],
     "an oid that is not loaded has no answer, not a wrong one",
   );
-  assert.equal(refsIncluding(map, oid(99)).truncated, false);
+  assert.equal(refsIncluding(map, names, oid(99)).truncated, false);
 });
 
 test("ref names deduplicate and truncate rather than rambling", () => {
-  // A chain whose two lowest commits both carry `shared` — the same ref
-  // seen twice on one walk — plus a branch and a remote above them.
-  const named = (n, parents, branches, remotes = []) =>
-    commit(n, { parents, labels: { branches, tags: [], remotes, head: false } });
+  // A chain whose two lowest commits both carry `shared` — the same ref seen
+  // twice on one walk — plus a branch and a remote above them.
   const loaded = [
-    named(3, [oid(2)], [], ["origin/main"]),
-    named(2, [oid(1)], ["main"]),
-    named(1, [oid(0)], ["shared"]),
-    named(0, [], ["shared"]),
+    commit(3, { parents: [oid(2)] }),
+    commit(2, { parents: [oid(1)] }),
+    commit(1, { parents: [oid(0)] }),
+    commit(0, { parents: [] }),
   ];
+  const names = listing({
+    branches: [["main", 2], ["shared", 1], ["shared", 0]],
+    remotes: [["origin/main", 3]],
+  });
   const map = buildRefMap(loaded);
-  const summary = refsIncluding(map, oid(0));
+  const summary = refsIncluding(map, names, oid(0));
   assert.deepEqual(summary.names, ["shared", "main", "origin/main"], "each name once");
-  const capped = refsIncluding(map, oid(0), 2);
+  const capped = refsIncluding(map, names, oid(0), 2);
   assert.deepEqual(capped.names, ["shared", "main"]);
   assert.equal(capped.truncated, true, "the cap says there was more");
-  assert.equal(refsIncluding(map, oid(0), 3).truncated, false, "no more, no ellipsis");
+  assert.equal(refsIncluding(map, names, oid(0), 3).truncated, false, "no more, no ellipsis");
+});
+
+test("a name moves with the commit it points at, and the history stays put", () => {
+  // The whole reason the labels are a second read: `main` moving from one
+  // loaded commit to another changes nothing about the commits themselves, so
+  // the rows are joined again rather than read again.
+  const loaded = [commit(2, { parents: [oid(1)] }), commit(1, { parents: [oid(0)] }), commit(0)];
+  const map = buildRefMap(loaded);
+  const before = listing({ branches: [["main", 2]] });
+  const after = listing({ branches: [["main", 1]] });
+  assert.deepEqual(namesAt(before, oid(2)).map((chip) => chip.name), ["main"]);
+  assert.deepEqual(namesAt(after, oid(2)), [], "the moved name left the row it was on");
+  assert.deepEqual(namesAt(after, oid(1)).map((chip) => chip.name), ["main"]);
+  assert.equal(map.byOid.size, loaded.length, "the walk is the topology alone; a listing never enters it");
+  assert.deepEqual(refsIncluding(map, after, oid(0)).names, ["main"], "and the same walk answers both");
+});
+
+test("a tag that names no commit is a name with no row to sit on", () => {
+  const loaded = [commit(1, { parents: [oid(0)] }), commit(0)];
+  const names = listing({ branches: [["main", 1]], tags: [["v1", 1, "tree"], ["v2", 0]] });
+  assert.deepEqual(
+    namesAt(names, oid(1)).map((chip) => chip.kind),
+    ["branch"],
+    "the branch is on the commit; the tag naming a tree is not",
+  );
+  assert.deepEqual(
+    namesAt(names, oid(0)).map((chip) => chip.kind),
+    ["tag"],
+    "a tag that does name a commit is joined through the peel",
+  );
+  assert.deepEqual(
+    refsIncluding(buildRefMap(loaded), names, oid(0)).names,
+    ["v2", "main"],
+    "the tag on the commit is found first, and the tag on the tree never",
+  );
+});
+
+test("a namespace that could not be read is not an empty one", () => {
+  const loaded = [commit(1, { parents: [oid(0)] }), commit(0)];
+  const map = buildRefMap(loaded);
+  const some = listing({ branches: [["main", 1]] });
+  assert.equal(some.unknown, false, "a listing that arrived is known, however short");
+  assert.equal(noNames.unknown, false, "a repository with no names at all is a fact");
+  const unknown = unknownNames();
+  assert.equal(unknown.unknown, true);
+  assert.deepEqual(namesAt(unknown, oid(1)), []);
+  assert.deepEqual(refsIncluding(map, unknown, oid(1)), { names: [], truncated: false });
+  // Nothing is claimed for a walk with no names either: the answer is that the
+  // view does not know, which is what the line above the list then says.
+  const query = { text: "main", regex: false, caseSensitive: false };
+  assert.equal(commitMatches(loaded[0], query, unknown), false);
+  assert.equal(commitMatches(loaded[0], query, some), true);
 });
 
 // --- finding a commit ---
@@ -550,53 +639,59 @@ const history = () => [
   commit(3, { subject: "Fix the reader", authorName: "ada" }),
 ];
 
-test("a find matches the subject, the author, the object id and the ref names", () => {
-  assert.ok(commitMatches(history()[0], find("parser")));
-  assert.ok(commitMatches(history()[0], find("Ada")), "an author matches");
+test("a find matches the subject, the author, the object id and the names", () => {
+  const commits = history();
+  assert.ok(commitMatches(commits[0], find("parser"), noNames));
+  assert.ok(commitMatches(commits[0], find("Ada"), noNames), "an author matches");
   assert.ok(
-    commitMatches(history()[0], find(history()[0].oid)),
+    commitMatches(commits[0], find(commits[0].oid), noNames),
     "an id pasted from a bug report finds its commit",
   );
-  // Typing a branch or tag name finds the commit that name points at.
-  const labelled = commit(9, { subject: "nothing alike", labels: { branches: ["release-1.0"], tags: [], remotes: [], head: false } });
-  assert.ok(commitMatches(labelled, find("release-1.0")), "a branch name matches");
-  assert.equal(commitMatches(history()[1], find("parser")), false);
+  // Typing a branch or tag name finds the commit that name points at, and the
+  // name comes from the listing rather than from the row.
+  const names = listing({ branches: [["release-1.0", 9]] });
+  assert.ok(
+    commitMatches(commit(9, { subject: "nothing alike" }), find("release-1.0"), names),
+    "a branch name matches",
+  );
+  assert.equal(commitMatches(commits[1], find("parser"), noNames), false);
 });
 
 test("a find is case-insensitive unless asked otherwise", () => {
-  assert.ok(commitMatches(history()[2], find("ADA")));
-  assert.equal(commitMatches(history()[2], find("ADA", { caseSensitive: true })), false);
-  assert.ok(commitMatches(history()[2], find("ada", { caseSensitive: true })));
+  assert.ok(commitMatches(history()[2], find("ADA"), noNames));
+  assert.equal(commitMatches(history()[2], find("ADA", { caseSensitive: true }), noNames), false);
+  assert.ok(commitMatches(history()[2], find("ada", { caseSensitive: true }), noNames));
 });
 
 test("a regular expression find is a real regular expression", () => {
-  assert.ok(commitMatches(history()[0], find("^Fix", { regex: true })));
-  assert.equal(commitMatches(history()[1], find("^Fix", { regex: true })), false);
-  assert.ok(commitMatches(history()[0], find("f(i|x)x", { regex: true })));
+  const commits = history();
+  assert.ok(commitMatches(commits[0], find("^Fix", { regex: true }), noNames));
+  assert.equal(commitMatches(commits[1], find("^Fix", { regex: true }), noNames), false);
+  assert.ok(commitMatches(commits[0], find("f(i|x)x", { regex: true }), noNames));
   // An expression that does not compile matches nothing and is reported,
   // rather than throwing at the reader mid-keystroke.
   const broken = find("Fix (", { regex: true });
-  assert.equal(commitMatches(history()[0], broken), false);
+  assert.equal(commitMatches(commits[0], broken, noNames), false);
   assert.equal(findError(broken), "Not a valid regular expression.");
   assert.equal(findError(find("Fix (")), null, "a substring is never a broken expression");
 });
 
 test("filtering keeps the loaded order, because a graph only reads downward", () => {
-  const kept = filterCommits(history(), find("Fix"));
+  const kept = filterCommits(history(), find("Fix"), noNames);
   assert.deepEqual(kept.map((c) => c.subject), ["Fix the parser", "Fix the reader"]);
-  assert.equal(filterCommits(history(), find("")).length, 3, "an empty query keeps everything");
-  assert.equal(filterCommits(history(), find("nothing here")).length, 0);
+  assert.equal(filterCommits(history(), find(""), noNames).length, 3, "an empty query keeps everything");
+  assert.equal(filterCommits(history(), find("nothing here"), noNames).length, 0);
 });
 
 test("stepping through the matches wraps at both ends", () => {
   const commits = history();
   const query = find("Fix");
   // Stepping into an empty selection starts at the first match.
-  assert.equal(stepMatch(commits, query, null, 1), commits[0].oid);
-  assert.equal(stepMatch(commits, query, commits[0].oid, 1), commits[2].oid);
-  assert.equal(stepMatch(commits, query, commits[2].oid, 1), commits[0].oid, "wraps forward");
-  assert.equal(stepMatch(commits, query, commits[0].oid, -1), commits[2].oid, "wraps back");
-  assert.equal(stepMatch(commits, find("absent"), null, 1), null, "no matches, no step");
-  assert.deepEqual(matchPosition(commits, query, commits[2].oid), { index: 1, total: 2 });
-  assert.deepEqual(matchPosition(commits, query, null), { index: -1, total: 2 });
+  assert.equal(stepMatch(commits, query, noNames, null, 1), commits[0].oid);
+  assert.equal(stepMatch(commits, query, noNames, commits[0].oid, 1), commits[2].oid);
+  assert.equal(stepMatch(commits, query, noNames, commits[2].oid, 1), commits[0].oid, "wraps forward");
+  assert.equal(stepMatch(commits, query, noNames, commits[0].oid, -1), commits[2].oid, "wraps back");
+  assert.equal(stepMatch(commits, find("absent"), noNames, null, 1), null, "no matches, no step");
+  assert.deepEqual(matchPosition(commits, query, noNames, commits[2].oid), { index: 1, total: 2 });
+  assert.deepEqual(matchPosition(commits, query, noNames, null), { index: -1, total: 2 });
 });

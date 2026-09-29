@@ -7,6 +7,8 @@ import test from "node:test";
 import {
   buildHistoryRows,
   historyPageStart,
+  indexNames,
+  namesAt,
 } from "../src/historyModel.ts";
 import { mulberry32, randomInt } from "./helpers/rng.mjs";
 import { visibleWindow } from "../src/fileModel.ts";
@@ -21,7 +23,6 @@ const commit = (n, extra = {}) => ({
   authorDate: "2026-09-25T10:00:00Z",
   committerName: "a",
   commitDate: "2026-09-25T10:00:00Z",
-  refs: [],
   ...extra,
 });
 
@@ -74,17 +75,32 @@ test("buildHistoryRows: a short or empty oid is carried, not repaired", () => {
   assert.equal(empty.commit.oid, "");
 });
 
-test("10k labels and a bounded window across a paging session", () => {
+test("10k names and a bounded window across a paging session", () => {
   const rand = mulberry32(0x9a9e);
   const rowHeight = 28;
   const allCommits = [];
+  const tips = [];
   for (let page = 0; page < 20; page += 1) {
     const start = historyPageStart(allCommits.length, false);
     assert.equal(start, allCommits.length);
-    const commits = Array.from({ length: 500 }, (unused, index) =>
-      commit(start + index, { refs: randomInt(rand, 10) === 0 ? ["HEAD -> main"] : [] }),
-    );
+    const commits = Array.from({ length: 500 }, (unused, index) => commit(start + index));
     allCommits.push(...commits);
+    // A branch naming one commit in every ten, so the window is built with a
+    // column of names joined onto it rather than with nothing on screen.
+    for (let index = start; index < start + 500; index += 10) {
+      tips.push({
+        name: `b${index}`,
+        oid: commit(index).oid,
+        head: false,
+        upstream: null,
+        ahead: null,
+        behind: null,
+        upstreamGone: false,
+        addressable: true,
+      });
+    }
+    const names = indexNames({ branches: tips, tags: [], remotes: [] });
+    assert.equal(namesAt(names, commit(start).oid).length, 1, "the page on screen is labelled");
     const rows = buildHistoryRows(allCommits);
     assert.equal(rows.length, allCommits.length);
     const scrollTop = randomInt(rand, Math.max(1, rows.length - 20)) * rowHeight;

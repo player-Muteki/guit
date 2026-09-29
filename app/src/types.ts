@@ -207,8 +207,14 @@ export type RemoteRef = {
 
 export type TagRef = {
   name: string;
+  /** The object the ref points at: the tag object for an annotated tag. */
   oid: string;
-  targetOid: string | null;
+  /** Git's word for what the tag stands for once peeled: `commit`, `tree`,
+   * `blob`. A tag is not assumed to name a commit, because it may not. */
+  targetType: string;
+  /** The commit this tag names, when it names one — the id a label joins a
+   * history row on. */
+  commitOid: string | null;
   annotated: boolean;
   addressable: boolean;
 };
@@ -218,7 +224,8 @@ export type RefListing = { branches: BranchRef[]; remotes: RemoteRef[]; tags: Ta
 export type TagDetail = {
   name: string;
   oid: string;
-  targetOid: string;
+  targetType: string;
+  commitOid: string | null;
   annotated: boolean;
   message: string;
 };
@@ -242,16 +249,11 @@ export type GraphRow = {
   folded: boolean;
 };
 
-// The decorations on a commit, taken apart by kind by the backend. The view
-// never parses Git's decoration vocabulary; it just gives each kind its own
-// shape.
-export type RefLabels = {
-  branches: string[];
-  tags: string[];
-  remotes: string[];
-  head: boolean;
-};
-
+// A row of the loaded history: what Git says about the commit, and where the
+// backend laid it in the graph. Deliberately absent: any name the commit
+// carries. Which refs point here is a fact about the references, read and
+// invalidated with them (`RefListing`), so a tag added after a page was laid
+// out can arrive without the page being read a second time.
 export type CommitView = {
   oid: string;
   parents: string[];
@@ -262,8 +264,6 @@ export type CommitView = {
   authorDate: string;
   committerName: string;
   commitDate: string;
-  refs: string[];
-  labels: RefLabels;
   graph: GraphRow;
 };
 

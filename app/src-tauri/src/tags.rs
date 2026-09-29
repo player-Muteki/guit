@@ -89,9 +89,16 @@ fn tag_exists(listing: &refs::RefListing, name: &str) -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct TagDetail {
     pub name: String,
+    /// The object the ref points at: the tag object for an annotated tag, the
+    /// named thing for a lightweight one. What a delete has to match.
     pub oid: String,
-    /// Commit the tag resolves to; equals `oid` for lightweight tags.
-    pub target_oid: String,
+    /// Git's word for what the tag stands for once peeled: `commit`, `tree`,
+    /// `blob`. A tag is not assumed to name a commit, because it may not.
+    pub target_type: String,
+    /// The commit named through the tag, when it names one. `None` for a tag on
+    /// a tree or a blob — a name with no commit to show rather than a read that
+    /// failed.
+    pub commit_oid: Option<String>,
     pub annotated: bool,
     /// Tag message — only an *annotated* tag has one. Git's `%(contents)`
     /// falls back to the *commit* message for lightweight tags (measured on
@@ -112,7 +119,7 @@ pub(crate) fn tag_detail(directory: &Path, name: &str) -> Result<TagDetail, Prob
     let mut command = repo::user_git_command(directory);
     command.args([
         "for-each-ref",
-        "--format=%(objecttype)%1f%(objectname)%1f%(*objectname)%1f%(contents)",
+        "--format=%(objecttype)%1f%(objectname)%1f%(*objectname)%1f%(*objecttype)%1f%(contents)",
         &format!("refs/tags/{name}"),
     ]);
     let output = runner::run_with_limit(
@@ -135,10 +142,11 @@ pub(crate) fn tag_detail(directory: &Path, name: &str) -> Result<TagDetail, Prob
         ));
     }
     let record = String::from_utf8_lossy(&output.stdout);
-    let mut fields = record.splitn(4, '\x1f');
+    let mut fields = record.splitn(5, '\x1f');
     let objecttype = fields.next().unwrap_or_default();
     let objectname = fields.next().unwrap_or_default().trim();
     let peeled = fields.next().unwrap_or_default().trim();
+    let peel_type = fields.next().unwrap_or_default().trim();
     let contents = fields.next().unwrap_or_default();
     if objectname.is_empty() {
         // Empty stdout means the ref vanished between listing and query;
@@ -149,14 +157,32 @@ pub(crate) fn tag_detail(directory: &Path, name: &str) -> Result<TagDetail, Prob
         ));
     }
     let annotated = objecttype.trim() == "tag";
+    // The same peel rule `refs::list` applies: a record that answers a peeled
+    // id or type while denying being a tag object is not a shape this reader
+    // was written against, and nothing is parsed from it.
+    if (!peeled.is_empty() || !peel_type.is_empty()) && !annotated {
+        return Err(ProbeError::new(
+            "refs_protocol_error",
+            "Git peeled a tag record that is not a tag object; nothing was parsed.",
+        ));
+    }
+    let (target_type, target_oid) = if annotated {
+        if peeled.is_empty() || peel_type.is_empty() {
+            return Err(ProbeError::new(
+                "refs_protocol_error",
+                "Git emitted a tag object it did not peel; nothing was parsed.",
+            ));
+        }
+        (peel_type.to_owned(), peeled.to_owned())
+    } else {
+        (objecttype.trim().to_owned(), objectname.to_owned())
+    };
+    let names_commit = target_type == "commit";
     Ok(TagDetail {
         name: name.to_owned(),
         oid: objectname.to_owned(),
-        target_oid: if peeled.is_empty() {
-            objectname.to_owned()
-        } else {
-            peeled.to_owned()
-        },
+        target_type,
+        commit_oid: names_commit.then_some(target_oid),
         annotated,
         message: if annotated {
             contents.to_owned()
@@ -525,21 +551,23 @@ mod tests {
         let lite_ref = listing.tags.iter().find(|t| t.name == "lite").unwrap();
         assert!(!lite_ref.annotated);
         assert_eq!(lite_ref.oid, base);
-        assert_eq!(lite_ref.target_oid, None);
+        assert_eq!(lite_ref.commit_oid.as_deref(), Some(base.as_str()));
+        assert_eq!(lite_ref.target_type, "commit");
         let ann_ref = listing.tags.iter().find(|t| t.name == "ann").unwrap();
         assert!(ann_ref.annotated);
         assert_ne!(ann_ref.oid, base);
-        assert_eq!(ann_ref.target_oid.as_deref(), Some(base.as_str()));
+        assert_eq!(ann_ref.commit_oid.as_deref(), Some(base.as_str()));
 
         let lite_detail = tag_detail(dir, "lite").unwrap();
         assert!(!lite_detail.annotated);
+        assert_eq!(lite_detail.target_type, "commit");
         // Regression pin: Git's %(contents) answers a lightweight tag with
         // the *commit* message; guit must report no annotation instead.
         assert_eq!(lite_detail.message, "");
         let ann_detail = tag_detail(dir, "ann").unwrap();
         assert!(ann_detail.annotated);
         assert_eq!(ann_detail.oid, ann_ref.oid);
-        assert_eq!(ann_detail.target_oid, base);
+        assert_eq!(ann_detail.commit_oid.as_deref(), Some(base.as_str()));
         assert_eq!(ann_detail.message.trim(), "first line\nsecond line\nthird");
     }
 

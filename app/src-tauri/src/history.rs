@@ -1,6 +1,6 @@
 use crate::perf;
 use crate::probe::{redact, ProbeError};
-use crate::{branches, repo, runner};
+use crate::{repo, runner};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -14,8 +14,12 @@ const FIELD_SEP: u8 = 0x1f;
 /// appear inside messages, which is why the message is the final field and
 /// records are split with a field-count limit.
 const RECORD_SEP: u8 = 0x00;
-const FIELD_COUNT: usize = 10;
-const LOG_FORMAT: &str = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%D%x1f%B";
+const FIELD_COUNT: usize = 9;
+// No decoration field: which names sit on a commit is a fact about the
+// repository's references, read and invalidated with them (`refs.rs`) rather
+// than frozen into whatever the refs happened to be called when this page was
+// laid out.
+const LOG_FORMAT: &str = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%B";
 /// Topology-only format for the graph prefix. Oid + parents is ~82 bytes a
 /// commit, so a ten-thousand-commit prefix stays far under the capture bound
 /// and cannot trip `history_truncated`. Only the parents are ever needed to
@@ -42,13 +46,6 @@ pub struct CommitView {
     pub author_date: String,
     pub committer_name: String,
     pub commit_date: String,
-    /// Raw `%D` decoration tokens ("HEAD -> main", "tag: v1", "origin/main").
-    pub refs: Vec<String>,
-    /// The same decorations, sorted by kind and ready to render. The raw
-    /// tokens are kept because they are exactly what Git said; the labels are
-    /// what the view needs in order to give a branch, a tag and a remote
-    /// track each a shape of their own.
-    pub labels: RefLabels,
     /// This commit's place in the graph, computed by the backend so the
     /// frontend only maps columns to pixels.
     pub graph: GraphRow,
@@ -250,70 +247,6 @@ fn layout(
     (rows, peak)
 }
 
-/// The decorations on a commit, taken apart by kind. `%D` hands back one
-/// comma-separated string mixing all three; sorting them here means the view
-/// never has to know Git's decoration vocabulary.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RefLabels {
-    /// Local branch tips, without the `HEAD ->` prefix.
-    pub branches: Vec<String>,
-    /// Tag names, without the `tag: ` prefix.
-    pub tags: Vec<String>,
-    /// Remote-tracking branches, without the `origin/` prefix.
-    pub remotes: Vec<String>,
-    /// The commit is the one HEAD points at.
-    pub head: bool,
-}
-
-/// The names of the repository's remotes. `%D` abbreviates a remote-tracking
-/// branch to `remote/branch`, which is indistinguishable from a local branch
-/// that happens to be called `origin/main` — so telling the two apart needs
-/// the actual remote names rather than a guess at the spelling.
-fn remote_names(directory: &Path) -> Vec<String> {
-    let Ok(output) = branches::run_git(directory, &["remote"], &AtomicBool::new(false)) else {
-        // No readable remote list is not a reason to fail a page: the labels
-        // fall back to calling every decoration a branch, which is a naming
-        // choice, not a wrong fact.
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-/// Splits one `%D` field into its decorations. Git's own prefixes are the
-/// whole grammar here: `HEAD -> name` marks the checked-out branch, `tag: `
-/// a tag, and anything starting with a known remote's name is that remote's
-/// tracking branch.
-fn parse_labels(raw: &str, remotes: &[String]) -> RefLabels {
-    let mut labels = RefLabels::default();
-    for token in raw.split(", ").filter(|token| !token.is_empty()) {
-        if let Some(name) = token.strip_prefix("HEAD -> ") {
-            labels.head = true;
-            labels.branches.push(name.to_owned());
-        } else if let Some(name) = token.strip_prefix("tag: ") {
-            labels.tags.push(name.to_owned());
-        } else if token == "HEAD" {
-            labels.head = true;
-        } else if remotes
-            .iter()
-            .any(|remote| token.starts_with(&format!("{remote}/")))
-        {
-            labels.remotes.push(token.to_owned());
-        } else {
-            labels.branches.push(token.to_owned());
-        }
-    }
-    labels
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitFileView {
@@ -356,7 +289,6 @@ pub fn parse(
     nodes: &[Node],
     graph: &[GraphRow],
     start: usize,
-    remotes: &[String],
 ) -> Result<Vec<CommitView>, ProbeError> {
     let mismatch = || {
         // Named once so every shape of disagreement answers with the same
@@ -384,7 +316,7 @@ pub fn parse(
             ));
         }
         let message = {
-            let raw = fields[9];
+            let raw = fields[8];
             match raw.split_last() {
                 Some((b'\n', rest)) => rest,
                 _ => raw,
@@ -411,7 +343,6 @@ pub fn parse(
         if node.oid != oid || node.parents != parents {
             return Err(mismatch());
         }
-        let decorations = lossy(fields[8]);
         commits.push(CommitView {
             oid,
             parents,
@@ -421,12 +352,6 @@ pub fn parse(
             author_date: lossy(fields[4]),
             committer_name: lossy(fields[5]),
             commit_date: lossy(fields[7]),
-            refs: decorations
-                .split(", ")
-                .filter(|t| !t.is_empty())
-                .map(str::to_owned)
-                .collect(),
-            labels: parse_labels(&decorations, remotes),
             message,
             graph: row.clone(),
         });
@@ -654,8 +579,7 @@ pub fn page(
         first_parent,
     )?;
     let rows = assign_lanes_with(&nodes, MAX_LANES, !first_parent);
-    let remotes = remote_names(directory);
-    let mut commits = parse(&output.stdout, &nodes, &rows, start as usize, &remotes)?;
+    let mut commits = parse(&output.stdout, &nodes, &rows, start as usize)?;
     perf::mark("history.graph", graph_start.elapsed());
     perf::mark("history.parse", parse_start.elapsed());
     let has_more = commits.len() as u64 > limit;
@@ -825,12 +749,12 @@ mod tests {
             .collect()
     }
 
-    /// One record in exactly the shape `LOG_FORMAT` emits: ten fields, the
+    /// One record in exactly the shape `LOG_FORMAT` emits: nine fields, the
     /// message closed by Git's own newline, the record closed by NUL.
     fn record(oid: &str, parents: &[&str]) -> String {
         format!(
             "{oid}\x1f{}\x1fguit test\x1fguit@example.invalid\x1f2026-01-01T00:00:00+00:00\
-             \x1fguit test\x1fguit@example.invalid\x1f2026-01-01T00:00:00+00:00\x1f\x1fmessage\n\x00",
+             \x1fguit test\x1fguit@example.invalid\x1f2026-01-01T00:00:00+00:00\x1fmessage\n\x00",
             parents.join(" "),
         )
     }
@@ -883,7 +807,6 @@ mod tests {
         assert_eq!(page.commits[0].subject, "subject line");
         assert_eq!(page.commits[0].author_name, "guit test");
         assert!(page.commits[0].author_date.contains('T'));
-        assert!(page.commits[0].refs.iter().any(|t| t.contains("main")));
     }
 
     #[test]
@@ -945,17 +868,17 @@ mod tests {
     #[test]
     fn parsing_rejects_short_records_instead_of_guessing() {
         let broken = b"abc\x1fdef"; // fewer than FIELD_COUNT fields
-        let error = parse(broken, &plain_nodes(4), &plain_graph(4), 0, &[]).unwrap_err();
+        let error = parse(broken, &plain_nodes(4), &plain_graph(4), 0).unwrap_err();
         assert_eq!(error.code.as_str(), "history_protocol_error");
         // Empty input and trailing separators parse to zero commits.
         assert_eq!(
-            parse(&[], &plain_nodes(4), &plain_graph(4), 0, &[])
+            parse(&[], &plain_nodes(4), &plain_graph(4), 0)
                 .unwrap()
                 .len(),
             0
         );
         assert_eq!(
-            parse(b"\x00", &plain_nodes(4), &plain_graph(4), 0, &[])
+            parse(b"\x00", &plain_nodes(4), &plain_graph(4), 0)
                 .unwrap()
                 .len(),
             0
@@ -968,7 +891,7 @@ mod tests {
         // the graph ran out, the page is refused.
         let one = record(&"a".repeat(40), &[]);
         assert_eq!(
-            parse(one.as_bytes(), &[], &[], 0, &[])
+            parse(one.as_bytes(), &[], &[], 0)
                 .unwrap_err()
                 .code
                 .as_str(),
@@ -988,7 +911,7 @@ mod tests {
         // one the topology put there.
         let other_commit = record(&"f".repeat(40), &[]);
         assert_eq!(
-            parse(other_commit.as_bytes(), &nodes, &rows, 0, &[])
+            parse(other_commit.as_bytes(), &nodes, &rows, 0)
                 .unwrap_err()
                 .code
                 .as_str(),
@@ -999,7 +922,7 @@ mod tests {
         let first = format!("{:040x}", 0u32);
         let moved_parent = record(&first, &[&"e".repeat(40)]);
         assert_eq!(
-            parse(moved_parent.as_bytes(), &nodes, &rows, 0, &[])
+            parse(moved_parent.as_bytes(), &nodes, &rows, 0)
                 .unwrap_err()
                 .code
                 .as_str(),
@@ -1007,7 +930,7 @@ mod tests {
         );
         // The one pair the two reads do agree on parses, and keeps its parents.
         let agreed = record(&first, &[&format!("{:040x}", 1u32)]);
-        let commits = parse(agreed.as_bytes(), &nodes, &rows, 0, &[]).unwrap();
+        let commits = parse(agreed.as_bytes(), &nodes, &rows, 0).unwrap();
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].oid, first);
     }
@@ -1133,48 +1056,24 @@ mod tests {
         assert!(!valid_oid(&"z".repeat(40)));
     }
 
+    /// A page carries commits and their places in the graph, and nothing about
+    /// what anything is called. Naming used to be this read's own field: a tag
+    /// added afterwards could not reach a page already read, while the refresh
+    /// that noticed it moved the very names the panel shows beside that page —
+    /// so a row's label and its own lane came from two instants of one refresh.
+    /// The names are a separate read now, invalidated with the names, and this
+    /// read is provably indifferent to what the repository is called.
     #[test]
-    fn decorations_carry_branches_tags_and_remotes() {
+    fn a_page_is_the_same_history_whatever_the_repository_is_called() {
         let (_root, repo) = fixture();
         let oid = commit(&repo, "tagged");
+        let before = page(&repo, 0, Some(&oid), 10, false).unwrap();
         git(&repo, &["tag", "v1"]);
         git(&repo, &["branch", "keep"]);
-        let page = page(&repo, 0, Some(&oid), 10, false).unwrap();
-        let refs = &page.commits[0].refs;
-        assert!(refs.iter().any(|t| t == "tag: v1"), "{refs:?}");
-        assert!(refs.iter().any(|t| t.contains("main")), "{refs:?}");
-        assert!(refs.iter().any(|t| t == "keep"), "{refs:?}");
-        // The raw tokens are kept, and the labels sort them by kind.
-        let labels = &page.commits[0].labels;
-        assert!(labels.head, "the fixture is on the commit it just made");
-        assert_eq!(labels.tags, vec!["v1"], "{labels:?}");
-        assert!(labels.branches.contains(&"keep".to_owned()), "{labels:?}");
-    }
-
-    #[test]
-    fn a_decoration_is_a_branch_a_tag_or_a_remote_and_nothing_else() {
-        // Telling a remote-tracking branch from a local one that happens to
-        // be called the same thing needs the real remote names, so the
-        // classification is exercised directly.
-        let remotes = vec!["origin".to_owned(), "up".to_owned()];
-        let labels = parse_labels(
-            "HEAD -> main, tag: v2, origin/main, up/next, solo",
-            &remotes,
-        );
-        assert!(labels.head);
-        assert_eq!(labels.branches, vec!["main", "solo"], "{labels:?}");
-        assert_eq!(labels.tags, vec!["v2"], "{labels:?}");
-        assert_eq!(labels.remotes, vec!["origin/main", "up/next"], "{labels:?}");
-
-        // With no remote list, a name that looks like `remote/branch` is
-        // reported as a branch: a naming choice, never a wrong fact.
-        let unknown = parse_labels("origin/main", &[]);
-        assert_eq!(unknown.branches, vec!["origin/main"]);
-        assert!(unknown.remotes.is_empty());
-
-        // A bare HEAD, and an empty field.
-        assert!(parse_labels("HEAD", &[]).head);
-        assert_eq!(parse_labels("", &[]), RefLabels::default());
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &oid]);
+        let after = page(&repo, 0, Some(&oid), 10, false).unwrap();
+        assert_eq!(before.commits, after.commits, "no field of a row is a name");
+        assert!(!after.commits.is_empty(), "the history was read at all");
     }
 
     #[test]
