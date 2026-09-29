@@ -339,7 +339,18 @@ fn capture_inner(identity: &RepoIdentity) -> Result<Capture, ProbeError> {
         // Git refuses `status` in bare repositories; report no snapshot.
         (PathTable::default(), None, Vec::new(), None)
     } else {
-        let raw = repo::status_output(identity, true)?;
+        let read = repo::status_output(identity, true)?;
+        // Git exits 0 and puts the complaint on stderr when it cannot open a
+        // directory, which leaves the offending files out of the listing
+        // entirely. Publishing that listing would show an unreadable part of
+        // the repository as an unchanged one.
+        if read.warned {
+            return Err(ProbeError::new(
+                "git_status_incomplete",
+                "Git could not read part of the repository; the snapshot was not published.",
+            ));
+        }
+        let raw = read.stdout;
         let parsed_start = Instant::now();
         let parsed = status::parse(&raw)?;
         perf::mark("capture.parse", parsed_start.elapsed());

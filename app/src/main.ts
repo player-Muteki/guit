@@ -12,6 +12,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import "./style.css";
 import { el } from "./dom";
 import {
+  applyActivity,
   applySnapshot,
   currentSnapshot,
   isSessionActive,
@@ -25,7 +26,7 @@ import {
   subscribe,
   VIEW_ORDER,
 } from "./state";
-import type { OperationResult, SnapshotView } from "./types";
+import type { ActivityView, OperationResult, SnapshotView } from "./types";
 import { createShell, type Shell } from "./shell";
 import { disposeAll, onDispose } from "./lifecycle";
 import { publishSnapshot, subscribeToDomain } from "./snapshotBus";
@@ -275,7 +276,7 @@ async function confirmTicket(
 }
 
 // --- events ---
-// The backend pushes these two for as long as the session lives, so the way to
+// The backend pushes these for as long as the session lives, so the way to
 // stop them is kept rather than dropped.
 void listen<SnapshotView>("repo-refreshed", ({ payload }) => applySnapshot(payload)).then(
   (unlisten) => { onDispose(unlisten); },
@@ -283,6 +284,11 @@ void listen<SnapshotView>("repo-refreshed", ({ payload }) => applySnapshot(paylo
 void listen<{ mode: string; failed: boolean }>("watch-status", ({ payload }) => {
   setWatchMode(payload.mode === "poll" ? "poll" : payload.mode === "none" ? "none" : "events");
   setWatchFailed(payload.failed);
+}).then((unlisten) => { onDispose(unlisten); });
+// The age of the newest touched file is pushed beside the snapshot, never
+// inside it, and it carries the session that measured it.
+void listen<ActivityView>("activity-updated", ({ payload }) => {
+  applyActivity(payload);
 }).then((unlisten) => { onDispose(unlisten); });
 
 // --- keyboard ---

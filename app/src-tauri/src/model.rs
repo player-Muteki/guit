@@ -355,7 +355,7 @@ mod tests {
         };
         let branch_of = |dir: &std::path::Path| -> BranchView {
             let identity = crate::repo::detect(dir).unwrap();
-            let bytes = crate::repo::status_output(&identity, false).unwrap();
+            let bytes = crate::repo::status_output(&identity, false).unwrap().stdout;
             BranchView::from_parsed(&crate::status::parse(&bytes).unwrap())
         };
 
@@ -473,7 +473,7 @@ mod tests {
         std::fs::File::create(repo.join(odd)).unwrap();
         git(&[OsStr::new("add"), OsStr::new("--"), odd]);
         let identity = crate::repo::detect(repo).unwrap();
-        let bytes = crate::repo::status_output(&identity, true).unwrap();
+        let bytes = crate::repo::status_output(&identity, true).unwrap().stdout;
         let parsed = crate::status::parse(&bytes).unwrap();
         let (table, views) = PathTable::from_status(&parsed);
         let entry = views

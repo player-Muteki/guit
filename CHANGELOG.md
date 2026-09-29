@@ -95,6 +95,14 @@ is the record of what is not verified.
 
 ### Fixed
 
+- A part of the working tree Git could not open is no longer reported as a part
+  that changed nothing. `git status` exits `0` when a directory is unreadable,
+  leaves it out of its listing and puts the complaint on stderr, which nothing
+  read: the files inside it simply disappeared from the panel's view of the
+  repository. The read now carries whether stderr was empty, and a status that
+  could not see the whole tree is refused — the snapshot is not published, and
+  a destructive operation whose recheck could not see it is refused too. The
+  ordinary shapes stay unaffected and are pinned as producing no stderr.
 - The hand-drawn icons are drawn as strokes again. The stylesheet targeted an
   icon inside an icon, which never matched the single `svg.icon` each glyph is,
   so every icon fell back to a filled black shape.

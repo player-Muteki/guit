@@ -61,6 +61,13 @@ These need a human and a second machine, and are honestly outstanding:
   roughly a thousand files or more reported the submodule list as too large —
   including repositories with no submodules at all. The larger bound fixes
   that failure in this release.
+- The working-tree file listing (`git ls-files --cached --others
+  --exclude-standard`) is capped at the same 32 MB, for the same reason: one
+  record per file, so it grows with file count. Past the cap it is reported as
+  **no answer at all**, never as a partial one. The two halves of that listing
+  come back in order — one category, then the other — so the prefix that
+  survives is biased toward whichever category was listed first, and the file
+  it drops may be the newest one in the tree.
 - Extremely large repositories may therefore surface "output too large"
   errors instead of partial listings; manual refresh is always offered.
 
@@ -119,6 +126,18 @@ These need a human and a second machine, and are honestly outstanding:
   publishing and remote administration have no entry point, no registered
   command and no background task, so a request that names one cannot reach the
   process layer at all — not even by calling the retired IPC by hand.
+- A Git read that exits `0` while writing to stderr is treated as an
+  **incomplete** read: the snapshot is not published and a write recheck is
+  refused, rather than the panel showing whatever part of the tree Git managed
+  to open. Only whether stderr is empty is used — the text follows Git's locale
+  and version, and the warning that matters here has no `warning:` prefix to
+  key on. The shapes a panel actually meets — unborn, clean, staged, modified,
+  untracked, deleted, renamed, conflicted, detached, and a repository holding a
+  nested repository — are pinned by a test as producing an empty stderr, so the
+  refusal almost never fires. It has **not** been exercised against
+  `core.fsmonitor`, which is the everyday setting most likely to make a healthy
+  repository write to stderr on a successful read; if it does, this release
+  reports that repository as unreadable instead of reading it partially.
 
 ## Objects that are not here
 

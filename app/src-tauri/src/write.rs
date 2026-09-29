@@ -882,7 +882,18 @@ pub(crate) fn status_index(
     let identity = sessions
         .current_identity()
         .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
-    let raw = repo::status_output(&identity, true)?;
+    let read = repo::status_output(&identity, true)?;
+    // A destructive candidate set computed from a listing Git could not finish
+    // reading is not a bound fact. The preview would show fewer paths than the
+    // operation touches, so the recheck refuses rather than proceeding with a
+    // warning: a wrong hard reset is not recoverable, a refused one is.
+    if read.warned {
+        return Err(ProbeError::new(
+            "write_incomplete_read",
+            "Git could not read part of the repository; the operation was refused.",
+        ));
+    }
+    let raw = read.stdout;
     let parsed = status::parse(&raw)?;
     Ok(parsed
         .entries

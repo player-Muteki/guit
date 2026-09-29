@@ -95,6 +95,38 @@ export type SessionRead<T> = {
   value: T;
 };
 
+// --- working-tree activity ----------------------------------------
+// What the panel claims about the last file the disk touched. This is a push
+// beside the snapshot, never a field of it: an age is a wall-clock difference
+// that moves with no repository change at all, so folding it into the snapshot
+// would make every tick look like new Git news.
+export type ActivityState = "ready" | "empty" | "partial" | "unavailable";
+
+export type ActivityReason =
+  | "readFailed"
+  | "outputLimit"
+  | "unreadablePaths"
+  | "refreshFailed"
+  | "sessionClosed";
+
+export type ActivityView = {
+  // The session this was measured for, minted by the backend and taken from the
+  // snapshot published in the same round. `null` is the identity-free form and
+  // is only ever a clear: it claims nothing about any repository, which is why
+  // it may be accepted whatever is on screen.
+  sessionId: number | null;
+  // Counts measurements of this index, not refreshes of the snapshot.
+  generation: number;
+  state: ActivityState;
+  // Epoch milliseconds, not a formatted string: an age is recomputed, never parsed.
+  latestModifiedAt: number | null;
+  observedAt: number;
+  // Lossy display name of the file behind `latestModifiedAt`. It is not a path
+  // and nothing may treat it as one.
+  displayName: string | null;
+  reason: ActivityReason | null;
+};
+
 export type OperationResult = {
   operationId: number;
   kind:

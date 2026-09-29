@@ -8,6 +8,7 @@
 // here so the shell and the views never keep divergent copies.
 
 import type {
+  ActivityView,
   SnapshotView,
   StatusKind,
   StatusLine,
@@ -91,6 +92,7 @@ export type PendingPreview =
 
 let sessionActive = false;
 let snapshot: SnapshotView | null = null;
+let activity: ActivityView | null = null;
 let write = false;
 let tool = false;
 let preview: PendingPreview | null = null;
@@ -135,6 +137,7 @@ export const watchStatus = (): "none" | "poll" | "events" => watchMode;
 export const isWatchFailed = (): boolean => watchFailed;
 export const statusLine = (): StatusLine => status;
 export const toastStack = (): readonly Toast[] => toasts;
+export const currentActivity = (): ActivityView | null => activity;
 
 // Accepts a snapshot only when it is strictly newer than the one on screen
 // (file IDs are per-snapshot, so an older one would address the wrong paths).
@@ -143,7 +146,38 @@ export function applySnapshot(next: SnapshotView | null): boolean {
   if (next && snapshot && next.version <= snapshot.version) return false;
   snapshot = next;
   sessionActive = next !== null;
+  // A session that has ended cannot own an age any more, and the push that says
+  // so is not trusted to arrive: closing is the one moment both channels are
+  // guaranteed to agree on.
+  if (next === null) activity = null;
   renderNow();
+  return true;
+}
+
+// The activity channel carries the session the backend measured under, taken
+// from the snapshot published in the same round. The frontend does not mint an
+// identity of its own and does not compare contents: two clones of one
+// repository have the same newest file, so only the session answers "is this
+// still the repository on screen". A clear names no session and is therefore
+// accepted whatever is showing.
+export function applyActivity(next: ActivityView): boolean {
+  if (next.sessionId === null) {
+    activity = null;
+    return true;
+  }
+  if (snapshot === null || snapshot.sessionId !== next.sessionId) return false;
+  // Measurements of one session arrive in order, but "in order" is a property of
+  // the loop that made them, not of the channel carrying them. A new session
+  // restarts its own count, so the comparison is only meaningful against a value
+  // from the same session.
+  if (
+    activity !== null &&
+    activity.sessionId === next.sessionId &&
+    next.generation < activity.generation
+  ) {
+    return false;
+  }
+  activity = next;
   return true;
 }
 

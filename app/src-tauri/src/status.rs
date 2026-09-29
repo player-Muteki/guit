@@ -554,7 +554,7 @@ mod tests {
         std::fs::write(repo.join("未跟踪.txt"), "fresh\n").unwrap();
 
         let identity = crate::repo::detect(&repo).unwrap();
-        let bytes = crate::repo::status_output(&identity, true).unwrap();
+        let bytes = crate::repo::status_output(&identity, true).unwrap().stdout;
         let parsed = parse(&bytes).expect("real Git output must parse");
         let branch = parsed.branch.as_ref().expect("branch header");
         assert_eq!(branch.head, "main");

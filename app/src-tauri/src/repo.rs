@@ -353,7 +353,24 @@ impl RepoIdentity {
     }
 }
 
-pub fn status_output(identity: &RepoIdentity, untracked: bool) -> Result<Vec<u8>, ProbeError> {
+/// A `git status` read that exited 0.
+///
+/// `warned` is the half of this that used to be thrown away. Git exits 0 and
+/// says nothing on stdout about a directory it could not open — it writes the
+/// complaint to stderr and returns the rest. A caller that reads only stdout
+/// sees a repository with no changes in that directory, which is the failure
+/// shape this whole codebase is built to refuse.
+#[derive(Debug)]
+pub struct StatusRead {
+    pub stdout: Vec<u8>,
+    /// Git wrote to stderr while still exiting 0. The text is deliberately not
+    /// exposed: it belongs to Git, it changes with the locale and the Git
+    /// version, and the first line of the one that matters has no `warning:`
+    /// prefix to key on. Whether it is empty is the only usable fact.
+    pub warned: bool,
+}
+
+pub fn status_output(identity: &RepoIdentity, untracked: bool) -> Result<StatusRead, ProbeError> {
     let directory = if identity.is_bare {
         &identity.git_dir
     } else {
@@ -404,14 +421,26 @@ pub fn status_output(identity: &RepoIdentity, untracked: bool) -> Result<Vec<u8>
             "Status output exceeded the capture bound; refusing to parse a partial result.",
         ));
     }
-    Ok(output.stdout)
+    Ok(StatusRead {
+        stdout: output.stdout,
+        warned: !output.stderr.is_empty(),
+    })
 }
 
 /// Runs an isolated Git command for tests and asserts success. Global `-c`
 /// overrides must go through `pre`: they precede the subcommand.
 #[cfg(test)]
 pub(crate) fn git_with(dir: &Path, pre: &[&str], args: &[&str]) {
-    let status = Command::new("git")
+    let status = git_command(dir, pre, args).status().expect("git");
+    assert!(status.success(), "git {pre:?} {args:?} failed");
+}
+
+/// The isolated test command itself, so the two runners below cannot drift into
+/// testing different repositories: one asserts success, one cannot.
+#[cfg(test)]
+fn git_command(dir: &Path, pre: &[&str], args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
         .arg("-c")
         .arg("core.autocrlf=false")
         .args(pre)
@@ -428,10 +457,16 @@ pub(crate) fn git_with(dir: &Path, pre: &[&str], args: &[&str]) {
         .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .expect("git");
-    assert!(status.success(), "git {pre:?} {args:?} failed");
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+/// A command that is allowed to fail because the failure *is* the state: a
+/// conflicted merge exits non-zero and still leaves conflict entries behind,
+/// which is what the next read has to cope with.
+#[cfg(test)]
+fn git_leaving_state(dir: &Path, args: &[&str]) {
+    let _ = git_command(dir, &[], args).status();
 }
 
 #[cfg(test)]
@@ -557,7 +592,11 @@ mod tests {
         std::fs::create_dir(&repo).unwrap();
         git_init(&repo, "guit test", "test@example.invalid");
         let output = status_output(&detect(&repo).unwrap(), true).unwrap();
-        assert!(output.starts_with(b"# branch.oid "));
+        assert!(output.stdout.starts_with(b"# branch.oid "));
+        assert!(
+            !output.warned,
+            "a readable repository must not look incomplete"
+        );
         let bare = root.path().join("bare.git");
         std::fs::create_dir(&bare).unwrap();
         init_bare(&bare);
@@ -565,6 +604,98 @@ mod tests {
         // surface as a structured error instead of a falsely clean repository.
         let error = status_output(&detect(&bare).unwrap(), true).unwrap_err();
         assert_eq!(error.code.as_str(), "git_status_failed");
+    }
+
+    /// Refusing a read that made Git write to stderr is only safe if the shapes
+    /// a panel actually meets keep the stream empty. Each one below is built by
+    /// real Git, and the assertion is on the flag its caller reads — an
+    /// ordinary repository must never look incomplete.
+    #[test]
+    fn ordinary_shapes_never_look_incomplete() {
+        let read = |repo: &Path, shape: &str| {
+            let output = status_output(&detect(repo).unwrap(), true).unwrap_or_else(|error| {
+                panic!("{shape}: a readable status failed ({})", error.code)
+            });
+            assert!(
+                !output.warned,
+                "{shape}: a readable shape was reported incomplete"
+            );
+        };
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo, "guit test", "test@example.invalid");
+        read(&repo, "unborn");
+        std::fs::write(repo.join("a.txt"), b"base\n").unwrap();
+        git_raw(&repo, &["add", "."]);
+        git_raw(&repo, &["commit", "-qm", "base"]);
+        read(&repo, "clean");
+        std::fs::write(repo.join("a.txt"), b"staged\n").unwrap();
+        std::fs::write(repo.join("b.txt"), b"untracked\n").unwrap();
+        git_raw(&repo, &["add", "a.txt"]);
+        std::fs::write(repo.join("a.txt"), b"unstaged too\n").unwrap();
+        read(&repo, "staged, modified and untracked together");
+        std::fs::remove_file(repo.join("b.txt")).unwrap();
+        std::fs::rename(repo.join("a.txt"), repo.join("c.txt")).unwrap();
+        read(&repo, "deleted and renamed");
+        git_raw(&repo, &["add", "."]);
+        git_raw(&repo, &["commit", "-qm", "moved"]);
+        git_raw(&repo, &["checkout", "-qb", "other"]);
+        std::fs::write(repo.join("c.txt"), b"theirs\n").unwrap();
+        git_raw(&repo, &["commit", "-aqm", "other"]);
+        git_raw(&repo, &["checkout", "-q", "-"]);
+        std::fs::write(repo.join("c.txt"), b"ours\n").unwrap();
+        git_raw(&repo, &["commit", "-aqm", "ours"]);
+        git_leaving_state(&repo, &["merge", "--no-commit", "--no-ff", "other"]);
+        read(&repo, "conflicted");
+        git_raw(&repo, &["merge", "--abort"]);
+        git_raw(&repo, &["checkout", "-q", "--detach"]);
+        read(&repo, "detached head");
+        // A directory holding its own repository is the shape the working-tree
+        // listing has to reason about, and the shape most likely to make Git
+        // complain while still answering.
+        std::fs::create_dir(repo.join("sub")).unwrap();
+        git_raw(&repo.join("sub"), &["init", "--quiet"]);
+        std::fs::write(repo.join("sub/in.txt"), b"nested\n").unwrap();
+        read(&repo, "a nested repository");
+    }
+
+    /// The one shape where Git's exit code lies: a directory it cannot open is
+    /// left out of the listing while the command still reports success, and the
+    /// only sign is that stderr is not empty. Nothing here reads the text — the
+    /// first line of it has no `warning:` prefix and all of it changes with the
+    /// locale — because emptiness is the whole signal.    #[cfg(unix)]
+    #[test]
+    fn a_directory_git_cannot_open_is_reported_as_a_warning() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo, "guit test", "test@example.invalid");
+        std::fs::create_dir(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("sub/in.txt"), b"one\n").unwrap();
+        git_raw(&repo, &["add", "."]);
+        git_with(
+            &repo,
+            &[
+                "-c",
+                "user.name=guit test",
+                "-c",
+                "user.email=test@example.invalid",
+            ],
+            &["commit", "-qm", "base"],
+        );
+        std::fs::write(repo.join("sub/in.txt"), b"two\n").unwrap();
+        let unreadable = repo.join("sub");
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let outcome = status_output(&detect(&repo).unwrap(), true);
+        // Restored before any assertion: a failure must not strand the fixture.
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let read = outcome.unwrap();
+        assert!(
+            read.warned,
+            "a directory Git could not open has to be visible to the caller"
+        );
     }
 
     #[test]

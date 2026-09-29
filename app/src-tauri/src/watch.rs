@@ -1,3 +1,4 @@
+use crate::activity;
 use crate::perf;
 use crate::repo::RepoIdentity;
 use crate::session::{self, SessionState};
@@ -474,6 +475,10 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
         }
     };
     let mut refresh_failed = false;
+    // The activity index belongs to this thread: one owner, no lock, and it
+    // dies with the session it measured. Nothing else reads it, so nothing else
+    // needs to exist.
+    let mut tracker = activity::ActivityTracker::default();
     run_loop(
         &rx,
         &saturated,
@@ -496,7 +501,16 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
             }
             match outcome {
                 Ok(Some(snapshot)) => {
+                    // Read before the emit moves it: the activity line is
+                    // published under the session this snapshot was published
+                    // under, so the frontend never has to decide whether an age
+                    // belongs to the repository it is looking at.
+                    let session_id = snapshot.session_id;
                     let _ = emitter.emit("repo-refreshed", snapshot);
+                    let _ = emitter.emit(
+                        "activity-updated",
+                        tracker.rescan(&identity, session_id, &shutdown),
+                    );
                     if refresh_failed {
                         refresh_failed = false;
                         let _ = emitter.emit(
@@ -519,6 +533,13 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
                             mode: mode.label(),
                             failed: true,
                         },
+                    );
+                    // Silence here would leave the last good age on screen and
+                    // growing, which reads as an idle repository rather than a
+                    // broken refresh. A failed round is an answer.
+                    let _ = emitter.emit(
+                        "activity-updated",
+                        tracker.unavailable(activity::ActivityReason::RefreshFailed),
                     );
                     true
                 }
@@ -562,6 +583,14 @@ pub fn stop(app: &tauri::AppHandle) {
             mode: "none",
             failed: false,
         },
+    );
+    // The age line stops with the session, not with the last number it saw. A
+    // clear carries no session so the frontend may accept it whatever it is
+    // currently showing; a stale age left on screen after close is the failure
+    // this channel exists to make impossible.
+    let _ = app.emit(
+        "activity-updated",
+        activity::ActivityView::cleared(activity::ActivityReason::SessionClosed),
     );
 }
 
