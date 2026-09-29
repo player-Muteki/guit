@@ -15,7 +15,8 @@
 //   identity  a second repository that reports the same branch, head and counts
 //             is still a second repository, and it is read again
 //   round trip  switching pages repeatedly leaves the listeners, watchers,
-//             timers and DOM node count where it found them
+//             timers and DOM node count where it found them, and leaves the
+//             balance of event registrations against event releases where it was
 //   close     ending the session reads nothing and stops showing what the
 //             repository that is no longer open had on screen
 //
@@ -142,8 +143,9 @@ const STALE_COMMITS = COMMITS.map((entry) => ({
 // Counting what the page attaches, before any of the application's code runs.
 // Element-level listeners are not counted: those live and die with a row that is
 // rebuilt on every paint, so a total would grow whether or not anything leaked.
-// `window`, `document`, resize watchers and pending timers are the things that
-// outlive a repaint, and they are what a round trip has to return to rest.
+// `window`, `document`, resize watchers, one-shot timers waiting to fire and
+// repeating timers still running are the things that outlive a repaint, and they
+// are what a round trip has to return to rest.
 const INSTRUMENT = `(() => {
   const counts = { window: 0, document: 0, observers: 0, timers: 0 };
   window.__COUNTS__ = counts;
@@ -199,6 +201,29 @@ const INSTRUMENT = `(() => {
   };
   window.clearTimeout = function (id) { pending.delete(id); return clearTimer.call(window, id); };
   Object.defineProperty(window.__COUNTS__, "timers", { get: () => pending.size });
+  // A repeating timer is its own column and never joins the pending one-shot
+  // count: that set drops its id when the callback fires, so an interval that
+  // leaked every page switch would report 0 — the exact shape this column exists
+  // to catch. Intervals are counted while they are alive, which is what a round
+  // trip has to return to.
+  const setIntervalFn = window.setInterval;
+  const clearIntervalFn = window.clearInterval;
+  const registered = new Set();
+  let live = 0;
+  window.setInterval = function (fn, delay, ...rest) {
+    live += 1;
+    const id = setIntervalFn.call(window, function () {
+      if (typeof fn === "function") return fn.apply(window, rest);
+      return undefined;
+    }, delay);
+    registered.add(id);
+    return id;
+  };
+  window.clearInterval = function (id) {
+    if (registered.delete(id)) live -= 1;
+    return clearIntervalFn.call(window, id);
+  };
+  Object.defineProperty(window.__COUNTS__, "intervals", { get: () => live });
 })();`;
 
 const STUB = `(() => {
@@ -279,6 +304,13 @@ const STUB = `(() => {
     metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
   };
   window.__TAURI__ = { event: { listen: () => Promise.resolve(() => {}) } };
+  // The real listen reaches the page through invoke("plugin:event|listen")
+  // above, so a registration is counted. Releasing one is not the mirror image:
+  // @tauri-apps/api reads this global unconditionally, before it invokes
+  // plugin:event|unlisten. Without it the release rejects inside the library
+  // and never arrives as a call — a page that leaked every listener it made
+  // would still look clean here.
+  window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
 })();`;
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
@@ -419,7 +451,7 @@ async function main() {
   };
   const calls = () => evaluate("JSON.stringify(window.__CALLS__)").then((text) => JSON.parse(text));
   const counts = () => evaluate(
-    "JSON.stringify({window: __COUNTS__.window, document: __COUNTS__.document, observers: __COUNTS__.observers, timers: __COUNTS__.timers, nodes: document.querySelectorAll('*').length})",
+    "JSON.stringify({window: __COUNTS__.window, document: __COUNTS__.document, observers: __COUNTS__.observers, timers: __COUNTS__.timers, intervals: __COUNTS__.intervals, nodes: document.querySelectorAll('*').length})",
   ).then((text) => JSON.parse(text));
   // Runs one driver in the page, then reports only the commands it caused.
   const spent = async (driver) => {
@@ -503,22 +535,49 @@ async function main() {
     window.__RESET_ALL__(${JSON.stringify(BASE)});
   `);
   const before = await counts();
-  await spent(`
+  const eventsBefore = await calls();
+  const ROUNDS = `
     for (let round = 0; round < 12; round++) {
       document.querySelector('.appbar [aria-label="Settings"]').click();
       document.querySelector('.appbar [aria-label="Main"]').click();
     }
-  `);
+  `;
+  // Not `spent`: that clears the tally first, and the point here is the balance
+  // the round trips leave behind, which only a running count can show.
+  await evaluate(ROUNDS);
+  await sleep(600);
   const after = await counts();
-  const fields = ["window", "document", "observers", "timers", "nodes"];
+  const eventsAfter = await calls();
+  const fields = ["window", "document", "observers", "timers", "intervals", "nodes"];
   for (const field of fields) {
     check(`twelve page round trips leave ${field} where they were`,
       before[field] === after[field], `${before[field]} -> ${after[field]}`);
   }
-  // The accounting above can show a listener that was never released; it cannot
-  // show one that was released and re-attached by a rebuilt component. Cost is
-  // the observable form of that bug: a stack of subscriptions asks Git once per
-  // subscriber, so the same move must still cost exactly one read here.
+  // The event channel is the one face of this panel with no compiler across it:
+  // an `emit` in Rust and a `listen` here agree only because somebody remembered.
+  // Registering is visible to the tally because it is an invoke like any read;
+  // releasing is visible only because the stub defines
+  // `__TAURI_EVENT_PLUGIN_INTERNALS__` — without it the library rejects before it
+  // gets as far as invoking, so a page that never let a listener go still looked
+  // clean. The claim is about the balance, not the absolute: what this can see is
+  // that a release was called and counts up. What it cannot see is the backend's
+  // registry, because there is no Rust side in this run. The expected balance is 0
+  // — these listeners are attached once and kept for the life of the window,
+  // because the backend pushes for as long as the session lives.
+  const balance = (tally) =>
+    (tally["plugin:event|listen"] || 0) - (tally["plugin:event|unlisten"] || 0);
+  check("twelve page round trips leave the event listeners balanced",
+    balance(eventsBefore) === balance(eventsAfter),
+    `${balance(eventsBefore)} -> ${balance(eventsAfter)} (${JSON.stringify(eventsAfter["plugin:event|listen"])}|${JSON.stringify(eventsAfter["plugin:event|unlisten"])})`);
+  // Absolute rather than a difference, because the rule it stands for is a rule
+  // about the panel as a whole: one interval exists, no matter how many pages,
+  // repositories or age lines are drawn. A settings change that starts a second
+  // timer instead of replacing the first fails here.
+  check("the panel holds exactly one repeating timer",
+    after.intervals === 1, `${after.intervals} live intervals`);
+  // One more refresh after all those page switches: a round trip that left a
+  // duplicate listener, a timer or a held snapshot behind would cost more than the
+  // one graph read it costs here.
   const afterRounds = await spent(`window.__MOVE__("graph", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(2).padStart(40, "0")}" }) })`);
   check("a moved head still costs one graph read after twelve round trips",
     total(afterRounds, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 1, JSON.stringify(afterRounds));

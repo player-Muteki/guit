@@ -103,6 +103,31 @@ These need a human and a second machine, and are honestly outstanding:
   a branch, naming a tag, writing a commit message) are covered by Rust-side
   tests but were not clicked-through end-to-end with real typing.
 
+## The last-modification line
+
+- The candidates are exactly the files Git names: tracked files, plus untracked
+  ones Git has not been told to ignore. A file matched by `.gitignore`,
+  `.git/info/exclude` or `core.excludesFile` therefore **never moves the age**,
+  and neither does anything inside a nested repository — Git lists that as one
+  entry, not as its contents, so a build directory you ignore can be rewritten a
+  thousand times while the line stays where it was. That is Git's own definition
+  of the working tree, not a gap in the timer.
+- The age is recomputed by the panel's own five-second timer from the value the
+  backend last pushed, so what it shows is always up to one interval behind the
+  clock, and between two pushes the named file can be older than the tree. A
+  tick never reads Git: the line moving is not evidence that anything was
+  re-checked, and a quiet repository costs nothing to keep on screen.
+- Five seconds is fixed in this release. There is no Settings row for it yet, and
+  it is unrelated to the watcher's own debounce and fallback poll interval, which
+  decide when a *measurement* arrives, not when the text is repainted.
+- There is no "scanning" state on the wire. Between a session opening and the
+  first measurement for it — and after a failed refresh clears one — the line
+  reads `Last modification unknown` rather than keeping the previous
+  repository's number, and a partial listing says `at least` instead of a time.
+- The file named beside the age is a lossy rendering of the path's bytes, kept
+  for reading only: a name that is not valid UTF-8 shows replacement characters,
+  and nothing can turn what is displayed back into a path.
+
 ## Deliberate refusals
 
 - guit shows no file contents, diffs, or editor. Diffs, conflict resolution

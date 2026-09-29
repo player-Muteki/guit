@@ -286,9 +286,11 @@ void listen<{ mode: string; failed: boolean }>("watch-status", ({ payload }) => 
   setWatchFailed(payload.failed);
 }).then((unlisten) => { onDispose(unlisten); });
 // The age of the newest touched file is pushed beside the snapshot, never
-// inside it, and it carries the session that measured it.
+// inside it, and it carries the session that measured it. Only the line it
+// belongs to is repainted — the files and the graph have already answered the
+// snapshot that came with it.
 void listen<ActivityView>("activity-updated", ({ payload }) => {
-  applyActivity(payload);
+  if (applyActivity(payload)) changes.renderActivity();
 }).then((unlisten) => { onDispose(unlisten); });
 
 // --- keyboard ---

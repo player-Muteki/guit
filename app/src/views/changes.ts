@@ -19,12 +19,19 @@ import {
   type FileView,
   type ListRow,
 } from "../fileModel";
+import {
+  advancesWithClock,
+  describeActivity,
+  readStoredInterval,
+} from "../activityModel";
 import { button, el, icon, openMenu, plural } from "../dom";
 import { currentFontPx } from "../font";
 import { onDispose } from "../lifecycle";
 import {
   applySnapshot,
+  currentActivity,
   currentSnapshot,
+  isSessionActive,
   isToolRunning,
   isWriteRunning,
   pendingPreview,
@@ -48,14 +55,28 @@ export interface ChangesDeps {
 
 // The changed files arrive inside every snapshot, so this view never asks Git
 // for them a second time: it has one job on a repaint and nothing to let go of
-// except the watcher that re-measures its rows.
+// except the watcher that re-measures its rows and the one interval that keeps
+// the age line honest.
 export interface ChangesView {
   element: HTMLElement;
   render(): void;
+  renderActivity(): void;
 }
+
+// How often the age text is re-derived from the number the backend sent. The
+// panel holds exactly one such timer, in this file; see `activityModel.ts` for
+// why it is a display preference and not a Git cadence.
+const ACTIVITY_INTERVAL_KEY = "guit.activityInterval";
 
 export function createChangesView(deps: ChangesDeps): ChangesView {
   const element = el("section", { class: "view-body changes-view" });
+
+  // --- activity line ---
+  // Built here and never added later: the main panel measures what this region
+  // has to keep showing, and a row that appears after that measurement is one
+  // row the region's floor does not know about. Only its text and its `hidden`
+  // attribute change after this point.
+  const activityLine = el("p", { class: "activity-line", hidden: true });
 
   // --- operation banner ---
   const operationSummary = el("p", { class: "banner-summary" });
@@ -97,7 +118,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     ]),
   ]);
 
-  element.append(operationBanner, fileList, emptyState, commitFooter);
+  element.append(activityLine, operationBanner, fileList, emptyState, commitFooter);
 
   let listRows: ListRow[] = [];
   let currentFiles: FileView[] = [];
@@ -399,6 +420,28 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     operationAbort.disabled = disabled;
   };
 
+  // The age line answers to two things only: a push on the activity channel, and
+  // the clock. It is never a third consumer of the snapshot — a refresh whose
+  // files did not move still has to leave the list and the graph alone.
+  //
+  // Hidden while no repository is open, which also takes it out of the main
+  // panel's measurement of what this region has to show: a part with no height
+  // claims neither room nor a gap beside it.
+  let activityText = "";
+  const renderActivity = (): void => {
+    const active = isSessionActive();
+    activityLine.hidden = !active;
+    if (!active) return;
+    const display = describeActivity(currentActivity(), Date.now());
+    if (display.text !== activityText) {
+      activityText = display.text;
+      activityLine.textContent = display.text;
+    }
+    const file = display.kind === "age" ? display.file : null;
+    if (file === null) activityLine.removeAttribute("title");
+    else activityLine.title = `${activityText} — ${file}`;
+  };
+
   const render = (): void => {
     const snapshot = currentSnapshot();
     const locked = snapshot === null || isWriteRunning();
@@ -407,6 +450,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     commitButton.disabled = locked;
     renderOperationBanner();
     renderFiles(snapshot?.files ?? []);
+    renderActivity();
   };
 
   // --- events ---
@@ -463,5 +507,30 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     renderFileRows();
   });
 
-  return { element, render };
+  // The panel's only recurring timer. It recomputes one line of text from a
+  // number the backend already sent, so it never reads Git, never re-renders the
+  // list and never touches the graph.
+  //
+  // Registered beside the thing it lets go of: the panel outlives every repository
+  // it shows, and a timer left running after the window closes would be a promise
+  // about a window that no longer exists.
+  let stored: string | null;
+  try {
+    stored = localStorage.getItem(ACTIVITY_INTERVAL_KEY);
+  } catch {
+    // Storage may be unavailable in private mode; the age line still counts.
+    stored = null;
+  }
+  const intervalSeconds = readStoredInterval(stored);
+  // A state whose wording contains no time is skipped rather than recomputed: the
+  // tick has nothing new to say about it, and saying it anyway would be a repaint
+  // with no reason. A push always repaints the line, because that is what changes
+  // which state it is.
+  const ageLineNeedsTheClock = (): void => {
+    if (advancesWithClock(currentActivity())) renderActivity();
+  };
+  const activityTick = setInterval(ageLineNeedsTheClock, intervalSeconds * 1000);
+  onDispose(() => clearInterval(activityTick));
+
+  return { element, render, renderActivity };
 }

@@ -7,6 +7,21 @@ is the record of what is not verified.
 
 ## [Unreleased]
 
+### Added
+
+- Main answers "which file in this working tree was touched last" on a line
+  above the change list. The answer is the newest modification time among the
+  files Git itself counts — tracked files, plus the untracked ones Git has not
+  been told to ignore — and it names the file behind that time. What it cannot
+  say, it says: "at least" when the listing only covered part of the tree,
+  "no working-tree files to measure" for a clean checkout with nothing of its
+  own, and "last modification unknown" while a session has no measurement yet
+  or the one it has cannot be trusted. A file timestamp ahead of the panel's
+  clock is reported as untrustworthy rather than as an age of zero.
+- That line advances on a timer of its own, every five seconds. It is the only
+  thing the timer repaints: a tick reads no Git, re-renders no list and moves
+  no graph, and it stops with the window.
+
 ### Changed
 
 - A commit graph's lane turns are one smooth curve now — level where they

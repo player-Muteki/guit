@@ -401,6 +401,12 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 
 /* --- changes view --- */
 .changes-view { padding: 0; }
+/* The age of the newest file the working tree holds, in the region's own first
+   row. It answers to the clock and to the activity push, and to nothing else —
+   so it is not a live region: text that changes on a timer would have the
+   screen reader announce every tick over everything else in the window. */
+.activity-line { margin: 0; padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--line); font-size: var(--text-sm); color: var(--text-muted); overflow-wrap: anywhere; flex: 0 0 auto; }
+.activity-line[hidden] { display: none; }
 .banner { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.75rem; background: var(--accent-soft); border-bottom: 1px solid var(--line); flex: 0 0 auto; }
 .banner[hidden] { display: none; }
 .banner-summary { flex: 1 1 auto; margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
