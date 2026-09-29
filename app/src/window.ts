@@ -118,6 +118,10 @@ export async function restoreWindowSize(): Promise<void> {
 export interface WindowHooks {
   onGeometryChange(text: string): void;
   onFocus(): void;
+  /** The window is going away for good. Each component lets go of what it
+   * attached — watchers, timers, document handlers — before the size is
+   * written down and the window is destroyed. */
+  onClosing(): void;
   onError(error: unknown): void;
 }
 
@@ -134,6 +138,7 @@ export async function installWindowHooks(hooks: WindowHooks): Promise<void> {
     await currentWindow.onCloseRequested(async (event) => {
       event.preventDefault();
       window.clearTimeout(saveTimer);
+      hooks.onClosing();
       await persistWindowSettings();
       try {
         await currentWindow.destroy();

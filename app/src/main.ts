@@ -26,7 +26,9 @@ import {
   VIEW_ORDER,
 } from "./state";
 import type { OperationResult, SnapshotView, SyncProgress } from "./types";
-import { createShell, type Shell } from "./shell";
+import { createShell, type Shell, type SyncAction } from "./shell";
+import { disposeAll, onDispose } from "./lifecycle";
+import { publishSnapshot, subscribeToDomain } from "./snapshotBus";
 import { createPreviewController } from "./dialogs/preview";
 import { createAskpassDialog } from "./dialogs/askpass";
 import { createToastLayer } from "./dialogs/toast";
@@ -35,9 +37,7 @@ import { installWindowHooks, restoreWindowState, setAlwaysOnTop } from "./window
 import { createChangesView } from "./views/changes";
 import { createHistoryView } from "./views/history";
 import { createBranchesView } from "./views/branches";
-import { createStashView } from "./views/stash";
-import { createRemotesView } from "./views/remotes";
-import { createWorktreesView } from "./views/worktrees";
+import { createRemotesView, type RemotesView } from "./views/remotes";
 import { createSettingsView } from "./views/settings";
 import { createWelcomeView } from "./views/welcome";
 import { createMainPanel } from "./views/mainPanel";
@@ -72,7 +72,6 @@ let tagStartOid: string | null = null;
 
 // --- session lifecycle ---
 let refreshingSession = false;
-let sessionListeners: Array<(snapshot: SnapshotView | null) => void> = [];
 
 async function refreshSession(silent: boolean): Promise<void> {
   if (!isSessionActive() || refreshingSession) return;
@@ -157,10 +156,18 @@ const history = createHistoryView({
     setStatus(`New tag will point at ${oid.slice(0, 10)} — enter a name and press Create tag.`);
   },
 });
-const stash = createStashView({ preview, onError: showError });
-const remotes = createRemotesView({ preview, onError: showError });
-const worktrees = createWorktreesView({ preview, onError: showError });
 const settings = createSettingsView({ onError: showError });
+
+// The stash, worktree and submodule modules no longer have a page, so they are
+// not built at all: their DOM, their listeners and — the part that cost a live
+// repository six Git reads per refresh — their automatic listing all went with
+// the page. The app bar's sync menu is the one entry still wired to a module of
+// that group, and it builds its own on the first use rather than at boot.
+let remoteOps: RemotesView | null = null;
+const runSync = (action: SyncAction): void => {
+  remoteOps ??= createRemotesView({ preview, onError: showError });
+  remoteOps.run(action);
+};
 
 // --- shell ---
 shell = createShell({
@@ -177,17 +184,17 @@ shell = createShell({
   setOnTop: (value) => {
     void setAlwaysOnTop(value).catch(showError);
   },
-  sync: (action) => remotes.run(action),
+  sync: (action) => runSync(action),
 });
 
 // The main panel and the branch overlay are the only two places a repository
 // view goes: the files and the graph share one page, the picker covers it.
-// The modules left below are still read on a snapshot, but they no longer
-// have a page of their own.
 shell.registerView({ id: "welcome", element: welcome.element });
 shell.registerView(createMainPanel(changes.element, history.element));
 shell.registerView(settings.descriptor);
-shell.registerOverlay(branches.element);
+// The picker reads the names on the way in, which is what lets a snapshot pass
+// over it while it is closed.
+shell.registerOverlay(branches.element, () => branches.sync());
 
 app.replaceChildren(
   el("div", { class: "shell" }, [
@@ -205,32 +212,36 @@ function render(): void {
   const version = snapshot === null ? -1 : snapshot.version;
   if (version !== lastRenderedVersion) {
     lastRenderedVersion = version;
-    // Every view re-reads its own list once per accepted snapshot version;
-    // a re-render of the same version never touches Git.
-    for (const listener of sessionListeners) listener(snapshot);
+    // One snapshot, published once: only the domains of it that actually moved
+    // are asked for anything, and a re-render of the same version never touches
+    // Git at all.
+    publishSnapshot(snapshot);
     if (snapshot !== null) void preview.renew();
   }
   shell.render();
   changes.render();
   history.render();
   branches.render();
-  stash.render();
-  remotes.render();
-  worktrees.render();
   settings.render();
   toasts.render();
 }
 
-// Register the per-view snapshot listeners.
-for (const view of [changes, history, branches, stash, remotes, worktrees]) {
-  sessionListeners.push(() => view.sync());
-}
+// The two reads the panel has a place on screen for: the history of the branch
+// it is drawing, and the names the picker lists while the picker is up. The
+// changed files need no read of their own — they are already in the snapshot.
+onDispose(subscribeToDomain("graph", () => history.sync()));
+onDispose(subscribeToDomain("refs", () => {
+  if (shell.isOverlayOpen()) branches.sync();
+}));
+
 // A status-line change — including every streamed progress line of a fetch or
 // push — repaints the status bar only. Everything else repaints the window.
-subscribe((change) => {
-  if (change === "status") shell.renderStatus();
-  else render();
-});
+onDispose(
+  subscribe((change) => {
+    if (change === "status") shell.renderStatus();
+    else render();
+  }),
+);
 
 // --- destructive ticket confirmation routing ---
 preview.onConfirm((pending) => {
@@ -292,11 +303,15 @@ async function confirmTicket(
 }
 
 // --- events ---
-void listen<SnapshotView>("repo-refreshed", ({ payload }) => applySnapshot(payload));
+// The backend pushes these two for as long as the session lives, so the way to
+// stop them is kept rather than dropped.
+void listen<SnapshotView>("repo-refreshed", ({ payload }) => applySnapshot(payload)).then(
+  (unlisten) => { onDispose(unlisten); },
+);
 void listen<{ mode: string; failed: boolean }>("watch-status", ({ payload }) => {
   setWatchMode(payload.mode === "poll" ? "poll" : payload.mode === "none" ? "none" : "events");
   setWatchFailed(payload.failed);
-});
+}).then((unlisten) => { onDispose(unlisten); });
 
 // --- keyboard ---
 // Zoom and theme are restored before the first paint of the shell.
@@ -349,6 +364,7 @@ void (async () => {
     await installWindowHooks({
       onGeometryChange: (text) => settings.noteGeometry(text),
       onFocus: () => void refreshSession(true),
+      onClosing: () => disposeAll(),
       onError: showError,
     });
   } catch (error) {

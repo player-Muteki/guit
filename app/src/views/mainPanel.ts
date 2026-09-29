@@ -13,6 +13,7 @@
 // stylesheet owns the geometry and this file only answers "how much".
 
 import { el } from "../dom";
+import { onDispose } from "../lifecycle";
 import {
   readStoredSplit,
   SPLIT_DEFAULT,
@@ -105,6 +106,7 @@ export function createMainPanel(changes: HTMLElement, history: HTMLElement): Vie
   // while the region's box — decided by the split — stays the same. Writing the
   // floor only when the measurement moved makes this settle in one pass.
   const chromeObserver = new ResizeObserver(measureChrome);
+  onDispose(() => chromeObserver.disconnect());
   for (const { region } of regions) {
     chromeObserver.observe(region);
     for (const child of Array.from(region.children)) {

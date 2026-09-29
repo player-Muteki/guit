@@ -42,6 +42,18 @@ is the record of what is not verified.
 - Each list re-measures itself when its own box changes — a dragged split,
   interface zoom, a narrower window — rather than only when the window was
   resized, so the rows on screen always match the height they are drawn in.
+- An accepted repository snapshot no longer answers with six Git reads. Only
+  what moved is read again: the commit history when the branch it is drawn from,
+  or that branch's head, is a different one, and the branch and tag listing when
+  the head, its ahead/behind counts or the operation in progress change — and
+  only while that listing is on screen, because it reads the names again the
+  moment it opens. A refresh that changed nothing you can see asks Git for
+  nothing.
+- Watchers, document-level handlers and the listeners on the repository's own
+  events are registered for release at the moment they are attached, and the
+  releases run when the window is asked to close. Switching between the two
+  pages repeatedly has been measured to leave the listener, watcher and timer
+  counts exactly where they were.
 - Stash, worktree and submodule management and remote management no longer have
   a page. Their commands stay registered while their entry points are retired in
   the open, so nothing is reachable by accident.

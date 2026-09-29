@@ -384,9 +384,9 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
     }
   };
 
-  // Driven from renderSnapshot: every newly accepted snapshot version
-  // re-reads refs once (writes, watcher and focus refreshes all flow through
-  // there); a re-render of the same version never touches Git.
+  // The picker reads the names when it opens, and again when a snapshot moves
+  // the refs it is showing. `syncedVersion` is what keeps those two triggers
+  // down to one read per accepted snapshot; a re-render never touches Git.
   const sync = (): void => {
     if (currentSnapshot() === null) {
       if (syncedVersion !== -1) placeholder("Open a repository to list its branches and tags.");

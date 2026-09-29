@@ -5,6 +5,7 @@
 // stay the only place that talks to the backend.
 
 import { el, icon } from "./dom";
+import { onDispose } from "./lifecycle";
 import {
   activeView,
   currentSnapshot,
@@ -55,10 +56,16 @@ export interface Shell {
    * Puts the one page-sized overlay's content into the shell. The branch
    * picker is a temporary layer inside Main rather than a third tab, so the
    * shell hosts it and decides when it is on screen; it never reads it.
+   *
+   * `onShow` runs every time the layer becomes visible, including the first
+   * time. It is how a layer gets fresh content on being opened without the
+   * shell knowing anything about what that content is.
    */
-  registerOverlay(content: HTMLElement): void;
+  registerOverlay(content: HTMLElement, onShow?: () => void): void;
   openOverlay(): void;
   closeOverlay(): void;
+  /** Whether the layer is on screen right now. */
+  isOverlayOpen(): boolean;
   focusCommit(): void;
   /**
    * Focuses the tab item for the page on screen. This is where the confirm
@@ -203,15 +210,22 @@ export function createShell(actions: ShellActions): Shell {
     (next.firstElementChild as HTMLElement | null)?.focus();
   }
 
-  document.addEventListener("click", (event) => {
+  const dismissMenus = (event: MouseEvent): void => {
     if (!(event.target as HTMLElement).closest(".appbar")) closeMenus();
-  });
-  document.addEventListener("keydown", (event) => {
+  };
+  // Escape walks down the stack: an app-bar menu first, then the overlay,
+  // and a modal dialog is never reached here because it cancels itself.
+  const escapeStack = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return;
-    // Escape walks down the stack: an app-bar menu first, then the overlay,
-    // and a modal dialog is never reached here because it cancels itself.
     closeMenus();
     closeOverlay();
+  };
+
+  document.addEventListener("click", dismissMenus);
+  document.addEventListener("keydown", escapeStack);
+  onDispose(() => {
+    document.removeEventListener("click", dismissMenus);
+    document.removeEventListener("keydown", escapeStack);
   });
 
   moreButton.addEventListener("click", (event) => {
@@ -302,14 +316,19 @@ export function createShell(actions: ShellActions): Shell {
   // not a page, so it has no tab, and it is not a dialog, because the user
   // can still reach the tab strip while it is up.
   const overlay = el("div", { class: "overlay", tabIndex: -1, hidden: true });
+  let overlayShown: (() => void) | null = null;
   const closeOverlay = (): void => {
     if (overlay.hidden) return;
     overlay.hidden = true;
     focusTabs();
   };
   const openOverlay = (): void => {
+    const opening = overlay.hidden;
     overlay.hidden = false;
     overlay.focus();
+    // Reading happens on the way in rather than on every snapshot: a picker
+    // that is closed has nothing to keep current.
+    if (opening) overlayShown?.();
   };
 
   // --- status bar ---
@@ -432,11 +451,14 @@ export function createShell(actions: ShellActions): Shell {
     views.set(descriptor.id, descriptor);
   };
 
-  const registerOverlay = (content: HTMLElement): void => {
+  const registerOverlay = (content: HTMLElement, onShow?: () => void): void => {
     content.hidden = false;
+    overlayShown = onShow ?? null;
     overlay.append(content);
     stage.append(overlay);
   };
+
+  const isOverlayOpen = (): boolean => !overlay.hidden;
 
   const focusCommit = (): void => {
     setActiveView("main");
@@ -458,6 +480,7 @@ export function createShell(actions: ShellActions): Shell {
     registerOverlay,
     openOverlay,
     closeOverlay,
+    isOverlayOpen,
     focusCommit,
     focusTabs,
     renderStatus,

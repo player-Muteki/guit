@@ -21,6 +21,7 @@ import {
 } from "../fileModel";
 import { button, el, icon, openMenu, plural } from "../dom";
 import { currentFontPx } from "../font";
+import { onDispose } from "../lifecycle";
 import {
   applySnapshot,
   currentSnapshot,
@@ -45,9 +46,11 @@ export interface ChangesDeps {
   onError(error: unknown): void;
 }
 
+// The changed files arrive inside every snapshot, so this view never asks Git
+// for them a second time: it has one job on a repaint and nothing to let go of
+// except the watcher that re-measures its rows.
 export interface ChangesView {
   element: HTMLElement;
-  sync(): void;
   render(): void;
 }
 
@@ -406,10 +409,6 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     renderFiles(snapshot?.files ?? []);
   };
 
-  const sync = (): void => {
-    render();
-  };
-
   // --- events ---
   operationContinue.addEventListener("click", () => void runOperationStep("operation_continue", "Continuing the operation…"));
   operationSkip.addEventListener("click", () => void runOperationStep("operation_skip", "Skipping the current step…"));
@@ -429,9 +428,11 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   // the rows on screen have to be re-measured for the height they now have.
   // Watching the scroller itself covers every cause — a drag, a zoom, a
   // narrower window — without this view knowing about any of them.
-  new ResizeObserver(() => {
+  const listWatcher = new ResizeObserver(() => {
     if (listRows.length > 0) renderFileRows();
-  }).observe(fileList);
+  });
+  listWatcher.observe(fileList);
+  onDispose(() => listWatcher.disconnect());
   // Keyboard navigation over the virtual list: arrows move between files
   // (headings skipped), Home/End jump, Enter toggles the selected file's group.
   fileList.addEventListener("keydown", (event) => {
@@ -462,5 +463,5 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     renderFileRows();
   });
 
-  return { element, sync, render };
+  return { element, render };
 }

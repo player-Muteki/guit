@@ -2,12 +2,13 @@
 //
 // Rows come from the backend's fixed-field log protocol; commits are
 // addressed only by full object ids and the frontend never builds Git
-// arguments or parses Git output itself. The list is keyed by HEAD oid, so
-// a re-render of the same HEAD never touches Git and a moved HEAD re-reads
-// page zero.
+// arguments or parses Git output itself. The snapshot fan-out decides when a
+// different history is on screen, and this view decides whether a page that
+// arrives still belongs to it.
 
 import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, plural } from "../dom";
+import { onDispose } from "../lifecycle";
 import {
   buildHistoryRows,
   buildRefMap,
@@ -141,7 +142,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // silently linearised graph would claim a shape the history does not have.
   let graphFolded = false;
   // undefined = no session; null = session without commits (unborn HEAD or
-  // bare repo); a string = the HEAD oid the loaded pages belong to.
+  // bare repo); a string = the repository and head the loaded pages belong to.
   let repoKey: string | null | undefined;
   let selected: CommitView | null = null;
   let selectedIndex = -1;
@@ -161,6 +162,8 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // A row to flash on the next paint — used to show where a find step or a
   // write landed in a long list. Cleared once applied.
   let flashIndex = -1;
+  let flashTimer: number | undefined;
+  onDispose(() => window.clearTimeout(flashTimer));
 
   const flashRowAt = (index: number): void => {
     flashIndex = index;
@@ -546,10 +549,24 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     countLabel.textContent = "";
     virtual.style.height = "0px";
     rowsHost.style.transform = "translateY(0px)";
+    // The rows go with the state they described. A hidden pane still holding the
+    // previous repository's commits would be a listbox of ids nothing points at,
+    // and the next paint would have to remember to overwrite them.
+    rowsHost.replaceChildren();
+    listPane.removeAttribute("aria-activedescendant");
     listPane.hidden = true;
     splitter.hidden = true;
     emptyState.hidden = false;
     emptyState.textContent = message;
+  };
+
+  // Which history a page of commits belongs to: the repository, and the head
+  // inside it. Two clones of the same project share an object id and nothing
+  // else, so the path is part of the answer.
+  const graphIdentity = (): string | undefined => {
+    const snapshot = currentSnapshot();
+    if (snapshot === null) return undefined;
+    return `${snapshot.repo.openPath}\u0000${snapshot.branch?.oid ?? ""}`;
   };
 
   const loadPage = async (reset: boolean): Promise<void> => {
@@ -557,6 +574,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     if (!reset && !hasMore) return;
     loading = true;
     moreButton.disabled = true;
+    const asked = graphIdentity();
     try {
       const page = await invoke<HistoryPage>("history_page", {
         start: historyPageStart(commits.length, reset),
@@ -564,7 +582,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         firstParent,
       });
       // The session may have closed or moved on while this request ran.
-      if (repoKey !== (currentSnapshot()?.branch?.oid ?? null)) return;
+      if (repoKey !== asked) return;
       commits = reset ? page.commits : commits.concat(page.commits);
       hasMore = page.hasMore;
       gutterColumns = graphColumns(commits);
@@ -636,10 +654,17 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     rowsHost.replaceChildren(fragment);
     if (flashIndex >= 0) {
       // The flash is a one-shot: drop the class after it has played so a
-      // later re-render (a scroll, a resize) does not replay it.
+      // later re-render (a scroll, a resize) does not replay it. Only one is
+      // pending at a time — stepping through the matches can land on a new row
+      // before the previous highlight has finished, and the older timer would
+      // then be taking the class off a row that is no longer flashing.
       const flashed = flashIndex;
       flashIndex = -1;
-      window.setTimeout(() => rowsHost.querySelector(`#commit-row-${flashed}`)?.classList.remove("flash"), 950);
+      window.clearTimeout(flashTimer);
+      flashTimer = window.setTimeout(() => {
+        flashTimer = undefined;
+        rowsHost.querySelector(`#commit-row-${flashed}`)?.classList.remove("flash");
+      }, 950);
     }
     if (selectedIndex >= slice.startIndex && selectedIndex < slice.endIndex) {
       listPane.setAttribute("aria-activedescendant", `commit-row-${selectedIndex}`);
@@ -694,9 +719,11 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // the pane actually has. A resize observer on the scroller catches every
   // cause — the panel split being dragged, interface zoom, a narrower window —
   // that a `window` listener would miss.
-  new ResizeObserver(() => {
+  const rowWatcher = new ResizeObserver(() => {
     if (visible.length > 0) renderRows();
-  }).observe(listPane);
+  });
+  rowWatcher.observe(listPane);
+  onDispose(() => rowWatcher.disconnect());
   listPane.addEventListener("keydown", (event) => {
     if (visible.length === 0) return;
     const viewport = listPane.clientHeight || 240;
@@ -726,21 +753,24 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   });
 
   // --- lifecycle ---
-  // The list is keyed by HEAD oid: a moved HEAD re-reads page zero, a
-  // re-render of the same HEAD never touches Git.
+  // Whether the graph has to be read again is not this view's question to
+  // answer: the snapshot fan-out only reaches the graph domain when the branch
+  // it draws, or that branch's head, is a new one. This answers what to do when
+  // it does — drop the selection and the loaded pages, because both belonged to
+  // a history that is no longer on screen.
   const sync = (): void => {
     const snapshot = currentSnapshot();
-    const key = snapshot === null ? undefined : snapshot.branch?.oid ?? null;
-    if (key === repoKey) {
+    if (snapshot === null) {
+      placeholder("Open a repository to browse its history.");
       render();
       return;
     }
-    repoKey = key;
+    const head = snapshot.branch?.oid ?? null;
+    repoKey = graphIdentity();
     selected = null;
     selectedIndex = -1;
     detail.hidden = true;
-    if (key === undefined) placeholder("Open a repository to browse its history.");
-    else if (key === null) placeholder("No commits yet.");
+    if (head === null) placeholder("No commits yet.");
     else void loadPage(true);
     render();
   };
