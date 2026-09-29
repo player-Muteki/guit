@@ -294,6 +294,14 @@ mod tests {
         root
     }
 
+    fn find_main(listing: &RefListing) -> &BranchRef {
+        listing
+            .branches
+            .iter()
+            .find(|branch| branch.name == "main")
+            .unwrap()
+    }
+
     fn commit(dir: &Path, message: &str) -> String {
         repo::git_with(
             dir,
@@ -581,7 +589,7 @@ mod tests {
             ],
         );
         let idle = list(&fresh).unwrap();
-        let idle_main = idle.branches.iter().find(|b| b.name == "main").unwrap();
+        let idle_main = find_main(&idle);
         // Git leaves %(upstream:track) empty when neither side moved, so
         // "in sync" means no counts at all rather than zeros.
         assert_eq!(
@@ -594,26 +602,48 @@ mod tests {
             (Some("origin/main"), None, None, false)
         );
 
-        // Local commit → ahead 1.
+        // Where `main` is, and what the tracking ref and it each say about the
+        // other — both read back out of one listing rather than out of Git by a
+        // second command, since the listing is the only channel this panel has.
+        let main = |dir: &Path| {
+            let listing = list(dir).unwrap();
+            let branch = find_main(&listing);
+            (branch.ahead, branch.behind, branch.upstream_gone)
+        };
+
+        // One local commit on top of where the tracking ref sits → ahead 1.
+        let base = idle_main.oid.clone();
         commit(&fresh, "local");
-        let ahead = list(&fresh).unwrap();
-        let ahead_main = ahead.branches.iter().find(|b| b.name == "main").unwrap();
-        assert_eq!((ahead_main.ahead, ahead_main.behind), (Some(1), None));
+        assert_eq!(main(&fresh), (Some(1), None, false), "ahead");
 
-        // Remote advances too → diverging counts.
-        commit(&source, "remote");
-        repo::git_with(&fresh, &[], &["fetch", "-q", "origin"]);
-        let diverged = list(&fresh).unwrap();
-        let d = diverged.branches.iter().find(|b| b.name == "main").unwrap();
-        assert_eq!((d.ahead, d.behind), (Some(1), Some(1)));
+        // The rest of the shapes are written with `update-ref`, not with a
+        // fetch. A remote-tracking ref is local metadata this panel reads, and
+        // a hand-written one is both the shape under test and the only shape
+        // guit is allowed to run: the commit the "remote" moved to is made here,
+        // named on the tracking ref, and no second repository is contacted — so
+        // every object the two refs name already exists in this object database.
+        let moved = find_main(&list(&fresh).unwrap()).oid.clone();
+        repo::git_with(
+            &fresh,
+            &[],
+            &["update-ref", "refs/remotes/origin/main", &moved],
+        );
+        assert_eq!(main(&fresh), (None, None, false), "in sync is no counts");
 
-        // Upstream ref deleted on the source and pruned locally → [gone]
-        // survives as a flag, not a parse error.
-        repo::git_with(&source, &[], &["update-ref", "-d", "refs/heads/main"]);
-        repo::git_with(&fresh, &[], &["fetch", "-q", "--prune", "origin"]);
-        let gone = list(&fresh).unwrap();
-        let g = gone.branches.iter().find(|b| b.name == "main").unwrap();
-        assert!(g.upstream_gone, "track gone: {:?}", g);
+        // Rewind the branch to the clone's start, then commit beside the
+        // tracking ref: the two sides have each moved, in different directions.
+        repo::git_with(&fresh, &[], &["update-ref", "refs/heads/main", &base]);
+        commit(&fresh, "beside");
+        assert_eq!(main(&fresh), (Some(1), Some(1), false), "diverging");
+
+        // And the upstream ref removed while the branch still claims it: `[gone]`
+        // survives as a flag, not a parse error and not a missing branch.
+        repo::git_with(
+            &fresh,
+            &[],
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+        assert_eq!(main(&fresh), (None, None, true), "gone is a flag");
     }
 
     #[cfg(unix)]
