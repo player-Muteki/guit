@@ -1689,6 +1689,88 @@ names”）。本轮按 §4.8 教的跨行写法重数：3 个 `emit` 名对 3 �
 的测试文件，与本阶段的 11 条无关。
 
 
+### 4.12 C05 落地的接缝与不迁的键名（`0106784`，锚点按符号）
+
+**范围按 §4.1 收窄成两件事，落地没有第三件。** 设置页那一行，以及换间隔时**替换**
+那一个 interval。持有者仍然是 `views/changes.ts` 里的 `activityTick`，形状是
+`clearInterval` 与 `setInterval` 写在同一段里、`intervalSeconds` 从 `const` 变成 `let`；
+`onDispose` 那一支读的是同一个 `let`，所以随窗口清掉的永远是当下活着的那一个，
+不是建面板时那一个。设置页不自己起计时器，也不新造通知档位（§4 第 2 条那句
+“不新增第三个全局档位”按字面遵守）：`SettingsDeps` 多两个注入
+（`currentInterval` / `applyInterval`），由 `main.ts` 把它们接到已经建好的 `changes` 上。
+
+**两类坏输入走相反的方向，这一条是本轮新定的，不在 §4.5 的表里。**
+§4 那句“非法值拒绝并保留原值”在 §4.1 里被举证的先例是 `font.ts` 的 clamp，
+也就是说它一直同时含两件事：越界要钳，不可读要退回。落地把这两半拆开写死在
+`activityModel.ts::chooseInterval`（纯函数，入参 `string | number` 加当前值）：
+
+- 框里**没有数字**（空串、空白、`fast`、`NaN`、`±Infinity`）判为 `refused`，
+  返回当前值、`changed: false`，**一次写存储都不做**。空框不是“用户选了 0 秒”，
+  它是“还没选”；这时候把默认值写下去等于面板替人改了一次他没改过的设置。
+  注意 `Number("") === 0`，所以这条判断必须落在 `trim()` 上，不能只判 `isFinite`。
+- **是数字但越界**判为 `corrected`，落到边界（`200 → 60`、`-3 → 1`）；
+  小数走 `Math.round`（`5.4 → 5`、`5.6 → 6`）也算 corrected。方向是读得出来的意图，
+  边界就是这个显示能给的极限，所以纠正并报数，不退回旧值。
+- `changed` 单独成字段，因为它决定要不要重挂计时器：同值请求（把 12 再填一次 12、
+  或填一个被拒的空串）不产生新的 `setInterval`，于是这个数的周期与“这一行被点了几次”
+  无关。这条断言在探针里是可数的，见下面那组 `intervalDelays`。
+
+**`guit.activityInterval` 这个名字本轮**故意**不迁。** 并行开发者的
+`app/src/preferencesModel.ts` 已经把它列进 `LEGACY_KEYS.interval`，并且
+`app/tests/preferences-model.mjs` 里有一条 “each legacy key is still the name some
+source writes”：它读 `src/views/changes.ts` 的**源码文本**找 `"guit.activityInterval"`
+这个字面量，理由写得很直白——迁移一个没人再写的名字会报一次成功的迁移、然后静悄悄
+把设置丢掉。所以：
+
+- C05 的写入点必须留在 `changes.ts`（键常量在那儿，读写也在那儿），
+  **不能**把设置改成直接写 `guit.preferences`。那会让他们的这条测试变红，
+  而且变红的方向是对的。
+- 他们的 `INTERVAL_MIN/MAX/DEFAULT` 与本模块的三个常量是**两份独立陈述**，
+  由同一条测试钉住不许漂移（那条测试还留了一个出口：若 `activityModel.ts` 改成
+  `import "./preferencesModel"`，它自己让路）。这个双写不是偷懒——他们文件头写了原因：
+  Node 与 tsc 对 `.ts` 说明符的要求相反，纯模型层之间只能走 `import type`，
+  值 import 写不出来。C05 沿用同一形状，不试着自己发明第三种。
+- “未来迁移不丢此设置”这条验收因此落在**键名对齐**上而不是“现在就进版本化记录”上：
+  G 落地记录时那一条 `legacyPresent` 读到的就是本行写的值。
+
+**`persisted` 的语义照他们的定义取，不另立。** `PreferencesState.persisted` 的原话是
+“false 表示欠存储一笔而存储没收下”，本处的 `IntervalApplied.persisted` 同义：
+写成功 true；`localStorage` 抛错 false，值仍然生效但只到本次结束，那一行下面写
+“guit could not save it”。被拒的请求不欠任何一笔，所以记 `true`——它不是“保存成功”，
+而是“没有东西没保存”，与 `refused` 一起读才是完整事实。这个形状是给 G 的
+版本化记录准备的接口，不是给后端的：**没有新增任何命令**，`ipc-surface` 的四张表成员数不变。
+
+**证据的形状换了一维：探针现在数得出“周期”，不只是“个数”。**
+`tools/bench/read-budget.mjs` 的 `intervals` 那一列能看住“只有一个活着”，但它看不见
+“那个活着的是不是用户选的那个”——一个每次改值都新建却不释放旧值的实现，
+在这条上会红；反过来一个把新周期挂错、旧的清对的实现不会红。于是 `INSTRUMENT`
+的 `setInterval` 包里加了一条 `intervalDelays` 序列（**每次建立记录其 period，
+只追加不清除**），新的驱动块按“改一次、越界一次、清空一次、小数一次、改回默认一次”
+的顺序点那一行，断言这四步之后追加的序列恰为 `[9000, 60000, 2000, 5000]`——
+被拒的那次**不在序列里**，因为它没换计时器。同一段还断言：跑完仍是 1 个活着
+的 interval；那一行的 `change` 全程 `invoke` 计数为空对象 `{}`（不只是“没有 Git 读”，
+是一次请求都不发）；输入框最后回显的值与 `localStorage` 里的值相等。
+探针总断言数 24 → 28。
+
+**这一轮不重跑 idle，理由写在账上而不是蒙过去。** C04 需要那个数，因为它**引入**了
+一个周期计时器；C05 没有引入第二个，也没改默认周期（5 s），它改的是“人在不碰面板时
+面板做什么”——那部分探针已经用 `{}` 结掉了：换间隔不产生任何请求。第 4.11 节刚把
+这个口径的可用分辨率定在“整窗秒级”，一行设置的开销本来就在它下面，
+再跑一次只会得到一个必须标注为“测不出”的数。
+
+**红绿账（在当前树上跑完，`0d618b2` 之后）**：`npm run build`（含 `tsc --noEmit`）0 错，
+产物 JS 85.80 kB / CSS 29.75 kB；`npm run test:fixture` 298/298（本阶段新增
+`chooseInterval` 三条）；`color-contrast.py` 与 `responsive-check.py` 各 fails=0；
+`read-budget.mjs` fails=0（28 条）。后端一行未动，`cargo` 三条不在影响面里。
+**真实桌面点击未测**：那一行是在 CDP 里驱动**构建产物**量的（与第 4.11 节几何那次同级），
+`docs/known-limitations.md` 里“键盘注入无法自动化”那条限制原样适用于这个新控件。
+`render()` 在 `document.activeElement` 是输入框时**不覆盖**它的值——这一页每次快照落地都会
+重画，一个后台事件把人在打的数字改掉是真实可达的，所以这条不是防御性代码。
+
+**C 阶段到此收口。** 路线图给 G 的那条依赖（“C 的计时偏好”）现在是盘上的：
+键名、边界常量、`persisted` 语义与那一行的位置都在，G 只需把它并进版本化记录，
+不需要再决定任何一个数。
+
 ## 5. C01 环路原型实测（一次性 /tmp crate，非交付代码）
 
 在改动 `watch.rs` 之前，先用 notify 8.2.0 + 真实 inotify 事件验证“quiet 或最大等待取先到者”
