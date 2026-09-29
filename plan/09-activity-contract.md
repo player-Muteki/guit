@@ -335,9 +335,22 @@ helper 改动的影响面实测清点：`repo::status_output`（`repo.rs:344`）
   所以这条路径仍需 §2 的 `ls-files` 语义，只是范围可以缩到该目录。
 - `.gitignore`（含各子目录）、`.git/info/exclude`：位于已监听目录内，事件可得，触发候选重枚举。
 - 全局 `core.excludesFile` 与 XDG/`$HOME/.config/git/ignore` 默认路径：**在仓库之外**，
-  现有 `watch_targets` 不覆盖。要么额外监听该文件（或其父目录），要么按有界低频核对 metadata；
-  只有在观察目标本身变化时才重新解析 Git 配置。来源不可读时活动统计进入 stale/partial，
-  不得继续声称索引完整。
+  现有 `watch_targets` 不覆盖。这里定为**不引入任何仓库外的监听目标**，改为有界低频
+  的 metadata 核对（对解析后的那一个路径比 `mtime`+`size`），理由有三条，前两条实测：
+  1. 监听父目录的代价不可控。当 `core.excludesFile` 指向 `~/.gitignore_global` 时它的
+     父目录就是 `$HOME`；本主机 `$HOME` 仅前两层就有 515 个目录，而 notify 的递归是按
+     目录逐个申请 inotify watch（`fs.inotify.max_user_watches` 本机 65536，
+     **每用户共享**，guit 自己的仓库监听也花这同一份预算）。为了少等一次全局忽略的变更，
+     把面板的 watch 预算押在用户主目录的规模上，不成比例。
+  2. 该路径常常不存在，而“不存在”正是 §1.2 测过的静默形状：`watch()` 对缺失路径返回
+     `Err(PathNotFound)`，之后它被创建也不会自己回来；另外 inode 语义下编辑器替换文件
+     （写新 inode 再 rename）会使针对旧 inode 的监听失效。低频核对同时绕过这两个坑。
+  3. 忽略来源变化的后果只是“候选集合需要重枚举”，而重枚举本来就在快照里做。核对晚了
+     只会让统计进入 `stale`（§2.5 最后一条），不会让面板说错一个具体的时间。
+  核对的节拍**复用 §1.2 第 5 条为 Watch 模式新增的那个有界兜底 tick**，不新增第三个间隔：
+  同一次兜底既确认监听还活着，又重看这一个外部路径。路径不可读（`PermissionDenied`）→
+  本次枚举进入 `partial`；路径不存在 → 不是失败，就是“无全局忽略”，不得据此降级。
+  只有在核对发现该路径本身变了时，才重新解析 Git 配置（`config --show-origin` 一次）。
 - 索引/HEAD 移动、worktree 切换：改变候选集合，需重枚举；`.git` 内部元数据变化
   可触发 Git 状态刷新，但**不得计入 mtime 统计**。
 
@@ -501,6 +514,8 @@ freshness；调整后只维护一个计时器**（设计 §4.2 末段）。这�
   并回答它带来的代价：兜底刷新在无变化的仓库上仍会付一次 `git status`
   （沿用 `--no-optional-locks`，`watch.rs` 环路原有的 Poll 分支已经是同一形状），
   这是把“面板永不更新”换成“每个兜底间隔一次可忽略的读”，需要显式记录而不是当作免费。
+  §3 已经让同一个 tick 兼做“仓库外忽略来源”的 metadata 核对，因此选定间隔时要按
+  **两处用途共同的代价**记录，并且不得为此再新增第二个间隔。
 - 活动枚举的上限形状已按 submodule 视图的先例定为“模块内具名常量 + 32 MB 档”（§2.2）；
   具体常量名与注释随实现落地后，需要在 `docs/known-limitations.md` 的 output bounds 一节
   补一条同等强度的记录，不得只留在代码注释里。
@@ -552,7 +567,12 @@ stdout 与 stderr**（只看 stdout 会得出“干净”的错误结论）；
 看 rc=0 且 stderr 为空、该项以 `.M` 出现，与 `chmod 000 .git/index` 看 rc=128。
 mtime 索引的三项成本用一次性 Rust 原型测得（临时目录下 `cargo run`，随进程删除夹具，
 不是交付代码）：10 次“两次 `ls-files` + 逐项 `symlink_metadata`”重建、200 轮“取最大后删除”、
-1000 次“取最大后写回同一项”。阶段 C 实现时应把这些断言固化为 `app/tests/` 下的夹具测试。
+1000 次“取最大后写回同一项”。§3 那三条“不监听仓库外路径”的数字来自三条只读命令：
+`cat /proc/sys/fs/inotify/max_user_watches`、`cat /proc/sys/fs/inotify/max_user_instances`、
+`find "$HOME" -maxdepth 2 -xdev -type d | wc -l`（本机 65536 / 128 / 515），
+以及 `git config --global --get core.excludesFile` 与对 `$HOME/.config/git/ignore` 的
+`ls -ld`（本机：前者未设置、后者存在）。这两项都不写任何文件，也不需要夹具。
+阶段 C 实现时应把这些断言固化为 `app/tests/` 下的夹具测试。
 
 §1.2 与 §1.3 的监听形状由同一原型目录里另外两个 bin 测得（依赖 `notify =8.2.0`，
 夹具建在 `/tmp` 下、进程退出前自删）：`dead_watch` 依次跑“监听根删除并重建”
