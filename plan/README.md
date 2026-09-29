@@ -71,6 +71,11 @@ flowchart LR
 | 阶段 D：图表与引用契约依据 | 已编写（见 [阶段 D 契约依据](16-graph-contract-d.md)） |
 | 阶段 D：D01 历史读取的身份与双读一致 | 已实施（同文 §4，提交 `861a1ca`；`%D` 标签侧仍随 refs 浮动，UI 呈现未在真实 WebView 驱动过） |
 | 阶段 D：D02–D05 | 待实施 |
+| 阶段 G：W01 版本化外观记录 | 已实施（`app/src/preferencesModel.ts` 与 `appearanceStore.ts`，读不懂的记录拒绝改写；规则由 `app/tests/preferences-model.mjs`、`app/tests/preferences-store.mjs` 钉住。真实窗口里第二次启动把同一份记录读回来没有跑过，跨比例因子与第二块显示器的钳位仍是手动门（`tools/bench/recovery-checks.sh` 尾部，另见 `docs/known-limitations.md` 的“Manual gates still open”） |
+| 阶段 G：W02 三类字体与回退 | 已实施（三个名字一行一条，样本行用面板自己的两个字体属性绘制；等宽是否真对齐问过引擎，见 `tools/bench/font-engine-probe.ts` 与 `app/tests/font-stack.mjs`。该问题只朝 WebKitGTK 问过，其他引擎从未运行） |
+| 阶段 G：W03 自定义 CSS 主题 | 已实施（子集逐条审阅、预览、应用、`Ctrl/Cmd+Shift+T` 与页面按钮同一条出路、崩溃后用留下的标记恢复；未验证部分见 `docs/known-limitations.md` 的“The custom theme”一节 — 事后那一眼只看控件有没有盒子，子集也只对该引擎固定） |
+| 阶段 G：W04 四个窗口动作与关闭收尾 | 已实施（app bar 右上角成组的置顶/最小化/最大化或还原/关闭，按钮显示桌面的回答而不是请求；关闭先写几何再销毁，且**不**回收在飞的 Git 子进程 — 这是决定，理由与未跑的持有路径同文“The window controls”一节。空闲关闭与几何往返已在真实窗口里按过） |
+| 阶段 G：W05 小窗口、多 DPI、键盘、主题与触屏命中复核及设置分组清理 | 待实施 |
 | 新功能及架构迁移 | 待实施 |
 | 新主面板的性能、桌面运行、跨平台及发布证据 | 待实施后采集 |
 
