@@ -4,7 +4,10 @@
 // live here so the everyday views stay focused on the Git
 // workflow. Theme follows the system by default; the selector is one of the
 // appearance choices, so it is stored and applied by the module that owns them and
-// read back from the same place. The refresh interval of the age line is a
+// read back from the same place. The three font families are the same kind of
+// choice and come from the same module; the sample lines under the boxes are set in
+// the panel's own font properties, so they show the stacks in force rather than a
+// second description of them. The refresh interval of the age line is a
 // row on this page, but the timer it changes belongs to the panel drawing that
 // line — this view asks, that panel re-arms its one interval.
 
@@ -13,7 +16,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { button, el, icon, plural } from "../dom";
 import { createConfirmDialog, type ConfirmRequest } from "../dialogs/confirm";
 import { isAlwaysOnTop, isRestoreEnabled, setAlwaysOnTop, compactWindow, restoreWindowSize, windowGeometry } from "../window";
-import { applyFontPx, applyTheme, currentFontPx, currentTheme, FONT_DEFAULT } from "../font";
+import { applyFamilies, applyFontPx, applyTheme, currentFamilies, currentFontPx, currentTheme, FAMILY_MAX, FONT_DEFAULT } from "../font";
 import { INTERVAL_MAX, INTERVAL_MIN } from "../activityModel";
 import type { IntervalApplied } from "../activityModel";
 import type { GitProbe, ToolProbe } from "../types";
@@ -49,6 +52,22 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
   const zoomLabel = el("span", { class: "setting-value", role: "status" });
   const onTopToggle = el("input", { type: "checkbox", id: "settings-on-top" });
   const onTopLabel = el("label", { class: "checkbox", for: "settings-on-top" }, [onTopToggle, el("span", { text: "Always on top" })]);
+  // The three families the record keeps. They are text boxes rather than a list
+  // because the panel cannot enumerate this host's fonts, and a choice it could not
+  // check would be a guess at what someone has installed. An empty box is the built-in
+  // stack, which is a choice, so the placeholder says what empty means instead of
+  // leaving it to be discovered.
+  const latinInput = el("input", { class: "input", type: "text", "aria-label": "Latin text font", placeholder: "Built-in" });
+  const cjkInput = el("input", { class: "input", type: "text", "aria-label": "Chinese text font", placeholder: "Built-in" });
+  const monoInput = el("input", { class: "input", type: "text", "aria-label": "Code font", placeholder: "Built-in" });
+  for (const box of [latinInput, cjkInput, monoInput]) box.maxLength = FAMILY_MAX;
+  // The sample lines are not styled from here: they are in the sheet as
+  // `var(--font-ui)` and `var(--font-mono)`, so what a person reads is the panel's
+  // own drawing of the panel's own values, not a description of it. A half-typed name
+  // is deliberately absent — the stack applied is the one the record took.
+  const uiPreview = el("p", { class: "font-preview", text: "重构 src/index.ts 的提交图 — Commit graph, 12 files" });
+  const codePreview = el("p", { class: "font-preview code", text: "a1b2c3d4e5f60718  app/src/views/settings.ts" });
+  const fontNote = el("p", { class: "setting-note", role: "status", "data-note": "fonts" });
   // The refresh period of the one sentence that ages on its own. The timer it
   // changes is not this page's: it belongs to the panel drawing the line, which is
   // what keeps the panel down to a single repeating timer however often this row
@@ -74,6 +93,21 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
         button("Reset", () => applyFontPx(FONT_DEFAULT), { class: "btn tiny", ariaLabel: "Reset zoom" }),
       ]),
     ]),
+    el("div", { class: "setting-row" }, [
+      el("span", { class: "setting-label", text: "Latin text" }),
+      latinInput,
+    ]),
+    el("div", { class: "setting-row" }, [
+      el("span", { class: "setting-label", text: "Chinese text" }),
+      cjkInput,
+    ]),
+    uiPreview,
+    el("div", { class: "setting-row" }, [
+      el("span", { class: "setting-label", text: "Code" }),
+      monoInput,
+    ]),
+    codePreview,
+    fontNote,
     el("div", { class: "setting-row" }, [
       el("span", { class: "setting-label", text: "Last-modified text" }),
       el("div", { class: "zoom-controls" }, [intervalInput, el("span", { class: "setting-value", text: "seconds" })]),
@@ -246,6 +280,41 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
   themeSelect.addEventListener("change", () => {
     themeSelect.value = applyTheme(themeSelect.value);
   });
+  // One apply for the three family boxes, and every box written back from what the
+  // record took. Two different refusals can happen and they need different
+  // sentences: a name the record will not have is not stored at all, while a name it
+  // stores may still be one this engine cannot draw with fixed-width columns — the
+  // first is a typed string the panel refuses, the second is a fact about the
+  // computer, and only the second is decided by asking the renderer.
+  const applyFamilyRows = (): void => {
+    const asked = { latinFont: latinInput.value, cjkFont: cjkInput.value, monoFont: monoInput.value };
+    const applied = applyFamilies(asked);
+    const sentences: string[] = [];
+    const rows: [string, string, keyof typeof asked][] = [
+      [applied.latinFont, "Latin text", "latinFont"],
+      [applied.cjkFont, "Chinese text", "cjkFont"],
+      [applied.monoFont, "Code", "monoFont"],
+    ];
+    for (const [kept, label, field] of rows) {
+      const typed = asked[field].trim();
+      if (typed !== kept) {
+        sentences.push(
+          `${label}: "${typed}" is not a name guit can write, so it stays at ${kept === "" ? "the built-in stack" : `"${kept}"`}.`,
+        );
+      }
+    }
+    if (applied.monoFont !== "" && !applied.monoHonoured) {
+      sentences.push(
+        `Code: this computer cannot draw "${applied.monoFont}" with one width per character, so object IDs and paths use the built-in monospace.`,
+      );
+    }
+    if (!applied.persisted) sentences.push("guit could not save these families.");
+    latinInput.value = applied.latinFont;
+    cjkInput.value = applied.cjkFont;
+    monoInput.value = applied.monoFont;
+    fontNote.textContent = sentences.join(" ");
+  };
+  for (const box of [latinInput, cjkInput, monoInput]) box.addEventListener("change", applyFamilyRows);
   onTopToggle.addEventListener("change", async () => {
     try {
       await setAlwaysOnTop(onTopToggle.checked);
@@ -290,6 +359,13 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     const zoom = `${currentFontPx()}px`;
     if (zoomLabel.textContent !== zoom) zoomLabel.textContent = zoom;
     themeSelect.value = currentTheme();
+    // The families in force, unless a caret is in one of the boxes: this view is
+    // redrawn whenever the repository behind it changes, and a watcher event landing
+    // mid-name would otherwise type over the family being written.
+    const families = currentFamilies();
+    if (document.activeElement !== latinInput) latinInput.value = families.latinFont;
+    if (document.activeElement !== cjkInput) cjkInput.value = families.cjkFont;
+    if (document.activeElement !== monoInput) monoInput.value = families.monoFont;
     // The in-force interval, unless the caret is in the box: this view is redrawn
     // whenever the repository behind it changes, and a watcher event landing
     // mid-edit would otherwise type over the number being written.

@@ -23,8 +23,10 @@
 
 import { buildMonoStack } from "./fontStack";
 
-/** The value the engine is required to resolve to a fixed-pitch face. */
-const GENERIC_MONO = "monospace";
+/** The value the engine is required to resolve to a fixed-pitch face. Exported
+ * because a check that an override happened names it: `honoured: false` means this
+ * exact string was written. */
+export const GENERIC_MONO = "monospace";
 
 /** Every character an object ID is made of. A stack that gives these one advance
  * lines up the whole column, which is the only reason the panel sets them in a
@@ -55,13 +57,20 @@ export function monoAligns(stack: string): boolean {
   return Math.max(...widths) - Math.min(...widths) < 0.05;
 }
 
-/** The mono stack to write for the family the user named — the stack they asked
- * for when this engine lines it up, and the generic keyword when it does not.
+/** What to write for the family the user named, and whether this engine drew that
+ * family.
+ *
+ * `stack` is always a stack the engine lines an object ID up with: the one the name
+ * asked for when it does, the generic keyword when it does not. `honoured` says
+ * which of the two it is, which is the difference between a setting that worked and
+ * a setting the panel overrode. The caller only reports an override when a name was
+ * actually given — nobody is refused by a field they left empty, and the panel's own
+ * built-in list is substituted on this engine too.
  *
  * One measurement per apply, on a handful of glyphs, never per row and never per
  * frame: this runs when a family field changes or the panel starts up, and the
  * answer decides a stylesheet value rather than a layout. */
-export function resolveMonoStack(named: string): string {
+export function resolveMonoStack(named: string): { stack: string; honoured: boolean } {
   const wanted = buildMonoStack(named);
-  return monoAligns(wanted) ? wanted : GENERIC_MONO;
+  return monoAligns(wanted) ? { stack: wanted, honoured: true } : { stack: GENERIC_MONO, honoured: false };
 }

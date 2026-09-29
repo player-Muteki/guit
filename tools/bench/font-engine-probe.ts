@@ -21,7 +21,7 @@
 
 import { FILE_ROW_REM, HISTORY_ROW_REM } from "../../app/src/fileModel";
 import { MONO_TAIL, UI_TAIL, buildMonoStack, buildUiStack } from "../../app/src/fontStack";
-import { monoAligns, resolveMonoStack } from "../../app/src/fontResolve";
+import { GENERIC_MONO, monoAligns, resolveMonoStack } from "../../app/src/fontResolve";
 
 interface Check {
   name: string;
@@ -197,20 +197,29 @@ function measuredHeight(className: string): number {
     absent,
   );
 
-  // So the panel asks, and the answer is always a stack that lines up.
-  for (const named of ["", "Not A Real Family 9x9", "JetBrains Mono", "Courier New", "inherit"]) {
+  // So the panel asks, and the answer is always a stack that lines up — and the
+  // apply path is checked through the property it writes, because a builder that is
+  // right and a panel that writes the other half of the answer are two different
+  // bugs.
+  for (const named of ["", "Not A Real Family 9x9", "JetBrains Mono", "Courier New", "inherit", "Liberation Mono"]) {
     const wanted = buildMonoStack(named);
     const resolved = resolveMonoStack(named);
+    const label = named === "" ? "no name" : `"${named}"`;
     check(
-      `the resolver keeps an object ID aligned for ${named === "" ? "no name" : `"${named}"`}`,
-      monoAligns(resolved) && (resolved === wanted || resolved === "monospace"),
-      { wanted, resolved, wantedAligned: monoAligns(wanted) },
+      `the resolver keeps an object ID aligned for ${label}`,
+      monoAligns(resolved.stack) &&
+        (resolved.honoured ? resolved.stack === wanted : resolved.stack === GENERIC_MONO),
+      { wanted, written: resolved.stack, honoured: resolved.honoured, wantedAligned: monoAligns(wanted) },
     );
+    root.style.setProperty("--font-mono", resolved.stack);
+    const read = getComputedStyle(root).getPropertyValue("--font-mono").trim();
+    check(`the engine draws ${label} from the written property with one width`, read === resolved.stack && oidSpread(read).spread === 0, { read, ...oidSpread(read) });
   }
 
-  // The apply path: what the panel writes is what the engine reads back, so a
-  // preview and the applied panel cannot be showing different stacks.
-  const written = { "--font-ui": buildUiStack("Noto Sans", "Source Han Sans"), "--font-mono": resolveMonoStack("Liberation Mono") };
+  // The apply path for the text stacks: what the panel writes is what the engine
+  // reads back, so a preview and the applied panel cannot be showing different
+  // stacks.
+  const written = { "--font-ui": buildUiStack("Noto Sans", "Source Han Sans"), "--font-mono": resolveMonoStack("Liberation Mono").stack };
   for (const [property, value] of Object.entries(written)) {
     root.style.setProperty(property, value);
     const read = getComputedStyle(root).getPropertyValue(property).trim();

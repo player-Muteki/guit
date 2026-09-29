@@ -105,3 +105,50 @@ test("the properties written are the stacks built", () => {
   // page shows is not a description of what the panel does.
   assert.equal(fontStackProperties({ latinFont: "", cjkFont: "", monoFont: "" })["--font-ui"], UI_TAIL);
 });
+
+test("the engine's answer replaces the code stack and nothing else", () => {
+  // Measuring whether a stack lines an object ID up needs a document, so the answer
+  // is handed in. What this checks is the seam: the resolver is asked the family that
+  // was named, its answer goes under `--font-mono` and only there, and with no
+  // resolver at all the pair is the plain built stacks a Node run can state.
+  const asked = [];
+  const props = fontStackProperties({ latinFont: "Arial", cjkFont: "宋体", monoFont: "Menlo" }, (mono) => {
+    asked.push(mono);
+    return "monospace";
+  });
+  assert.deepEqual(asked, ["Menlo"]);
+  assert.equal(props["--font-mono"], "monospace");
+  assert.equal(props["--font-ui"], buildUiStack("Arial", "宋体"), "the text stack is not the resolver's to change");
+  assert.equal(
+    fontStackProperties({ latinFont: "", cjkFont: "", monoFont: "Menlo" })["--font-mono"],
+    buildMonoStack("Menlo"),
+  );
+});
+
+test("the panel writes both properties from these builders", () => {
+  // `font.ts` is the only caller and it cannot be imported here — reading the
+  // stylesheet is its job — so the two halves of the wiring are read as text: the
+  // values are written under the names this file states, and the code stack goes
+  // through the engine rather than being written straight from the name.
+  const source = readFileSync(new URL("../src/font.ts", import.meta.url), "utf8");
+  assert.match(source, /setProperty\("--font-ui"/, "the text stack is never written");
+  assert.match(source, /setProperty\("--font-mono"/, "the code stack is never written");
+  assert.match(source, /fontStackProperties\(/, "the pairing is restated in font.ts instead of taken from here");
+  assert.match(source, /resolveMonoStack\(/, "the code stack is written without asking the engine");
+});
+
+test("the settings sample is the sheet's own font property", () => {
+  // A preview built by a second copy of the stack drifts from what the panel draws.
+  // The sample lines are therefore styled in the sheet with the same two custom
+  // properties everything else uses, so the view that shows them holds no font value
+  // of its own to disagree with.
+  const css = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
+  assert.match(css, /\.font-preview\.code\s*\{[^}]*var\(--font-mono\)/, "the code sample is not in the written property");
+  assert.match(css, /\.font-preview\s*\{/, "the text sample has no rule of its own");
+  // An object ID is 40 characters at the widest a person may name, and a sample that
+  // cannot break hands the page sideways scrolling.
+  assert.match(css, /\.font-preview\s*\{[^}]*overflow-wrap:\s*anywhere/, "the sample line cannot give its width back");
+  const view = readFileSync(new URL("../src/views/settings.ts", import.meta.url), "utf8");
+  assert.equal(/font-family/.test(view), false, "the view names a family the panel does not write");
+});
+

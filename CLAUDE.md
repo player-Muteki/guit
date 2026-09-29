@@ -102,6 +102,10 @@ them (`/usr/bin/python3`); it refuses with a reason when any of the three is mis
 /usr/bin/python3 ../tools/bench/webkit-engine-probe.py appearance-engine-probe.ts src/style.css src/style/tokens.css
 ```
 
+A probe that builds a *view* rather than a document has to answer for the runtime the
+view asks about at import time: `tools/bench/probe-tauri-stub.ts` installs the small
+invoke surface a view module uses, and must be the probe's first import.
+
 `app/src-tauri/examples/watch_probe.rs` is a manual `cargo run --example`.
 
 ## Architecture

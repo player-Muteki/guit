@@ -81,14 +81,22 @@ export function buildMonoStack(mono: string): string {
   return named === null ? MONO_TAIL : `${named}, ${MONO_TAIL}`;
 }
 
-/** Every stack value the panel writes, keyed by the custom property it replaces. */
-export function fontStackProperties(prefs: {
-  latinFont: string;
-  cjkFont: string;
-  monoFont: string;
-}): { "--font-ui": string; "--font-mono": string } {
+/** Every stack value the panel writes, keyed by the custom property it replaces.
+ *
+ * `resolveMono` is the engine's answer to "does this stack line an object ID up", and
+ * measuring that needs a document to lay glyphs out. `fontResolve.ts` supplies it in
+ * the panel and a Node run supplies the builder itself, so the pairing of name to
+ * stack is stated once, here, and cannot disagree with the value written. */
+export function fontStackProperties(
+  prefs: {
+    latinFont: string;
+    cjkFont: string;
+    monoFont: string;
+  },
+  resolveMono: (mono: string) => string = buildMonoStack,
+): { "--font-ui": string; "--font-mono": string } {
   return {
     "--font-ui": buildUiStack(prefs.latinFont, prefs.cjkFont),
-    "--font-mono": buildMonoStack(prefs.monoFont),
+    "--font-mono": resolveMono(prefs.monoFont),
   };
 }

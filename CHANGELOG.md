@@ -30,9 +30,30 @@ is the record of what is not verified.
   how often the display talks: file changes are still detected as they happen,
   so sixty seconds of text never means sixty seconds of staleness, and one
   second never costs a Git read per second.
+- Settings → General carries three font rows: a Latin text family, a Chinese text
+  family and a code font. Each is a name rather than a list, because the panel
+  cannot enumerate what a computer has installed; an empty row means the built-in
+  stack, and the placeholder says so. Two sample lines sit under the boxes — mixed
+  Chinese-and-Latin text, then an object ID and a path — and they are set in the
+  panel's own two font properties, so what a person reads is the drawing, not a
+  description of it. A name the panel cannot write is returned to the row it came
+  from, leaving the family in force where it was and saying what happened; a code
+  font this computer cannot draw with one width per character is reported too,
+  because that is the panel overriding the choice rather than applying it.
 
 ### Changed
 
+- The code font is measured before it is used. A family name the computer does
+  not have is not skipped by the drawing engine — it substitutes some other face
+  and hands back a value that still reads as the name asked for — so the panel's
+  own monospace default could end up drawing an object ID with one narrow "i" and
+  one wide "m" in the same column, and every path, ellipsis and short OID under it
+  no longer lined up with the row above. Before writing the property, the panel now
+  lays out a few glyphs of the stack it is about to use and, when a character is
+  not one advance wide, writes the generic monospace instead. The cost of a name
+  this computer has never heard of is therefore the look of a face the user did not
+  pick, which the settings row says out loud; the alignment of the columns is not
+  paid for it.
 - Interface zoom and theme are stored in one versioned record rather than each in
   a key of its own. Neither row behaves differently: the choice still comes back
   after a restart, and a stored number outside the range the panel can draw is
