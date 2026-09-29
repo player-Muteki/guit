@@ -188,6 +188,17 @@ fn write_window_settings(
             "Unsupported settings version or invalid window size.",
         ));
     }
+    // The refusing has to go both ways. `read_window_settings` will not interpret
+    // a newer file, and without the same check here the next resize would write
+    // this build's guess of the geometry over the newer choice it refused to read.
+    if session::config_is_sealed(path, |existing: &WindowSettings| {
+        existing.schema_version == settings_version()
+    }) {
+        return Err(ProbeError::new(
+            "settings_sealed",
+            "Window settings were written by another version and are left untouched.",
+        ));
+    }
     let parent = path
         .parent()
         .ok_or_else(|| ProbeError::new("settings_path_failed", "Invalid settings path"))?;
@@ -1337,6 +1348,8 @@ mod tests {
     // A future window.json version is refused fail-closed: the bytes
     // survive untouched, and the restore path reports no settings, so
     // the frontend keeps the shipped 720x560 default instead of guessing.
+    // The refusal holds against a write too, because the panel saves geometry on
+    // every resize and that call must not undo the read's decision.
     #[test]
     fn future_window_version_is_refused_and_left_untouched() {
         let directory = tempfile::tempdir().unwrap();
@@ -1348,7 +1361,37 @@ mod tests {
             read_window_settings(&path).unwrap_err().code.as_str(),
             "settings_invalid"
         );
+        let settings: WindowSettings =
+            serde_json::from_str(r#"{"width":720,"height":560,"x":0,"y":0,"alwaysOnTop":false}"#)
+                .unwrap();
+        assert_eq!(
+            write_window_settings(&path, &settings)
+                .unwrap_err()
+                .code
+                .as_str(),
+            "settings_sealed"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    // Geometry a user set by hand is what a version-1 file holds, so a write
+    // there is ordinary; only an unreadable shape stands in its way.
+    #[test]
+    fn a_current_window_version_is_still_written_over() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("window.json");
+        std::fs::write(
+            &path,
+            br#"{"schemaVersion":1,"width":900,"height":700,"x":1,"y":2,"alwaysOnTop":true}"#,
+        )
+        .unwrap();
+        let settings: WindowSettings =
+            serde_json::from_str(r#"{"width":720,"height":560,"x":0,"y":0,"alwaysOnTop":false}"#)
+                .unwrap();
+        write_window_settings(&path, &settings).unwrap();
+        let stored = read_window_settings(&path).unwrap().unwrap();
+        assert_eq!((stored.width, stored.height), (720, 560));
+        assert!(!stored.always_on_top);
     }
 
     #[test]

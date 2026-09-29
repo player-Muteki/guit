@@ -568,8 +568,19 @@ fn session_path(config_dir: &Path) -> PathBuf {
 }
 
 pub fn record_session(config_dir: &Path, path: &str) -> Result<(), ProbeError> {
+    let file = session_path(config_dir);
+    // Refusing to read a newer session has to refuse to write one too, or the
+    // next window resize quietly replaces the newer choice with this build's.
+    if config_is_sealed(&file, |existing: &SessionFile| {
+        existing.schema_version == RECENT_SCHEMA_VERSION
+    }) {
+        return Err(ProbeError::new(
+            "session_sealed",
+            "The saved session was written by another version and is left untouched.",
+        ));
+    }
     write_json_atomic(
-        &session_path(config_dir),
+        &file,
         &SessionFile {
             schema_version: RECENT_SCHEMA_VERSION,
             path: path.to_owned(),
@@ -601,6 +612,29 @@ pub fn read_session(config_dir: &Path) -> Result<Option<String>, ProbeError> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(ProbeError::new("session_read_failed", error.to_string())),
+    }
+}
+
+/// Whether the file already at this path has to be left exactly as it is.
+///
+/// The question is asked before a config write, on the caller's own typed shape:
+/// a file that reads as a record but is not a version this build understands was
+/// written on purpose by a newer build, and overwriting it would trade the user's
+/// newer choice for a guess. Bytes that do not parse at all are not that — no
+/// build could read them, so preserving them would only leave a settings file
+/// that never works again. A file that cannot be opened either is sealed: writing
+/// over something this build cannot inspect is not a repair.
+pub fn config_is_sealed<T, F>(path: &Path, accepted: F) -> bool
+where
+    T: serde::de::DeserializeOwned,
+    F: FnOnce(&T) -> bool,
+{
+    match fs::read(path) {
+        Ok(data) => match serde_json::from_slice::<T>(&data) {
+            Ok(existing) => !accepted(&existing),
+            Err(_) => false,
+        },
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
     }
 }
 
@@ -1213,7 +1247,8 @@ mod tests {
 
     // Forward refusal is fail-closed — a future schema_version is
     // rejected outright, the bytes are left untouched for a later release,
-    // and no code path rewrites a file it refused to read.
+    // and no code path rewrites a file it refused to read. The write is refused
+    // by the same reading as the read, so a window resize cannot undo it.
     #[test]
     fn future_session_version_is_refused_and_left_untouched() {
         let root = tempfile::tempdir().unwrap();
@@ -1224,7 +1259,30 @@ mod tests {
             read_session(root.path()).unwrap_err().code.as_str(),
             "session_invalid"
         );
+        assert_eq!(
+            record_session(root.path(), "/elsewhere")
+                .unwrap_err()
+                .code
+                .as_str(),
+            "session_sealed"
+        );
         assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    // Bytes no build can read are not a record worth preserving: keeping them
+    // would leave a session file that never works again, with no way for the
+    // panel to write a working one.
+    #[test]
+    fn unreadable_session_bytes_are_replaced_rather_than_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let path = session_path(root.path());
+        fs::write(&path, b"not json at all").unwrap();
+        assert_eq!(
+            read_session(root.path()).unwrap_err().code.as_str(),
+            "session_decode_failed"
+        );
+        record_session(root.path(), "/somewhere").unwrap();
+        assert_eq!(read_session(root.path()).unwrap().unwrap(), "/somewhere");
     }
 
     #[test]
