@@ -49,8 +49,8 @@ D 的后端夹具、G 的窗口 spike 可以在 C 期间按依赖穿插。任何
 
 | ID | 工作与修改位置 | 交付及验收 |
 | --- | --- | --- |
-| C01 | `watch.rs`：事件路径/种类保留、有界队列、最大等待、运行时失败降级 | 连续事件不饿死刷新；队列溢出进入需核对状态；停止/切仓库可取消 |
-| C02 | 新 `activity.rs`：Git 候选枚举、metadata 索引、已跟踪/未跟踪/ignored/边界规则 | 初始扫描 ready/partial/empty/unavailable 可区分；统计来自 mtime |
+| C01 | `watch.rs`：事件路径/种类保留、有界队列、最大等待、运行时失败降级 | 连续事件不饿死刷新；队列溢出进入需核对状态；监听根被删又重建后事件重新被看见，Watch 模式在无事件时也按上界兜底刷新；停止/切仓库可取消 |
+| C02 | 新 `activity.rs`：Git 候选枚举、metadata 索引、已跟踪/未跟踪/ignored/边界规则；`repo.rs` 的读取 helper 需先交出 stderr | 初始扫描 ready/partial/empty/unavailable 可区分（按 stderr 分，不按 stdout 空否分）；统计来自 mtime |
 | C03 | 文件事件增量更新，最大项删除、rename、仓库内外 ignore/config 来源观察及目标更新、休眠和轮询核对 | 不用最后事件时间代替 mtime；仅修改全局忽略文件也能更新候选；丢事件后可恢复准确值 |
 | C04 | `types.ts`/state/mainPanel/activityModel：绑定会话显示状态与相对时间 | 仓库切换不显示旧时间；tick 不产生 Git 调用，不重绘完整图 |
 | C05 | 设置接入默认 5 秒、1–60 秒校验及临时持久化接口；与 G 的偏好模块统一 | 修改即时生效，只有一个计时器；未来迁移不丢此设置 |
@@ -132,6 +132,8 @@ Linux 作为已有运行证据的优先回归平台。Windows/macOS 分别建立
 | mtime 扫描成本过高 | idle tick 启动 Git/全遍历，metadata backlog 无界 | C 分批/增量、stale 状态，H 测资源 |
 | 搜索范围名实不符 | 第 51 条以后查不到却显示无结果 | E 全范围读取和 completion 状态，不以缓存命中代替范围 |
 | 连续写入不刷新 | 事件持续但 Git capture 无启动 | C 最大等待和合并 gate fixture |
+| 读不动的目录显示成干净 | Git 退出 0、stdout 只有分支头，stderr 出现 could not open directory | C02 先让读取 helper 交出 stderr 并按契约分状态；快照同洞同批修 |
+| 监听根丢失后静默 | 目录被删后事件归零且 notify 不发 `Err` | C01 保留事件路径识别 Remove(Folder)、按幂等 watch 重挂，Watch 模式加有界兜底刷新 |
 | 图在切仓库或 refs-only 变化后陈旧 | 相同 HEAD 仓库共用页、标签不变 | B/D 会话身份和引用代次 |
 | 重置遗漏损失路径 | 阻挡未跟踪项/干净但目标不同的路径未预览 | F 写前完整集合，未解决则禁用入口 |
 | 外部 agent 再写入 | 检查后再次修改同路径、最终工作树仍脏 | F 重查/最终检查/部分结果；不承诺原子性 |
