@@ -50,8 +50,8 @@ D 的后端夹具、G 的窗口 spike 可以在 C 期间按依赖穿插。任何
 | ID | 工作与修改位置 | 交付及验收 |
 | --- | --- | --- |
 | C01 | `watch.rs`：事件路径/种类保留、有界队列、最大等待、运行时失败降级。通道只送“有事发生”，路径在环路侧合并；无界 `mpsc` 需换成带容量的 `sync_channel` + `try_send`（实测事件率为每次写入 4 条 / 2 条非 Access，上界按此解释） | 连续事件不饿死刷新；队列溢出进入需核对状态（溢出不得当成无变化，也不得阻塞回调线程，实测满通道 `try_send` 约 26 ns 且不阻塞）；监听根被删又重建后事件重新被看见，Watch 模式在无事件时也按上界兜底刷新；停止/切仓库可取消 |
-| C02 | 新 `activity.rs`：Git 候选枚举、metadata 索引、已跟踪/未跟踪/ignored/边界规则；`repo.rs` 的读取 helper 需先交出 stderr | 初始扫描 ready/partial/empty/unavailable 可区分（按 stderr 分，不按 stdout 空否分）；统计来自 mtime |
-| C03 | 文件事件增量更新，最大项删除、rename、ignore/config 来源观察及目标更新：仓库内走事件，仓库外忽略来源只做有界 metadata 核对，不新增仓库外监听目标；休眠不检测，靠兜底 tick 恢复 | 不用最后事件时间代替 mtime；仅修改全局忽略文件也能在有界延迟内更新候选；丢事件后可恢复准确值 |
+| C02 | 新 `activity.rs`：Git 候选枚举、metadata 索引、已跟踪/未跟踪/ignored/边界规则；枚举是一条 `ls-files --cached --others --exclude-standard -z`（实测逐项等于两次调用的并集，输出是“未跟踪段+已跟踪段”而非全局有序，须按无类别集合处理）；`repo.rs` 的读取 helper 需先交出 stderr | 初始扫描 ready/partial/empty/unavailable 可区分（按 stderr 分，不按 stdout 空否分）；统计来自 mtime |
+| C03 | 文件事件增量更新，最大项删除、rename、ignore/config 来源观察及目标更新：仓库内走事件，重枚举用同一条**不带 pathspec** 的组合命令（实测范围只把 50k 量级的 14.9 ms 压到 5.3 ms，而写错的 pathspec 静默返回空集合——省不出这个失败形状）；仓库外忽略来源只做有界 metadata 核对，不新增仓库外监听目标；休眠不检测，靠兜底 tick 恢复 | 不用最后事件时间代替 mtime；仅修改全局忽略文件也能在有界延迟内更新候选；丢事件后可恢复准确值 |
 | C04 | `types.ts`/state/mainPanel/activityModel：绑定会话显示状态与相对时间；纯函数入口先按 `state` 分流再算年龄 | 仓库切换不显示旧时间；tick 不产生 Git 调用，不重绘完整图；未来 mtime 与时钟后退不产出年龄数字（也不产出负数/`NaN`）；六种状态各自有独立文案，`partial`/`stale` 不得冒充完整或新鲜 |
 | C05 | 设置接入默认 5 秒、1–60 秒校验及临时持久化接口；与 G 的偏好模块统一 | 修改即时生效，只有一个计时器；未来迁移不丢此设置 |
 
