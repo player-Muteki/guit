@@ -132,7 +132,7 @@ Linux 作为已有运行证据的优先回归平台。Windows/macOS 分别建立
 | mtime 扫描成本过高 | idle tick 启动 Git/全遍历，metadata backlog 无界 | C 分批/增量、stale 状态，H 测资源 |
 | 搜索范围名实不符 | 第 51 条以后查不到却显示无结果 | E 全范围读取和 completion 状态，不以缓存命中代替范围 |
 | 连续写入不刷新 | 事件持续但 Git capture 无启动 | C 最大等待和合并 gate fixture |
-| 读不动的目录显示成干净 | Git 退出 0、stdout 只有分支头，stderr 出现 could not open directory | C02 先让读取 helper 交出 stderr 并按契约分状态；快照同洞同批修 |
+| 读不动的目录显示成干净 | Git 退出 0、stdout 只有分支头，stderr 非空（文本随语言变化，只判空不读文本） | C02 先让读取 helper 交出 stderr 并按契约分状态；快照与写前 recheck 同洞同批修 |
 | 监听根丢失后静默 | 目录被删后事件归零且 notify 不发 `Err` | C01 保留事件路径识别 Remove(Folder)、按幂等 watch 重挂，Watch 模式加有界兜底刷新 |
 | 图在切仓库或 refs-only 变化后陈旧 | 相同 HEAD 仓库共用页、标签不变 | B/D 会话身份和引用代次 |
 | 重置遗漏损失路径 | 阻挡未跟踪项/干净但目标不同的路径未预览 | F 写前完整集合，未解决则禁用入口 |
