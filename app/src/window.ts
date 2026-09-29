@@ -1,7 +1,11 @@
 // Window behaviour: always-on-top, bounds persistence (viewport pixels plus
-// measured frame, which is what survives a scale change), focus refresh, and
-// the compact/restore size test used by Settings. The native title bar stays
-// — this module never sets `decorations: false`.
+// measured frame, which is what survives a scale change), focus refresh, the
+// compact/restore size test used by Settings, and the four actions behind the
+// app bar's window buttons. The native title bar stays — this module never sets
+// `decorations: false` — so the buttons are a second way onto the same native
+// actions, and every one of them is awaited rather than fired: a control that
+// shows the state it asked for, whatever the desktop made of the request, is a
+// control that can be trusted when it says the window is pinned.
 
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -60,19 +64,96 @@ export function scheduleWindowSave(): void {
 }
 
 export async function setAlwaysOnTop(value: boolean): Promise<void> {
+  const previous = alwaysOnTop;
   try {
     await currentWindow.setAlwaysOnTop(value);
-    alwaysOnTop = value;
+    setTopmost(value);
     scheduleWindowSave();
   } catch (error) {
-    alwaysOnTop = !value;
+    // The window kept the state it was in, which is the one thing this module can say
+    // without asking the desktop: every request to change it came from the flag. So the
+    // flag goes back too, and the button reports the refusal rather than the wish.
+    setTopmost(previous);
     throw error;
   }
 }
 
+const topmostListeners = new Set<(value: boolean) => void>();
+
+// Both the app-bar button and the Settings checkbox answer for the same fact, and
+// `restoreWindowState` writes it at boot before either of them has drawn. So the flag is
+// announced wherever it changes rather than read by whoever is holding a click.
+function setTopmost(value: boolean): void {
+  if (alwaysOnTop === value) return;
+  alwaysOnTop = value;
+  for (const listener of Array.from(topmostListeners)) listener(value);
+}
+
+export function onAlwaysOnTopChange(listener: (value: boolean) => void): () => void {
+  topmostListeners.add(listener);
+  return () => topmostListeners.delete(listener);
+}
+
+let maximized = false;
+const maximizeListeners = new Set<(value: boolean) => void>();
+
+/** The last answer this module got, for a render that cannot wait. */
+export const isMaximized = (): boolean => maximized;
+
+/** Ask the window what it is. Every way into the maximised state but this module's own
+ * button — a double-click on the native title bar, `Alt+Space`, a desktop shortcut, a
+ * refused maximise — is a change this file never saw, so the label is read rather than
+ * remembered. */
+export async function syncMaximized(): Promise<boolean> {
+  try {
+    setMaximized(await currentWindow.isMaximized());
+  } catch {
+    // A window that will not say leaves the button offering the action it offered
+    // before. The state is what is at risk here, not the ability to act.
+  }
+  return maximized;
+}
+
+function setMaximized(value: boolean): void {
+  if (maximized === value) return;
+  maximized = value;
+  for (const listener of Array.from(maximizeListeners)) listener(value);
+}
+
+export function onMaximizedChange(listener: (value: boolean) => void): () => void {
+  maximizeListeners.add(listener);
+  return () => maximizeListeners.delete(listener);
+}
+
+export async function minimizeWindow(): Promise<void> {
+  await currentWindow.minimize();
+}
+
+/** The one control that means two opposite things, so it reads the window's state at
+ * the moment it is asked rather than trusting the last label it was drawn with. */
+export async function toggleMaximized(): Promise<void> {
+  if (await syncMaximized()) await currentWindow.unmaximize();
+  else await currentWindow.maximize();
+  await syncMaximized();
+  scheduleWindowSave();
+}
+
+/** The request, not the destruction: `close` is what the hook at the bottom of this file
+ * answers, and that hook is the only path that lets every component go, writes the
+ * geometry down and then destroys the window. A button that called `destroy()` itself
+ * would close the window and lose the size it was asked to keep. */
+export async function closeWindow(): Promise<void> {
+  await currentWindow.close();
+}
+
 export async function restoreWindowState(): Promise<boolean> {
   const settings = await invoke<WindowSettings | null>("restore_window_settings");
-  alwaysOnTop = settings?.alwaysOnTop ?? false;
+  // A run with nothing stored is a person who has never chosen, and the panel's whole
+  // use is being visible while something else has the focus — so the unchosen default
+  // is pinned. An explicit `false` in a stored record is the choice they did make, and
+  // is honoured by the same sentence. The window agrees because `tauri.conf.json`
+  // creates it pinned and the restore overwrites that with whatever it stored.
+  setTopmost(settings?.alwaysOnTop ?? true);
   lastNormalBounds = settings
     ? {
         width: settings.width,
@@ -83,6 +164,7 @@ export async function restoreWindowState(): Promise<boolean> {
         y: settings.y,
       }
     : undefined;
+  await syncMaximized();
   return alwaysOnTop;
 }
 
@@ -129,6 +211,9 @@ export async function installWindowHooks(hooks: WindowHooks): Promise<void> {
   try {
     await currentWindow.onResized(({ payload }) => {
       hooks.onGeometryChange(`Resized to ${payload.width} × ${payload.height} physical pixels`);
+      // A resize is the only notice this module gets that the maximised state moved —
+      // the desktop does not announce a title-bar double-click.
+      void syncMaximized();
       scheduleWindowSave();
     });
     await currentWindow.onMoved(() => scheduleWindowSave());

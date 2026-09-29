@@ -34,7 +34,7 @@ import { createPreviewController } from "./dialogs/preview";
 import { createToastLayer } from "./dialogs/toast";
 import { startAppearance, currentFontPx, applyFontPx, FONT_DEFAULT } from "./font";
 import { disableTheme, startTheme, verifyThemeLaunch } from "./theme";
-import { installWindowHooks, restoreWindowState, setAlwaysOnTop } from "./window";
+import { closeWindow, installWindowHooks, minimizeWindow, restoreWindowState, setAlwaysOnTop, toggleMaximized } from "./window";
 import { createChangesView } from "./views/changes";
 import { createHistoryView } from "./views/history";
 import { createBranchesView } from "./views/branches";
@@ -172,8 +172,21 @@ shell = createShell({
   commit: () => shell.focusCommit(),
   cancelWrite: () => void invoke("cancel_write"),
   cancelTool: () => void invoke("cancel_exttool"),
+  // The four window actions are awaited and a refusal is shown as the failure it is;
+  // `window.ts` announces whatever the desktop actually agreed to, and the shell repaints
+  // from that announcement. So a pin the desktop refused is reported as a refusal and
+  // reads as unpinned, in the same breath.
   setOnTop: (value) => {
     void setAlwaysOnTop(value).catch(showError);
+  },
+  minimize: () => {
+    void minimizeWindow().catch(showError);
+  },
+  toggleMaximize: () => {
+    void toggleMaximized().catch(showError);
+  },
+  closeWindow: () => {
+    void closeWindow().catch(showError);
   },
 });
 

@@ -63,6 +63,29 @@ is the record of what is not verified.
   no theme, disables the fragment and says so. A start that only asked to skip themes —
   the key press above — draws nothing and changes nothing, so the theme is still there on
   the start after it.
+- The app bar's top-right corner holds the window's four actions as one group: keep it
+  above other windows, minimise, maximise or restore, close. The native title bar stays,
+  so these are a second way onto the same four things rather than a replacement for it,
+  and there is deliberately no draggable strip in the page — a second handler for the
+  double-click that maximises would undo the decoration's own. Every one is awaited: the
+  button shows the desktop's answer, not the ask, so a request that is refused puts the
+  control back where it was and says so out loud. Maximise reads the window's actual
+  state before acting and repaints when it changes by any route, including the title bar
+  being double-clicked, and the app-bar pin and the Settings row for the same setting are
+  two readings of one answer, so neither can be the stale one. Close is a request to the
+  window, not a second way to destroy it: it runs the same path the title bar's close
+  runs, which writes the window's size and the panel's choices down before the window is
+  gone, so there is exactly one place that can lose them.
+- The first start of a fresh install is above other windows, because a monitoring panel
+  that a maximised editor covers is not monitoring anything. It is an ordinary setting
+  after that: whatever a person leaves it at is what the next start does, and a stored
+  choice to not float is honoured rather than overruled by the default.
+- At the narrowest width the app bar drops the three repository buttons — open, refresh,
+  close session — instead of letting them squeeze the window cluster. The More menu
+  repeats all three by the same words and two of them have a shortcut, so the affordance
+  survives the loss of one of its copies. That is the same trade the Commit button
+  already makes, and it is made in the other direction on purpose: a window button that
+  loses its box loses the only place the panel itself offers to put the window away.
 
 ### Changed
 

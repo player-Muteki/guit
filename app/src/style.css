@@ -89,6 +89,23 @@ body {
    icon inside an icon -- or the rule matches nothing and the blobs come back. */
 svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
+/* --- window controls --- */
+/* The four actions a title bar has, as one group at the corner: pin, minimise, maximise
+   or restore, close. They are drawn tighter than the bar's own gap because they are read
+   together — a screen reader announces them as one "Window" group — and separated by a
+   rule so a repository button is never mistaken for one of them. `flex: 0 0 auto` is the
+   part that matters at the narrow width: the cluster may not be squeezed, because a
+   button that loses its box loses the way out of a bad theme too. */
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  flex: 0 0 auto;
+  padding-inline-start: 0.4rem;
+  margin-inline-start: 0.1rem;
+  border-left: 1px solid var(--line);
+}
+
 /* --- buttons --- */
 .btn {
   padding: 0.25rem 0.7rem;
@@ -162,10 +179,11 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .shell-body { display: flex; flex: 1 1 auto; min-height: 0; }
 
 /* --- tabs --- */
-/* The two pages sit at the right end of the app bar, so everything under the
-   app bar belongs to whichever one is selected. A tab keeps its label while
-   the window has room for a word and falls back to its icon when it does not;
-   the accessible name is on the button either way. */
+/* The two pages sit at the right end of the app bar, just left of the window
+   cluster, so everything under the app bar belongs to whichever one is
+   selected. A tab keeps its label while the window has room for a word and
+   falls back to its icon when it does not; the accessible name is on the button
+   either way. */
 .tabs {
   display: flex;
   align-items: center;
@@ -670,6 +688,13 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 @media (max-width: 480px) {
   .appbar-repo, .view-subtitle { display: none; }
   .appbar-wordmark, .appbar-commit { display: none; }
+  /* The window cluster is four more buttons on a bar that was already at its width, and
+     it cannot be the thing that gets pushed past the corner: it is the only place the
+     panel's own promises about minimising and closing are kept. So the three session
+     icons go, and they go somewhere that already holds them — the More menu repeats all
+     three by the same words, and two of them have a shortcut. The affordance survives,
+     not both copies of it, which is the same trade the Commit button already makes. */
+  .appbar-session { display: none; }
   .appbar { gap: 0.3rem; }
   .appbar .icon-btn { width: 1.55rem; height: 1.55rem; }
   /* `flex: 0 1 auto` with a floor: the chip never collapses below a readable
@@ -789,4 +814,3 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   min-width: 0;
   overflow-wrap: anywhere;
 }
-

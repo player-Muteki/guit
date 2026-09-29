@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Window geometry, always-on-top and the open/save dialogs the settings view offers",
+  "description": "The four window actions the app bar offers, window geometry persistence, and the open/save dialogs the settings view offers",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-set-always-on-top", "core:window:allow-inner-size", "core:window:allow-outer-position", "core:window:allow-set-size", "core:window:allow-maximize", "core:window:allow-unmaximize", "core:window:allow-destroy", "dialog:allow-open", "dialog:allow-save"]
+  "permissions": ["core:default", "core:window:allow-set-always-on-top", "core:window:allow-inner-size", "core:window:allow-outer-position", "core:window:allow-set-size", "core:window:allow-maximize", "core:window:allow-unmaximize", "core:window:allow-minimize", "core:window:allow-close", "core:window:allow-destroy", "dialog:allow-open", "dialog:allow-save"]
 }

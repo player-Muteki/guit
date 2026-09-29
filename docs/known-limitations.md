@@ -193,6 +193,35 @@ These need a human and a second machine, and are honestly outstanding:
   and another refuses is a difference nobody has measured — and a fragment stored from
   this engine is re-reviewed, not replayed, on every start.
 
+## The window controls
+
+- The four app-bar actions are a second way onto the native title bar's own four, not a
+  replacement for them: the decoration stays on, and the page has no drag region. What
+  has been run is the decoration this host gives — GTK 3 through XWayland. A window
+  manager that draws no decoration at all is the case where these buttons are the only
+  way to minimise or close guit, and it has never been measured here. Windows and macOS
+  have never been run at all (see **Platform coverage**).
+- The buttons report the desktop's *answer*. What is not claimed is that the answer is
+  the visible result: a window manager that ignores an always-on-top request, or a
+  compositor that re-stacks the window the moment it is placed, leaves the control
+  agreeing with what the window was told. Nothing re-reads the stack.
+- Their reachability at 340 px is asserted by accessible name through the narrow-window
+  harness, which is a claim about the accessibility tree, not about paint. Whether a
+  pointer actually lands on a nine-millimetre box is a rendering fact that harness
+  cannot see, and hit-testing has not been measured on a touchscreen.
+- The cluster is **not** one of the controls a custom theme is checked against after it
+  draws (see **The custom theme**). A fragment that hides only the window cluster is
+  therefore not caught, and is not a failure the panel reports: the way out of a theme
+  runs through the tabs and the Settings rows, both of which are watched, and the key
+  press reaches the window itself.
+- Closing the window writes the geometry and the panel's choices down before the window
+  is gone. What it does not do is reap a Git process that was still running: an
+  operation in flight at exit leaves its process group behind. A *cancelled* operation
+  kills the group; nothing kills it on the way out of the application.
+- Multi-display clamping of a restored window is unverified (see **Manual gates still
+  open**): the verification host is single-display, so the round trip through a scale
+  change or a second monitor is a claim the stored fields support but no run has shown.
+
 ## Objects that are not here
 
 A partial clone or a repository whose objects were pruned may be missing objects

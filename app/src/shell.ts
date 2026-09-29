@@ -1,8 +1,10 @@
-// The application shell: app bar (repo, branch chip, commit, pin), the
-// two-page tab strip, the overlay the branch picker borrows, and
+// The application shell: app bar (repo, branch chip, commit, the window cluster),
+// the two-page tab strip, the overlay the branch picker borrows, and
 // the status bar (running operation, watch mode, interface zoom). The shell
 // owns no Git semantics — every action is injected by `main.ts` so the views
-// stay the only place that talks to the backend.
+// stay the only place that talks to the backend. The window buttons are injected
+// for the same reason: this file draws what the desktop reports back, and never
+// asks the window for anything itself.
 
 import { el, icon } from "./dom";
 import { onDispose } from "./lifecycle";
@@ -22,7 +24,7 @@ import {
 import type { BranchView } from "./types";
 import { railHint, VIEW_ICONS, VIEW_TITLES } from "./railModel";
 import { VIEW_HINTS } from "./viewHints";
-import { isAlwaysOnTop, setAlwaysOnTop } from "./window";
+import { isAlwaysOnTop, isMaximized, onAlwaysOnTopChange, onMaximizedChange, setAlwaysOnTop } from "./window";
 
 export interface ViewDescriptor {
   id: ViewId;
@@ -37,6 +39,9 @@ export interface ShellActions {
   cancelWrite(): void;
   cancelTool(): void;
   setOnTop(value: boolean): void;
+  minimize(): void;
+  toggleMaximize(): void;
+  closeWindow(): void;
 }
 
 export interface Shell {
@@ -103,20 +108,23 @@ export function createShell(actions: ShellActions): Shell {
     type: "button",
     "aria-label": "Switch branch",
   });
+  // The three session buttons carry `appbar-session` because the More menu repeats them
+  // by the same words, and at the minimum window one of the two copies has to go: see
+  // `.window-controls` in the stylesheet.
   const openButton = el("button", {
-    class: "icon-btn",
+    class: "icon-btn appbar-session",
     type: "button",
     "aria-label": "Open repository",
     title: "Open repository… (Ctrl+O)",
   }, [icon("folder")]);
   const refreshButton = el("button", {
-    class: "icon-btn",
+    class: "icon-btn appbar-session",
     type: "button",
     "aria-label": "Refresh status",
     title: "Refresh status (Ctrl+R)",
   }, [icon("refresh")]);
   const closeButton = el("button", {
-    class: "icon-btn",
+    class: "icon-btn appbar-session",
     type: "button",
     "aria-label": "Close session",
     title: "Close the current session",
@@ -137,6 +145,56 @@ export function createShell(actions: ShellActions): Shell {
     type: "button",
     "aria-label": "More repository actions",
   }, [icon("more")]);
+
+  // --- window controls ---
+  // The four actions the panel promises on both pages, in the order a title bar puts
+  // them: pin, minimise, maximise or restore, close. They belong to the shell rather
+  // than to a page, which is what makes them the same four on Settings as on Main.
+  //
+  // The native title bar is still there, so these are a second way onto the window's
+  // own actions, and the shell only forwards the request: `main.ts` waits for the
+  // desktop's answer, and what is painted below is the state the window reported, never
+  // the state that was asked for. A pin the desktop refused therefore reads as unpinned.
+  const windowControls = el("div", {
+    class: "window-controls",
+    role: "group",
+    "aria-label": "Window",
+  });
+  const minimizeButton = el("button", {
+    class: "icon-btn",
+    type: "button",
+    "aria-label": "Minimise",
+    title: "Minimise",
+  }, [icon("minimize")]);
+  const maximizeButton = el("button", { class: "icon-btn", type: "button" }, [icon("maximize")]);
+  const quitButton = el("button", {
+    class: "icon-btn",
+    type: "button",
+    "aria-label": "Close guit",
+    title: "Close guit — the window's size and the panel's choices are written down first",
+  }, [icon("close")]);
+  windowControls.append(pinButton, minimizeButton, maximizeButton, quitButton);
+
+  // The maximise button is the one control here whose meaning depends on the state it
+  // is in, and the state moves without this shell being told: a double-click on the
+  // native title bar, `Alt+Space`, a refused maximise. So the label follows a listener
+  // on the window's answer rather than the last thing the button did.
+  //
+  // The two names are the app-bar's own: Settings carries a button called "Restore window
+  // size" that belongs to the compact-window test and means something else entirely, and
+  // a harness that finds a control by name cannot tell two identical names apart.
+  const paintMaximize = (value: boolean): void => {
+    maximizeButton.setAttribute("aria-label", value ? "Restore window" : "Maximise window");
+    maximizeButton.title = value ? "Restore" : "Maximise";
+    maximizeButton.replaceChildren(icon(value ? "restore" : "maximize"));
+  };
+  paintMaximize(isMaximized());
+  onDispose(onMaximizedChange(paintMaximize));
+  // The pin is the other control whose look is a fact about the window rather than about
+  // the last click: the stored preference is applied at boot by `restoreWindowState`, and
+  // a refused change is rolled back by `window.ts`. Both say so here, and `render` reads
+  // the answer into the button.
+  onDispose(onAlwaysOnTopChange(() => render()));
   const moreMenu = el("div", { class: "menu", role: "menu", hidden: true });
   const moreItems: Array<{ label: string; run: () => void }> = [
     { label: "Open repository…", run: actions.openRepository },
@@ -161,7 +219,6 @@ export function createShell(actions: ShellActions): Shell {
     closeButton,
     el("div", { class: "spacer" }),
     commitButton,
-    pinButton,
     moreButton,
     moreMenu,
   ]);
@@ -211,7 +268,19 @@ export function createShell(actions: ShellActions): Shell {
   refreshButton.addEventListener("click", () => actions.refresh());
   closeButton.addEventListener("click", () => actions.closeRepository());
   commitButton.addEventListener("click", () => actions.commit());
-  pinButton.addEventListener("click", () => actions.setOnTop(!isAlwaysOnTop()));
+  // The app-bar menu is anchored to the bar's right edge, which is where this cluster
+  // now sits, and a window action is not a way of answering the repository menu. So each
+  // of the four takes the menu down with it rather than leaving it open over a window
+  // that has just minimised. `closeMenus` returns focus to the button that opened the
+  // menu, which is the exit a keyboard user already gets from Escape.
+  const windowAction = (run: () => void): void => {
+    closeMenus();
+    run();
+  };
+  pinButton.addEventListener("click", () => windowAction(() => actions.setOnTop(!isAlwaysOnTop())));
+  minimizeButton.addEventListener("click", () => windowAction(() => actions.minimize()));
+  maximizeButton.addEventListener("click", () => windowAction(() => actions.toggleMaximize()));
+  quitButton.addEventListener("click", () => windowAction(() => actions.closeWindow()));
   branchChip.addEventListener("click", () => {
     setActiveView("main");
     openOverlay();
@@ -250,6 +319,12 @@ export function createShell(actions: ShellActions): Shell {
     tabs.append(item);
   }
   appbar.append(tabs);
+  // The window cluster is the last thing on the bar, so the four actions sit against the
+  // top-right corner in the order a title bar puts them, on both pages. The native title
+  // bar stays, which is also why there is no drag region here: moving the window and
+  // double-clicking to maximise are already the decoration's job, and a second handler
+  // for the same gesture in the page would undo the first.
+  appbar.append(windowControls);
 
   // --- overlay ---
   // The one layer that covers the stage: the branch picker opens here. It is

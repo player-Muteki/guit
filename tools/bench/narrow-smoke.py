@@ -7,14 +7,19 @@ are still reachable at that size, then that the restore gives the window its own
 box back. Overflow is layout-check.py's job; this suite is about reachability at
 the minimum size and about the resize round-trip.
 
-Three channels, and the assertion has to use the one that can see its subject:
+Four channels, and the assertion has to use the one that can see its subject:
 - `showing_names()` carries *controls* — tab items, buttons, inputs. A plain
   label span has no accessible name at all, so Settings' "Interface zoom" text
   is invisible here and can never be a landmark;
 - `A.dump()` carries that label text, which is where page landmarks come from;
 - the document's extents carry geometry, in physical pixels while the app sizes
   are logical ones, so the round-trip is compared against its own wide box
-  rather than against a number.
+  rather than against a number;
+- and `SHOWING` carries *this scroll position*, which is not reachability. A page
+  taller than the minimum window legitimately holds controls that are not showing,
+  so a row inside a scrolling page is asserted through `reach()` — focus it, and it
+  must come on screen — while the app bar and status bar, which are pinned, are
+  asserted by name directly.
 
 Usage: /usr/bin/python3 narrow-smoke.py <release-binary> <fixture-repo> <work-dir>
 Needs python3-gi and a live AT-SPI bus; the release binary comes from
@@ -34,11 +39,17 @@ import atspi_landmark as A  # noqa: E402
 # the word, so the same two names have to be present at both sizes.
 TABS = {"Main", "Settings"}
 APPBAR = {"Open repository", "Refresh status", "Close session", "Commit",
-          "Always on top", "More repository actions"}
+          "Always on top", "More repository actions",
+          "Minimise", "Maximise window", "Close guit"}
 # At the minimum width the app bar drops its Commit button, because the changes
 # area already carries a commit box in the same place. The affordance has to
 # survive, not both copies of it, so it is checked where it lives instead.
-APPBAR_NARROW = APPBAR - {"Commit"}
+# The three session icons go the same way at this width: the More menu repeats
+# all three by the same words, and two of them have a shortcut. What may not go
+# is the window cluster — the outline promises those four actions at the corner
+# of every window this panel can be shrunk to, and no other control on the bar
+# carries them.
+APPBAR_NARROW = APPBAR - {"Commit", "Open repository", "Refresh status", "Close session"}
 ZOOM = {"Zoom in", "Zoom out", "Reset zoom"}
 
 
@@ -61,6 +72,34 @@ def showing_names():
             if name:
                 names.add(name)
     return names
+
+
+def reach(name):
+    """Whether the control named can actually be got to, by focus if need be.
+
+    SHOWING is a statement about the current scroll position, not about the
+    control: a Settings page taller than a 400px window is allowed to keep a row
+    below the fold, and a row above it is off screen too. So an off-screen node
+    here is asked for focus — the engine scrolls whatever takes focus into view,
+    which is precisely what a keyboard user gets — and the state is read after.
+    Two failures stay failures: a name that is not in the tree at all, and a node
+    that takes focus and still does not show.
+
+    This is only ever used for page content. The app bar and the status bar are
+    pinned, so for them SHOWING is honest and the ordinary name-set applies.
+    """
+    node = A.find_button(name=name)
+    if node is None:
+        return "absent from the tree"
+    states = A._once(lambda: [s.value_name for s in node.get_state_set().get_states()], default=[]) or []
+    if "ATSPI_STATE_SHOWING" in states:
+        return "on screen"
+    if "ATSPI_STATE_FOCUSABLE" not in states:
+        return "off screen and cannot take focus"
+    A._once(lambda: node.grab_focus(), default=False)
+    time.sleep(0.8)
+    after = A._once(lambda: [s.value_name for s in node.get_state_set().get_states()], default=[]) or []
+    return "reached by focus" if "ATSPI_STATE_SHOWING" in after else "took focus and stayed off screen"
 
 
 def document_rect():
@@ -145,8 +184,14 @@ def main():
         # Interface zoom lives in Settings, not in a permanent status-bar
         # cluster. Same rule as the Commit button above: the affordance has to
         # survive, not both copies of it, so it is checked where it lives.
-        report.check("the interface zoom controls survive 340x400", ZOOM <= narrow,
-                     ",".join(sorted(ZOOM - narrow)))
+        # Checked for *reach*, not for visibility: three sections were added to
+        # this page and it is now taller than the minimum window, so the row is
+        # legitimately off screen and a keyboard user scrolls to it. The claim
+        # that matters is that focusing it puts it on the screen.
+        for control in sorted(ZOOM):
+            outcome = reach(control)
+            report.check(f"{control} is reachable at 340x400",
+                         outcome in ("on screen", "reached by focus"), outcome)
         A.click(A.find_button(name="Restore window size"))
         restored = document_rect()
         # Still on Settings, so the landmark is Settings' own content. Read it

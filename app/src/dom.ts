@@ -149,6 +149,13 @@ const ICONS = {
   // A drop of ink: the panel's own word for a colour choice is a colour, and the theme
   // section needs a mark that is not the gear already heading the page above it.
   droplet: ["M8 2.5 12.1 8.5a4.6 4.6 0 1 1-8.2 0z"],
+  // The three window marks, drawn the way a title bar draws them: a line low in the
+  // box, the box itself, and the box with the one behind it showing. They sit beside
+  // the close cross the session control already used, so they are outlines only and
+  // never a filled shape.
+  minimize: ["M4 11.5h8"],
+  maximize: ["M4 4h8v8H4z"],
+  restore: ["M6 3.5h6.5V10H6z", "M3.5 6v6.5H10"],
 } as const;
 
 export type IconName = keyof typeof ICONS;
