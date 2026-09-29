@@ -401,6 +401,142 @@ export function refsIncluding(
   return { names: found.slice(0, limit), truncated: found.length > limit };
 }
 
+// --- the bubble that answers a hovered or focused row ------------------------------
+
+// A rectangle in one coordinate space, in pixels. The view reads all three of
+// the boxes below off live elements and puts them in the space of the element
+// the bubble is drawn into, so the numbers here are only ever comparable
+// because they arrive from one place.
+export interface Rect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+// How far a bubble keeps from the edge of the box it is confined to, in rem —
+// the same reason the row heights are rem: a fixed pixel inset is a margin
+// that does not grow with the interface, so at a large zoom the bubble is
+// drawn flush against an edge it was supposed to step back from.
+export const BUBBLE_INSET_REM = 0.375;
+
+export function bubbleInsetPx(baseFontPx: number): number {
+  return baseFontPx * BUBBLE_INSET_REM;
+}
+
+export interface BubbleSize {
+  width: number;
+  height: number;
+}
+
+export interface BubblePlacement extends BubbleSize {
+  left: number;
+  top: number;
+  // True when the bubble landed above its row because the room below ran out.
+  above: boolean;
+  // True when the bubble is drawn over its own row. Only a box with more
+  // height than the room on either side can do that, so it names the one case
+  // where the bubble hides the thing it came from rather than pointing at it.
+  overlaps: boolean;
+}
+
+/// Where a bubble of the given size goes for the given row, inside the given
+/// pane. `null` says there is nothing to place on: either box is empty, which
+/// is what a hidden page measures as, so a bubble for a row that is not drawn
+/// is refused here rather than drawn at the origin.
+///
+/// The size is capped to the pane first, on both axes, because every later
+/// rule is simpler once the box is known to fit *somewhere* in the pane: the
+/// vertical choice then has a name for each of its three outcomes instead of
+/// four. The bubble's own stylesheet caps it too, at a width a reader can
+/// scan; this cap is the one that keeps it on screen at 340 CSS px.
+///
+/// The box is left flush under the row rather than offset by a gap. That is
+/// not a lapse in spacing: the pointer has to be able to travel from the row
+/// into the bubble without crossing a third region, because the bubble closes
+/// when the pointer is on nothing else — a gap of even a few pixels makes the
+/// one thing the bubble is for (selecting a 40-character id) impossible.
+export function placeBubble(
+  anchor: Rect,
+  pane: Rect,
+  wanted: BubbleSize,
+  inset: number,
+): BubblePlacement | null {
+  if (anchor.width <= 0 || anchor.height <= 0) return null;
+  if (pane.width <= 0 || pane.height <= 0) return null;
+  const edge = Math.max(0, inset);
+  const innerWidth = Math.max(0, pane.width - 2 * edge);
+  const innerHeight = Math.max(0, pane.height - 2 * edge);
+  const width = Math.min(Math.max(0, wanted.width), innerWidth);
+  const height = Math.min(Math.max(0, wanted.height), innerHeight);
+
+  // Room is measured from the row's own edges, so "below" starts where the
+  // row stops and "above" ends where the row starts.
+  const belowTop = anchor.top + anchor.height;
+  const roomBelow = Math.max(0, pane.top + edge + innerHeight - belowTop);
+  const roomAbove = Math.max(0, anchor.top - (pane.top + edge));
+  let top: number;
+  let above: boolean;
+  if (roomBelow >= height) {
+    top = belowTop;
+    above = false;
+  } else if (roomAbove >= height) {
+    top = anchor.top - height;
+    above = true;
+  } else if (roomBelow >= roomAbove) {
+    // Neither side holds the whole box. Sitting against the bottom of the
+    // pane keeps the row's own text reachable from above the bubble, which is
+    // where the pointer came from; the row is covered, and `overlaps` says so.
+    top = pane.top + edge + innerHeight - height;
+    above = false;
+  } else {
+    top = anchor.top - height;
+    above = true;
+  }
+  const minTop = pane.top + edge;
+  const maxTop = minTop + innerHeight - height;
+  top = Math.min(Math.max(top, minTop), maxTop);
+  const minLeft = pane.left + edge;
+  const maxLeft = minLeft + innerWidth - width;
+  const left = Math.min(Math.max(anchor.left, minLeft), maxLeft);
+  return {
+    left,
+    top,
+    width,
+    height,
+    above,
+    overlaps: top < anchor.top + anchor.height && top + height > anchor.top,
+  };
+}
+
+/// The commit the anchored row still names, or `null` when it names another or
+/// has gone. A bubble remembers the index it opened at and the commit it
+/// opened about: rows are keyed by index and replaced wholesale on every
+/// scroll, a page or a filter, so the number says where to look and only the
+/// id says whether what is there is still the thing being described. Returning
+/// `null` is the whole answer — the bubble closes rather than following the
+/// screen position onto a different commit, which would read as one commit's
+/// message wearing another one's id.
+export function anchorRow(
+  commits: readonly CommitView[],
+  index: number,
+  oid: string,
+): CommitView | null {
+  const found = commits[index];
+  return found !== undefined && found.oid === oid ? found : null;
+}
+
+/// What the line about containment says, in the three shapes that answer means.
+/// A names read Git refused is not a commit nothing names, and drawing the
+/// first as the second would spend a failure looking like a fact about the
+/// history. The wording is the one the graph's own hover line carried, so the
+/// answer a reader got before is the answer they get now.
+export function includedInLine(names: NameIndex, summary: RefSummary): string {
+  if (names.unknown) return "the names could not be read";
+  if (summary.names.length === 0) return "nothing loaded";
+  return summary.names.join(", ") + (summary.truncated ? " …" : "");
+}
+
 // --- finding a commit in what is loaded ---
 
 // What the find box matches against, and how. A plain string is matched as a

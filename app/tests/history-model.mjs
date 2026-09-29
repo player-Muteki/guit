@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  anchorRow,
   buildHistoryRows,
   buildRefMap,
+  bubbleInsetPx,
   commitMatches,
   filterCommits,
   findError,
@@ -16,12 +18,15 @@ import {
   graphWidth,
   historyPageStart,
   indexNames,
+  includedInLine,
   matchPosition,
   namesAt,
+  placeBubble,
   refsIncluding,
   rowGeometry,
   stepMatch,
   unknownNames,
+  BUBBLE_INSET_REM,
   GRAPH_LANE_REM,
   GRAPH_NODE_REM,
   GRAPH_GUTTER_MAX_REM,
@@ -765,4 +770,122 @@ test("stepping through the matches wraps at both ends", () => {
   assert.equal(stepMatch(commits, find("absent"), noNames, null, 1), null, "no matches, no step");
   assert.deepEqual(matchPosition(commits, query, noNames, commits[2].oid), { index: 1, total: 2 });
   assert.deepEqual(matchPosition(commits, query, noNames, null), { index: -1, total: 2 });
+});
+
+// --- the bubble over a hovered or focused row ---
+
+// The pane is the list at the minimum window (340 CSS px wide) and the font is
+// the interface default, so the inset the calls below pass is the one the model
+// computes rather than a number the test picked.
+const pane = { left: 0, top: 0, width: 340, height: 400 };
+const inset = bubbleInsetPx(16);
+const row = (top) => ({ left: 8, top, width: 324, height: 24 });
+
+test("a bubble lands under its row, flush against it", () => {
+  const placed = placeBubble(row(100), pane, { width: 200, height: 60 }, inset);
+  assert.ok(placed !== null);
+  assert.equal(placed.left, 8, "the row's own left edge");
+  assert.equal(placed.top, 124, "the row's bottom edge, with no gap between them");
+  assert.equal(placed.above, false);
+  assert.equal(placed.overlaps, false);
+  assert.equal(placed.width, 200);
+  assert.equal(placed.height, 60);
+  // Flipping up has to be flush too. The pointer travels between the two boxes
+  // and the bubble closes when the pointer is on neither, so a gap of even a
+  // few pixels is a gap the reader falls through — the reason there is no gap
+  // parameter on the call above.
+  const flipped = placeBubble(row(380), pane, { width: 200, height: 60 }, inset);
+  assert.equal(flipped.above, true);
+  assert.equal(flipped.top + flipped.height, 380, "the box ends where the row starts");
+});
+
+test("a bubble takes the room the pane has, not more", () => {
+  const wide = placeBubble(row(100), pane, { width: 4000, height: 60 }, inset);
+  assert.equal(wide.width, pane.width - 2 * inset, "capped to the pane's inner box");
+  assert.equal(wide.left, inset, "and therefore pushed off the row's left edge to stay inside");
+  const tall = placeBubble(row(100), pane, { width: 200, height: 4000 }, inset);
+  assert.equal(tall.height, pane.height - 2 * inset);
+  assert.equal(tall.overlaps, true, "a box as tall as the pane covers the row it came from");
+});
+
+test("with room on neither side the bubble picks the larger and says it covers the row", () => {
+  // A 300px box in a 400px pane, over a row 150px down: 220px of room below,
+  // 144px above. Neither holds it, so it goes below — against the pane's
+  // bottom edge — and admits it is drawn over its own row instead of
+  // pretending otherwise.
+  const placed = placeBubble(row(150), pane, { width: 200, height: 300 }, inset);
+  assert.equal(placed.above, false);
+  assert.equal(placed.overlaps, true);
+  assert.equal(placed.top + placed.height, pane.height - inset, "flush with the pane's inner bottom");
+  // The mirror: the same box over a row with more room above it than below.
+  const up = placeBubble(row(200), pane, { width: 200, height: 300 }, inset);
+  assert.equal(up.above, true);
+  assert.equal(up.overlaps, true);
+  assert.equal(up.top, inset, "flush with the pane's inner top");
+});
+
+test("a bubble is inside its pane however its row sits", () => {
+  // The invariant the whole avoidance rule exists for, checked over rows from
+  // the top of the list to the bottom and boxes from short to taller than the
+  // pane, rather than over the handful of cases a reader would think to name.
+  for (const top of [0, 1, 24, 100, 250, 375, 376, 399]) {
+    for (const size of [[120, 40], [328, 200], [400, 460], [60, 8]]) {
+      const anchor = { left: 4, top, width: 332, height: 24 };
+      const placed = placeBubble(anchor, pane, { width: size[0], height: size[1] }, inset);
+      assert.ok(placed !== null, `a drawn row at ${top} places something`);
+      assert.ok(placed.left >= pane.left + inset - 1e-9, `left inside at ${top}/${size[0]}`);
+      assert.ok(placed.top >= pane.top + inset - 1e-9, `top inside at ${top}/${size[1]}`);
+      assert.ok(placed.left + placed.width <= pane.left + pane.width - inset + 1e-9);
+      assert.ok(placed.top + placed.height <= pane.top + pane.height - inset + 1e-9);
+      assert.ok(placed.width <= pane.width - 2 * inset + 1e-9);
+      assert.ok(placed.height <= pane.height - 2 * inset + 1e-9);
+    }
+  }
+});
+
+test("a row that is not drawn has no bubble", () => {
+  // Hiding the page is what makes these boxes empty: an element in a hidden
+  // subtree measures zero on both axes. A bubble placed against those numbers
+  // would land at the origin of the view and describe a commit nobody can see,
+  // so the answer is that there is nothing to place on.
+  assert.equal(placeBubble({ left: 0, top: 0, width: 0, height: 0 }, pane, { width: 200, height: 60 }, inset), null);
+  assert.equal(placeBubble(row(100), { left: 0, top: 0, width: 340, height: 0 }, { width: 200, height: 60 }, inset), null);
+  assert.equal(placeBubble(row(100), pane, { width: 0, height: 0 }, inset).width, 0, "an empty box is still a placeable one");
+});
+
+test("the anchored row is the bubble's only claim on a commit", () => {
+  const loaded = [commit(1), commit(2), commit(3)];
+  assert.equal(anchorRow(loaded, 1, loaded[1].oid), loaded[1], "the row still names it");
+  // Scrolling, a new page and a filter all rebuild rows by index. The number
+  // says where to look; only the id says whether what is there is still the
+  // thing being described — and if it is not, the bubble closes rather than
+  // following the position onto a different commit.
+  assert.equal(anchorRow(loaded, 1, loaded[2].oid), null, "the row moved out from under it");
+  // A list rebuilt around the same commit — a refresh handing the view a new
+  // object for the id it is already describing — is still that commit.
+  const rebuilt = anchorRow([commit(9), commit(2), commit(3)], 1, loaded[1].oid);
+  assert.equal(rebuilt?.oid, loaded[1].oid, "an id is worth more than a slot");
+  assert.equal(anchorRow(loaded, 3, loaded[2].oid), null, "past the end");
+  assert.equal(anchorRow(loaded, -1, loaded[0].oid), null, "before the start");
+  assert.equal(anchorRow([], 0, loaded[0].oid), null, "a list that has gone");
+});
+
+test("the containment line tells a refused names read from a commit nothing names", () => {
+  const loaded = [commit(1), commit(2, { parents: [oid(1)] })];
+  const map = buildRefMap(loaded);
+  const names = listing({ branches: [["main", 2], ["side", 2]] });
+  const summary = refsIncluding(map, names, oid(1));
+  assert.equal(includedInLine(names, summary), "main, side");
+  assert.equal(includedInLine(names, refsIncluding(map, names, oid(2))), "main, side");
+  // Nothing loaded contains it — a fact about this history, and drawn as one.
+  assert.equal(includedInLine(names, { names: [], truncated: false }), "nothing loaded");
+  // Git refused the names read. That is not "nothing loaded": the same empty
+  // list drawn as the second would turn a failure into a claim about the
+  // repository, which is why the line asks the index rather than the summary.
+  assert.equal(includedInLine(unknownNames(), { names: [], truncated: false }), "the names could not be read");
+  assert.equal(includedInLine(unknownNames(), summary), "the names could not be read");
+  // The cap is on the list, not on the search, so more names says so.
+  const many = listing({ branches: Array.from({ length: 12 }, (_, i) => [`b${i}`, 2]) });
+  assert.equal(includedInLine(many, refsIncluding(map, many, oid(1), 10)), "b0, b1, b2, b3, b4, b5, b6, b7, b8, b9 …");
+  assert.equal(includedInLine(many, refsIncluding(map, many, oid(1), 20)), Array.from({ length: 12 }, (_, i) => `b${i}`).join(", "));
 });
