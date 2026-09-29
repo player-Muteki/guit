@@ -46,8 +46,9 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 | 已跟踪列表 | `git ls-files --cached -z`（含工作树上已被删除、但索引中仍在的文件） | 删除项必须 stat 后跳过，不得当作候选 |
 | 未跟踪且非忽略 | `git ls-files --others --exclude-standard -z`；省略 `--exclude-standard` 时忽略规则完全不生效 | 必须带 `--exclude-standard` |
 | 普通未跟踪目录 | 默认**递归列出其中的文件**（`newdir/inside.txt`）；加 `--directory` 才折叠成 `newdir/` | 不得使用 `--directory`，否则 stat 到目录本身 |
-| 嵌套仓库（未注册的 `.git` 目录） | 只输出**目录项** `nested/`，不进入其中 | 目录项以结尾 `/` 标识（`-z` 输出同样保留斜杠），按边界排除 |
-| 已注册 submodule（索引中 mode `160000`） | `--others` 输出为空：`mods/` 内的游离文件不被列出，Git 自行停在边界 | 不需要额外的“排除 submodule”扫描；但仍要识别 mode 160000 项不是普通文件 |
+| 嵌套仓库（未注册，工作区里游离的 `.git` 目录） | `--others` 只输出**目录项** `nested/`，不进入其中（`-z` 输出同样保留斜杠） | 斜杠过滤足以排除这一类 |
+| 已提交为 gitlink 的嵌套仓库（索引 mode `160000`） | **`--cached -z` 输出的是不带斜杠的 `nested`**（`ls-files -s` 显示 `160000 <oid> 0<TAB>nested`）。只按斜杠过滤会把它留下，`symlink_metadata` 成功，于是**目录的 mtime 进入候选**；在目录下新建一个文件就会推进这个 mtime，计时被非文件事件污染 | 必须双重排除：`--cached --stage -z` 按 mode 丢弃 `160000`，并在 stat 后丢弃 `is_dir()` 的项。只写其中一条都不算满足本契约 |
+| submodule 目录内的游离文件 | `--others` 不进入：Git 自行停在边界 | 不需要额外的“排除 submodule 内容”扫描 |
 | 未提交的 `.gitignore` | **照样生效**（`ignored-dir/hidden.txt`、`just-ignored.txt` 被排除）；`.gitignore` 自身作为未跟踪文件出现在候选中 | 候选集合与忽略判定同源，一次枚举即可；无需先提交 |
 | `.git/info/exclude` | 生效（`from-info-exclude` 被排除） | 该文件在 `git_dir` 下，已被现有递归 watch 覆盖，不需要新增监听目标 |
 | `core.excludesFile` | 生效；值中的 `~` 由 Git 展开，而 `git config --get core.excludesFile` 返回的是**未展开的原文** `~/myignores` | 解析观察目标时必须自行展开 `~`，否则会监听一个不存在的路径 |
@@ -63,8 +64,17 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 | 同上仓库 | `status --porcelain=v2 -z --untracked-files=all`（10003 项） | 6.4 ms |
 | 10k 已跟踪文件仓库 | `ls-files --cached -z` | 2.8 ms |
 | 10k 文件逐个 stat（Python `os.walk` 参考实现） | — | 11.8 ms～16.8 ms |
+| 10001 项（10k 已提交 + 1 未跟踪）完整“`ls-files` 两次 + 逐项 `symlink_metadata`” | Rust 原型，同一主机 | 中位 18.1 ms，最差 22.0 ms（10 次重建） |
+| 同一索引上对最大项取 max（10k 项线性扫描） | Rust 原型 | 约 100 µs/次（“删掉最大项再重建”200 轮共 42.8 ms，含每轮两次扫描） |
+| 同一索引上“扫描后写入当前最大项”1000 次 | Rust 原型 | 224 µs/次——几乎全是线性扫描，不是插入 |
 
-结论：一次完整“枚举 + stat”在 10k 文件量级约 20–25 ms（Git 部分 <10 ms），
+最后一行是本阶段最容易被实现掉的约束：**更新路径必须是 O(1)**。把 `max` 缓存在索引上，
+一次 stat 得到新 mtime 后只比较“是否 ≥ 缓存的最大值”；只有当前最大项自己消失（被删、
+被移出版格集合、mode 变成 gitlink）才付一次线性扫描。若实现写成“每次事件重扫全表”，
+10k 文件仓库在持续写入下每事件多付约 100 µs 且随文件数线性增长，
+这条代价应当由一个“持续写入下不做全表扫描”的测试固定，而不是靠代码审查。
+
+结论：一次完整“枚举 + stat”在 10k 文件量级实测 18–22 ms（其中 Git 枚举部分 <10 ms），
 足以在后台线程做初始扫描，但**绝不能挂在每个计时 tick 上**（设计 §4.2 的“静止时不反复扫描”）。
 超过输出上限的枚举按现有 runner 规则失败关闭，不解析截断列表。
 
@@ -135,7 +145,11 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 设置 `GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=<夹具内文件>`、`GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`，
 分别构造：已跟踪后删除的文件、未提交的 `.gitignore`、`.git/info/exclude`、
 普通未跟踪目录、含自身 `.git` 的嵌套目录、`update-index --cacheinfo 160000,<oid>,mods`
-得到的 gitlink、`ln -s` 指向仓库外的链接，然后比对
-`ls-files --others --exclude-standard[-z]`、`ls-files --cached`、`check-ignore -v`、
+得到的 gitlink（本轮补测：直接 `git add -A` 提交一个嵌套仓库同样得到 mode `160000` 项，
+且 `--cached -z` 输出不带斜杠）、`ln -s` 指向仓库外的链接，然后比对
+`ls-files --others --exclude-standard[-z]`、`ls-files --cached`、`ls-files --cached --stage -s`、
+`check-ignore -v`、
 `config --show-origin --get core.excludesFile` 的输出。
-阶段 C 实现时应把这些断言固化为 `app/tests/` 下的夹具测试。
+mtime 索引的三项成本用一次性 Rust 原型测得（临时目录下 `cargo run`，随进程删除夹具，
+不是交付代码）：10 次“两次 `ls-files` + 逐项 `symlink_metadata`”重建、200 轮“取最大后删除”、
+1000 次“取最大后写回同一项”。阶段 C 实现时应把这些断言固化为 `app/tests/` 下的夹具测试。
