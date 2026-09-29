@@ -238,6 +238,52 @@ git 锁文件的 `Access(Close(Write))` 就在同一批事件里。C01 保留事
 Git 按字节序输出（`bad\xff` < `plain` < `quo"te` < `中文`），而最大 mtime 与输出顺序
 无关，所以取最大必须逐项比较，不得依赖“列表最后一项是最新的”这类巧合。
 
+### 2.5 Git 读不动目录时返回 rc=0 与空结果（实测），状态映射必须按 stderr 分
+
+`status` 与 `ls-files` 在遇到**无法打开的目录**时不改退出码，只在 stderr 上留话。
+夹具：`sub/` 里有一个已跟踪且已修改的文件加一个新文件，`ok/` 里有一个新文件，
+然后 `chmod 000 sub`。用 guit 实际下发的那条形
+（`status --porcelain=v2 -z --branch --untracked-files=all --ignored=no`，
+`repo.rs:362-371`）实测：
+
+| 读取 | 退出码 | stdout | stderr |
+| --- | --- | --- | --- |
+| shipped 的 `status` 形 | **0** | 只有 `# branch.oid`、`# branch.head` 与 `? ok/brand-new.txt`；`sub/deep.txt` 的修改与它旁边的新文件都不出现 | `sub/deep.txt: Permission denied`、`warning: could not open directory 'sub/': Permission denied` |
+| `ls-files --others --exclude-standard -z` | **0** | 只有 `ok/brand-new.txt` | 同一条 `could not open directory` |
+| `ls-files --cached -z` | 0 | 三项全在，含 `sub/deep.txt` | 空 |
+
+三条结论：
+
+1. **可分辨的状态只能靠 stderr。** 好消息是部分数据真的可用（`ok/` 照样报出），
+   坏消息是 `repo::status_output` 现在只 gate 退出码与截断，然后
+   `Ok(output.stdout)` 把 stderr 丢掉（`repo.rs:383-395`）。照这个 helper 原样复用，
+   活动索引会进入 `ready`，而面板对 `sub/` 的判断来自一次根本没读到的读取。
+   C02 因此需要 helper 交出 stderr（或一个“有警告”的标志）。这是 §1.1 之外第二处
+   “阶段 C 必须改既有后端形状”的地方，而且改的是**共享**路径：同一个洞今天就让
+   快照可以把读不动的仓库显示成“无变化”。修它属于 C02 的前提，不是可选清理。
+2. **`stat` 的错误码要分流，不能一律当作“文件不存在”。** §2 的“stat 失败即跳过”
+   是为已跟踪但被删掉的文件写的。实测 `sub/deep.txt` 的 `stat` 失败是
+   `PermissionDenied`（而 `sub` 目录本身的 `stat` 成功）：文件在，只是 mtime 看不见。
+   所以 `NotFound` → 不是候选；`PermissionDenied` 及其它 errno → 候选仍在但
+   mtime 未知，本次枚举进入 `partial`。把后者并进前者，正好在最像“索引完整”的时刻
+   少算最新的那个文件。
+3. **`empty` 与“读失败”是两件事，且 `empty` 可以合法到达。** 新建仓库、从未
+   `git add` 过时：`ls-files --cached` 返回 rc=0 且**空输出**，同时
+   `ls-files --others` 正常列出文件、`status` 正常报 `?? a.txt`。
+   “已跟踪集为空”因此不是错误信号，不得用它推断不可用。真正不可用的形状是 rc≠0：
+   `.git/objects` 被 `chmod 000` 后 `status` 与两个 `ls-files` 全部返回 **128**，
+   stderr 是 `fatal: not a git repository`——Git 认不出仓库，而不是读不出内容，
+   这一支现有代码已经走 `git_status_failed`，是正确的一侧。
+
+据此把状态映射钉成一张表，实现按它写，不按“stdout 是否为空”写：
+
+- `ready`：rc=0 且 stderr 空。
+- `partial`：rc=0 且 stderr 非空——可以给出已覆盖部分的 `latestModifiedAt`，
+  但必须显示为不完整；这种状态下不得说“无变化”。
+- `unavailable`：rc≠0，或输出触及 §2.2 上限被截断。
+- `empty`：属于 `ready` 且候选集确实为空（全新仓库就是这条的真实来源）。
+- `stale`：与单次枚举结果无关，由 §4.4 第 3 条的单调钟判定。
+
 ## 3. C03：增量更新的触发来源
 
 “哪些来源变化会改变候选集合”已由上表给出，落到监听上需要分别处理：
@@ -426,6 +472,11 @@ freshness；调整后只维护一个计时器**（设计 §4.2 末段）。这�
 - Windows 的路径大小写/分隔符与符号链接语义、`~` 不展开时的默认忽略路径均无实测；
   §2.4 的字节契约也只在 Linux/UTF-8 文件系统上测得，Windows 下名字如何到达
   `OsString`（WTF-8 形态）与 Git 的输出编码都还是未知。
+- `status_output` 要不要改成把 stderr 一并交出（§2.5 第 1 条）是一个共享路径的决定：
+  它同时影响快照与活动两条读。这是本轮新发现的“现有代码已经在说谎”的形状——
+  仓库里有读不动的目录时，快照会把“没读到”显示成“无变化”。本轮按约束没有改代码，
+  也没有把它写进 `docs/known-limitations.md`（那属于 shipped text，应与修复同批落地，
+  而不是先立一条无人实现的记录）。
 - 时钟跳变按 §4.4 第 3 条处理：不检测，靠“墙钟给显示、单调钟给陈旧判定”的归属分开。
   仍未实测的是 WebKitGTK 里 `performance.now()` 是否计入休眠，以及真实休眠后
   notify 事件队列的形状（队列溢出是否发 `Err`）。这两条都需要挂起主机或改时钟权限，
@@ -451,6 +502,11 @@ zsh 的 `$'bad\xff.txt'` 产生的非法 UTF-8 名，比对 `ls-files --cached` 
 lossy 之后的字节 `stat`（本轮用 Python 做的这一步：前者成功、后者
 `FileNotFoundError`）。非法字节名只在 Linux/UTF-8 文件系统上有意义，
 同一夹具在 Windows 上根本构造不出来。
+§2.5 的权限夹具：一个仓库里放 `sub/`（已跟踪文件改一次、再放一个新文件）与
+`ok/`（一个新文件），提交后 `chmod 000 sub`，分别跑 shipped 的 `status` 形、
+`ls-files --cached -z`、`ls-files --others --exclude-standard -z` 并**分开看
+stdout 与 stderr**（只看 stdout 会得出“干净”的错误结论）；
+再单独 `chmod 000 .git/objects` 看 128 那一支。清理时先 `chmod 755` 再删目录。
 mtime 索引的三项成本用一次性 Rust 原型测得（临时目录下 `cargo run`，随进程删除夹具，
 不是交付代码）：10 次“两次 `ls-files` + 逐项 `symlink_metadata`”重建、200 轮“取最大后删除”、
 1000 次“取最大后写回同一项”。阶段 C 实现时应把这些断言固化为 `app/tests/` 下的夹具测试。
