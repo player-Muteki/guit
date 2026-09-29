@@ -1346,6 +1346,42 @@ mod tests {
         assert_eq!(rounds.tracker.enumerations, 2);
     }
 
+    /// The other direction for the source outside the repository, and the one
+    /// that must not be read as a failure: it is deleted, so no outside rules
+    /// apply any more. The candidate set still has to be re-measured — a file the
+    /// old rules hid is now visible — but the answer is a whole one.
+    #[test]
+    fn a_deleted_external_ignore_source_is_not_a_failure() {
+        let (root, repo) = repository(&[("a.txt", OLD)]);
+        let global = root.path().join("global-ignore");
+        std::fs::write(&global, b"late.txt\n").unwrap();
+        repo::git_with(
+            &repo,
+            &[],
+            &["config", "core.excludesFile", &global.to_string_lossy()],
+        );
+        let late = repo.join("late.txt");
+        std::fs::write(&late, b"body\n").unwrap();
+        stamp(&late, FUTURE);
+
+        let mut rounds = Rounds::new(&repo);
+        assert_eq!(rounds.first().latest_modified_at, Some(OLD));
+        std::fs::remove_file(&global).unwrap();
+        let second = rounds.saved(repo.join("a.txt").as_path());
+        assert_eq!(
+            second.state,
+            ActivityState::Ready,
+            "an outside source that stopped existing is not a read failure"
+        );
+        assert_eq!(second.reason, None);
+        assert_eq!(
+            second.latest_modified_at,
+            Some(FUTURE),
+            "the rules that hid the file outlived the file holding them"
+        );
+        assert_eq!(rounds.tracker.enumerations, 2);
+    }
+
     /// The outside source exists but cannot be opened, so the candidate set was
     /// built with rules this panel cannot see: the number still says what it
     /// measured, and `partial` is what says it may not be all of it.
