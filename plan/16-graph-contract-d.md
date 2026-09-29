@@ -448,3 +448,50 @@ git log --no-color -z --topo-order --format=<LOG_FORMAT> -n 51 --skip=<start> <r
 - **真实仓库里有没有 commit-graph 没有量过。** 本节只量了同一份夹具的两种状态。
   这条差别值得在 D03c 之前先弄清楚：如果常见的被 `git gc` 过的仓库都带着它，
   那"每页两次整仓库遍历"在实践中就不是常态。
+
+## 7. D03b 前半：轨道宽度的类型，与它和上限的关系
+
+闸门那句"超过 24 轨道不静默简化"里，"不静默"部分早就有了（行上的 `folded` 与计数行那句
+"Branches are not drawn…"）。这一节做的是另一半天：**列号不能靠算术巧合才不溢出**。
+
+### 7.1 动手前的形状
+
+`layout()` 在 `usize` 上数格子，往 `GraphRow` 里装的时候四行都是 `as u8`
+（`node`/`lanes`/`branches`/`incoming`）。溢出确实发生过——一个 300 个父提交的扇形会数到列
+299，`as u8` 把它折成 43——只是紧接着 `assign_lanes_with` 因为 `peak > MAX_LANES` 把整窗
+丢掉换成 `folded_row`，那些行从未出门。**不溢出这件事当时的证明在两个常量之间**
+（`MAX_LANES: u8 = 24` 与 `Lane::MAX`），代码里没有任何一处写着这层关系；上限被抬高就会失效。
+
+### 7.2 现在的形状
+
+| 位置 | 改动 |
+| --- | --- |
+| `history.rs` 顶部 | `pub type Lane = u8;`，`pub const MAX_LANES: Lane = 24;`——上限写成它自己约束的那个类型 |
+| `GraphRow` | 四个列字段从 `u8` 改为 `Lane`/`Vec<Lane>`，线的两端是同一个名字 |
+| `layout()` | 返回 `Vec<Slot>`：一行所有的事实、列仍是 `usize`。布局阶段不再接触要出门的类型 |
+| `ship()` | 唯一一次窄化，`Lane::try_from(...).ok()?`；任何一格装不下就整窗返回 `None` |
+| `assign_lanes_with()` | 两条出路合成一条宣布：超过上限折叠，装不下也折叠（`fold_window()`） |
+
+`ship()` 的 `None` 分支在 `max_lanes: Lane` 的前提下是到不了的（一列 ≥ 256 意味着
+`peak ≥ 257 > 255 ≥ max_lanes`，上限检查先走）。留着它不是防御性代码：它把"不会溢出"从
+两个常量之间的算术，换成了**类型转换的那一处自己检查**。这正是 §2 要求一并审的东西。
+
+### 7.3 新增的两条测试
+
+`a_window_at_the_lane_cap_is_drawn_and_one_more_folds` 钉边界：24 格活的窗口照画，
+最右一格 = `MAX_LANES - 1`（即"恰好放得下"），25 格折。这条以前没有——原来只测了
+`MAX_LANES + 4` 这种明显越界的形状，上限两侧各差一格的形状没人问。
+`a_fan_wider_than_the_lane_type_is_folded_never_renumbered` 用 300 个父提交跨过 `Lane::MAX`：
+整窗 `folded`，且主线与那个 merge 仍然在（折叠不是把图清空）。
+
+门槛：`cargo test` **313 passed / 0 failed**（+2）；`cargo fmt --check` clean；
+`cargo clippy --locked --all-targets` clean；`npm run test:fixture` **336 pass / 0 fail**。
+
+### 7.4 留给 D03b 后半的
+
+"横向可达"还没做：`--graph-gutter-max: 6.5rem` 与 `--graph-lane: 0.8125rem` 让窗口里放得下
+**8** 格，24 格的上限里有 16 格是画在界外、靠 `data-fade` 那道渐隐表示"还有"。
+`rowGeometry` 已经把这种情况报成 `clipped`，但用户没有任何办法看到被裁掉的那些列。
+后半要做的是给这条 gutter 一个共享的横向原点（一轮滚轮/一组方向键平移整列，
+`at(column)` 减去原点），并让计数行说出现在看的是哪几格；`--graph-*` 令牌与
+`GRAPH_LANE_REM` 那组常量由 G 的字体工作约束，改的只能是原点，不是尺子。

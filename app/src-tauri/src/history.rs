@@ -27,10 +27,15 @@ const LOG_FORMAT: &str = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f
 const TOPO_FORMAT: &str = "%H %P";
 /// 100 commits with long messages can exceed the default capture bound.
 const LOG_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+/// A graph column, counted by the layout and carried by a row. The type is the
+/// wire shape, so a column that does not fit it is a column no renderer could
+/// be shown: raising `MAX_LANES` past it is a type error rather than a number
+/// that quietly wraps back to a lane that is already drawn.
+pub type Lane = u8;
 /// The gutter has room for this many lanes. A repository whose live lane
 /// count would exceed it is drawn first-parent and says so, rather than
 /// drawing lanes the gutter cannot hold.
-pub const MAX_LANES: u8 = 24;
+pub const MAX_LANES: Lane = 24;
 pub const PAGE_SIZE: u64 = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -71,7 +76,7 @@ pub struct HistoryPage {
 #[serde(rename_all = "camelCase")]
 pub struct GraphRow {
     /// Column of this commit's node.
-    pub node: u8,
+    pub node: Lane,
     /// A line arrives from above into this node: this commit has a child
     /// above it in the loaded history.
     pub entry: bool,
@@ -83,15 +88,15 @@ pub struct GraphRow {
     pub root: bool,
     /// Columns, other than `node`, carrying a vertical line through this row.
     /// Each is a commit further down that is not this row's parent.
-    pub lanes: Vec<u8>,
+    pub lanes: Vec<Lane>,
     /// Extra parent lanes that begin at this node, ascending. Each is drawn
     /// sideways from the node, then down.
-    pub branches: Vec<u8>,
+    pub branches: Vec<Lane>,
     /// Lanes that were carrying this same commit and stop here, ascending.
     /// Several branches commonly share one parent — every topic branch cut
     /// from the same base does — and those lanes all arrive at this one row
     /// rather than running past it.
-    pub incoming: Vec<u8>,
+    pub incoming: Vec<Lane>,
     /// A parent lies below the loaded window, so this line continues past
     /// the last loaded row. The renderer shows it leaving the list rather
     /// than ending it as though the history stopped there.
@@ -125,20 +130,29 @@ pub struct Node {
 /// When the live lane count would exceed `max_lanes`, the whole window is
 /// drawn first-parent and every row is marked `folded`: a graph that does
 /// not fit the gutter must say so rather than draw lanes that collide.
-pub fn assign_lanes_with(nodes: &[Node], max_lanes: u8, follow_all: bool) -> Vec<GraphRow> {
+pub fn assign_lanes_with(nodes: &[Node], max_lanes: Lane, follow_all: bool) -> Vec<GraphRow> {
     if nodes.is_empty() {
         return Vec::new();
     }
     let present: std::collections::HashSet<&str> =
         nodes.iter().map(|node| node.oid.as_str()).collect();
-    let (rows, peak) = layout(nodes, &present, follow_all);
+    let (slots, peak) = layout(nodes, &present, follow_all);
     if follow_all && peak > usize::from(max_lanes) {
-        return nodes
-            .iter()
-            .map(|node| folded_row(node, &present))
-            .collect();
+        return fold_window(nodes, &present);
     }
-    rows
+    // The cap above is stated in the same type a column ships in, so a column
+    // that cannot be represented is already past it. `ship` re-checks that
+    // rather than trusting the arithmetic: a row whose column did not fit would
+    // be drawn in a lane that another commit already owns, which is a wrong
+    // graph, while folding is a shorter graph that says it is shorter.
+    match ship(slots) {
+        Some(rows) => rows,
+        None => fold_window(nodes, &present),
+    }
+}
+
+fn fold_window(nodes: &[Node], present: &std::collections::HashSet<&str>) -> Vec<GraphRow> {
+    nodes.iter().map(|node| folded_row(node, present)).collect()
 }
 
 /// The first-parent line, for a window too wide to draw. A commit with
@@ -175,6 +189,22 @@ fn take_free(owner: &mut Vec<Option<&str>>, from: usize) -> usize {
     owner.len() - 1
 }
 
+/// A row mid-layout: every fact a `GraphRow` carries, with the columns still
+/// in the width the counter uses. Converting them into the width a row ships
+/// in happens once, in `ship`.
+#[derive(Debug, Clone)]
+struct Slot {
+    node: usize,
+    entry: bool,
+    exit: bool,
+    merge: bool,
+    root: bool,
+    lanes: Vec<usize>,
+    branches: Vec<usize>,
+    incoming: Vec<usize>,
+    dangling: bool,
+}
+
 /// Assigns lanes and reports how many columns were ever live at once. The
 /// width is measured from the same pass that draws, so the fold decision can
 /// never be made against a different algorithm than the one that renders.
@@ -182,7 +212,7 @@ fn layout(
     nodes: &[Node],
     present: &std::collections::HashSet<&str>,
     follow_all: bool,
-) -> (Vec<GraphRow>, usize) {
+) -> (Vec<Slot>, usize) {
     let mut owner: Vec<Option<&str>> = Vec::new();
     let mut rows = Vec::with_capacity(nodes.len());
     let mut peak = 0usize;
@@ -206,7 +236,7 @@ fn layout(
         for waiting in &held {
             owner[*waiting] = None;
         }
-        let incoming: Vec<u8> = held.iter().skip(1).map(|column| *column as u8).collect();
+        let incoming: Vec<usize> = held.iter().skip(1).copied().collect();
         let mut branches = Vec::new();
         let mut exit = false;
         for (index, parent) in node.parents.iter().enumerate() {
@@ -216,7 +246,7 @@ fn layout(
             } else if follow_all {
                 let branch = take_free(&mut owner, column + 1);
                 owner[branch] = Some(parent);
-                branches.push(branch as u8);
+                branches.push(branch);
             }
             // A parent past the first stays in the commit's own parent list, so
             // `merge` below remains honest; it is simply not followed into a
@@ -225,10 +255,9 @@ fn layout(
         peak = peak.max(owner.iter().filter(|waiting| waiting.is_some()).count());
         let lanes = (0..owner.len())
             .filter(|other| *other != column && owner[*other].is_some())
-            .map(|other| other as u8)
             .collect();
-        rows.push(GraphRow {
-            node: column as u8,
+        rows.push(Slot {
+            node: column,
             entry: !held.is_empty(),
             exit: exit && !node.parents.is_empty(),
             merge: node.parents.len() > 1,
@@ -241,10 +270,38 @@ fn layout(
                 .iter()
                 .take(if follow_all { usize::MAX } else { 1 })
                 .any(|parent| !present.contains(parent.as_str())),
-            folded: false,
         });
     }
     (rows, peak)
+}
+
+fn lane_columns(values: &[usize]) -> Option<Vec<Lane>> {
+    values
+        .iter()
+        .map(|value| Lane::try_from(*value).ok())
+        .collect()
+}
+
+/// Narrows the layout's columns to the width a row is carried in. `None` says
+/// some column was too large for it, which the caller answers by folding: a
+/// column that wrapped would be drawn in a lane another commit already owns.
+fn ship(slots: Vec<Slot>) -> Option<Vec<GraphRow>> {
+    let mut rows = Vec::with_capacity(slots.len());
+    for slot in slots {
+        rows.push(GraphRow {
+            node: Lane::try_from(slot.node).ok()?,
+            entry: slot.entry,
+            exit: slot.exit,
+            merge: slot.merge,
+            root: slot.root,
+            lanes: lane_columns(&slot.lanes)?,
+            branches: lane_columns(&slot.branches)?,
+            incoming: lane_columns(&slot.incoming)?,
+            dangling: slot.dangling,
+            folded: false,
+        });
+    }
+    Some(rows)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1504,6 +1561,71 @@ mod tests {
         // Folded, the mainline is still continuous and nothing collides.
         assert!(rows.iter().all(|row| row.node == 0));
         assert!(rows.iter().all(|row| row.lanes.is_empty()));
+    }
+
+    /// A history with `branches` extra parents open at once: one commit whose
+    /// first parent continues the mainline and whose other parents each run
+    /// down to a shared base. The live lane count of such a window is
+    /// `branches`, so it is the shape to ask about the gutter's width.
+    fn fan(branches: usize) -> Vec<GraphRow> {
+        let mut nodes = vec![node("top", &["fork"])];
+        let names: Vec<String> = (0..branches).map(|index| format!("b{index}")).collect();
+        let parents: Vec<&str> = names.iter().map(String::as_str).collect();
+        nodes.push(node("fork", &parents));
+        for name in &names {
+            nodes.push(node(name, &["base"]));
+        }
+        nodes.push(node("base", &[]));
+        assign_lanes_with(&nodes, MAX_LANES, true)
+    }
+
+    #[test]
+    fn a_fan_wider_than_the_lane_type_is_folded_never_renumbered() {
+        // 300 branches open at once: past the largest number a column is
+        // carried in. The layout counts in a wider type and the fold discards
+        // its rows, so a wrapped column cannot reach a page — what the page
+        // says instead is that the branches are not drawn.
+        let rows = fan(300);
+        assert!(rows.iter().all(|row| row.folded));
+        assert!(rows.iter().all(|row| row.node == 0));
+        // Folded is not empty: the mainline stays continuous, and the merge
+        // that opened 300 branches is still drawn as a merge.
+        assert!(rows[0].exit, "a line still leaves the first row");
+        assert!(
+            rows[1].merge && rows[1].entry,
+            "the fan's commit is still a merge with a line arriving"
+        );
+    }
+
+    #[test]
+    fn a_window_at_the_lane_cap_is_drawn_and_one_more_folds() {
+        // The cap is the boundary the announcement quotes, so pin it: a window
+        // with exactly `MAX_LANES` live columns is drawn and its rightmost
+        // column is the gutter's last, one more column folds.
+        let at_the_cap = fan(usize::from(MAX_LANES));
+        assert!(
+            at_the_cap.iter().all(|row| !row.folded),
+            "a graph the gutter has room for is drawn"
+        );
+        let widest = at_the_cap
+            .iter()
+            .flat_map(|row| {
+                std::iter::once(row.node)
+                    .chain(row.lanes.iter().copied())
+                    .chain(row.branches.iter().copied())
+                    .chain(row.incoming.iter().copied())
+            })
+            .max()
+            .expect("a drawn window carries columns");
+        assert_eq!(
+            widest,
+            MAX_LANES - 1,
+            "the rightmost column drawn is the gutter's last"
+        );
+        assert!(
+            fan(usize::from(MAX_LANES) + 1).iter().all(|row| row.folded),
+            "one column past the gutter folds the window"
+        );
     }
 
     #[test]
