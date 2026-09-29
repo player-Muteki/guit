@@ -12,7 +12,6 @@ import {
   beginApply,
   finishApply,
   launchTheme,
-  resumeTheme,
   stopTheme,
   themeRecord,
 } from "../src/themeLifecycle.ts";
@@ -60,13 +59,16 @@ test("a disabled theme stays off across restarts until the person turns it back 
   const off = launchTheme(launchTheme(beginApply(themeRecord(BUILT_IN, true), HOSTILE).record, false).record, false);
   assert.equal(off.record.enabled, false);
   assert.deepEqual(off.effect, { kind: "clear" });
-  const resumed = resumeTheme(off.record);
+  // The page's own way back is to apply the text its box holds, so that is what the
+  // state machine is asked with — there is no entry that re-enables a draft the
+  // caller did not name.
+  const resumed = beginApply(off.record, off.record.draft);
   assert.equal(resumed.record.enabled, true);
   assert.equal(drawOf(resumed), HOSTILE);
 });
 
 test("an empty draft cannot be resumed into an enabled theme", () => {
-  const resumed = resumeTheme(themeRecord(BUILT_IN, false));
+  const resumed = beginApply(themeRecord(BUILT_IN, false), BUILT_IN);
   assert.equal(resumed.record.enabled, false);
   assert.deepEqual(resumed.effect, { kind: "clear" });
 });
@@ -110,7 +112,7 @@ test("no decision ever asks for an empty stylesheet to be drawn", () => {
       finishApply(record, "refused", BUILT_IN),
       finishApply(record, "hid-recovery", BUILT_IN),
       stopTheme(record),
-      resumeTheme(record),
+      beginApply(record, record.draft),
     ]) {
       assert.notEqual(drawOf(decision), BUILT_IN, `a draw of "" is a clear wearing a mask: ${decision.notice}`);
       if (decision.effect.kind === "draw") assert.ok(decision.effect.css.length > 0);
@@ -142,7 +144,8 @@ test("a whole session: good theme, bad edit, a crash, then a fix", () => {
   assert.equal(drawOf(state), GOOD);
   assert.equal(state.record.enabled, false);
 
-  state = resumeTheme(state.record);
+  // The page's own way back on: apply the text the box still holds.
+  state = beginApply(state.record, state.record.draft);
   assert.equal(state.record.enabled, true);
   assert.equal(state.record.unverified, BAD, "an edit that never verified is exactly the crash marker");
 

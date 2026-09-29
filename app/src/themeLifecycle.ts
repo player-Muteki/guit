@@ -94,7 +94,12 @@ export function launchTheme(record: ThemeRecord, safe: boolean): ThemeDecision {
 
 /** Ask the renderer for a fragment. Everything the caller knows about what was on
  * screen before is passed in as `previous`, because the revert has to restore
- * exactly that and not a guess. */
+ * exactly that and not a guess.
+ *
+ * This is also how a theme that was switched off comes back: the page applies the text
+ * its own box holds, and a box prefilled from the record makes that one press. There is
+ * deliberately no second entry that re-enables a stored draft without naming its text —
+ * a hostile fragment should need the person to look at it again, not a shortcut. */
 export function beginApply(record: ThemeRecord, draft: string): ThemeDecision {
   if (draft === BUILT_IN) {
     return stopTheme({ ...record, draft });
@@ -151,12 +156,4 @@ export function stopTheme(record: ThemeRecord): ThemeDecision {
     effect: { kind: "clear" },
     notice: "disabled",
   };
-}
-
-/** Turn the stored fragment back on, after the person has edited or re-tested it. */
-export function resumeTheme(record: ThemeRecord): ThemeDecision {
-  if (record.draft === BUILT_IN) {
-    return { record: { ...record, enabled: false }, effect: { kind: "clear" }, notice: null };
-  }
-  return beginApply(record, record.draft);
 }
