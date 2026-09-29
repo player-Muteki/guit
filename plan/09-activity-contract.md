@@ -547,6 +547,12 @@ C04 没有先例可抄（前端从不产生“由状态决定读哪些字段”�
 单调钟判定（§4.4 第 3 条）。前端不得自己数秒来决定陈旧，否则刷新失败与文本推进就
 混成一条，`ActivityView.state` 失去意义。
 
+既有的连续写入/未来 mtime 夹具（`app/tests/semantic-fixtures.mjs:103`，
+`age is a bounded difference and future stamps never read as negative`）只固定了**算术**
+一侧：`Math.max(0, now - latest)` 得 0。它没有固定文案，因此也不能被读成
+“0 就走最小年龄档”。`ready` 的负差值分支需要 C04 自己补一条断言（同文件形状：
+注入 `now`、断言返回的是不带年龄的那一支），否则这条分支在测试上是隐形的。
+
 ## 5. C01 环路原型实测（一次性 /tmp crate，非交付代码）
 
 在改动 `watch.rs` 之前，先用 notify 8.2.0 + 真实 inotify 事件验证“quiet 或最大等待取先到者”
