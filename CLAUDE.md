@@ -250,3 +250,22 @@ a fresh copy with a higher `version` per session answer. Handing the app one mut
 object lets a mutation raise the stored snapshot's own version, `applySnapshot` drops
 the refresh as not newer, and the probe then measures its own first screen while
 reporting green.
+
+The AT-SPI probes have three channels and an assertion must pick the one that can see
+its subject: node *names* carry controls only (a plain label span has no accessible
+name, so it can never be a landmark), `dump()` carries label text, and a node's extents
+carry geometry. Extents are logical pixels; `window.json` stores physical ones (the
+restore multiplies the 340x400 minimum by the monitor scale factor), so a seeded width of
+800 measures 400. The document node also reports its scrollable content height rather
+than the frame's, so a window-size claim is a width claim, made against the same window's
+own box and never against a number. A floating layer — an open menu, a dialog — is drawn
+over the page on purpose, so overlap is asserted only between two nodes in the same
+layer; the layer is printed per state so a pass that compared one node cannot look like a
+measurement.
+
+Run these probes with `/usr/bin/python3`, which has `gi` and `Atspi`. The `python3` on
+PATH may be a distribution-free interpreter without them; concluding from it that the
+host cannot run the harnesses is how a whole suite got recorded as unverified while it
+was runnable all along. Measure a committed state from a separate worktree when the
+shared tree carries another developer's uncommitted code, or the result is about their
+work and not about the claim being tested.

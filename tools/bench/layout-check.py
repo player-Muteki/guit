@@ -79,6 +79,15 @@ CHROME_BOX_ROLES = {
     "ATSPI_ROLE_HEADER",
 }
 
+# Containers that paint over the page rather than in its flow. Their contents
+# form their own layer for the overlap rule.
+FLOATING_ROLES = {
+    "ATSPI_ROLE_MENU",
+    "ATSPI_ROLE_POPUP_MENU",
+    "ATSPI_ROLE_DIALOG",
+    "ATSPI_ROLE_ALERT",
+}
+
 # WebKitGTK exposes <dt>/<dd> as description terms and values with a usable
 # box but no name and no text interface, so node_text() cannot label them.
 # Their geometry is exactly what a narrow layout breaks, so they are checked
@@ -179,6 +188,11 @@ def visible_text_nodes():
     * Elements inside the window's fixed bars are chrome. They do not scroll
       with the body, so their extents live in a different coordinate space from
       scrolling content and must not be compared against it.
+    * A floating layer (an open menu, a dialog) is drawn *over* the page on
+      purpose. Its text and the page's text overlapping is what a popup is, so
+      each node carries the layer it belongs to and overlap is only asserted
+      between two nodes in the same one. Clipping and overflow of the layer
+      itself are still measured against the document box.
     """
     chrome_boxes = [
         rect(node) for node in A.tree(A.app_root())
@@ -186,10 +200,11 @@ def visible_text_nodes():
         and rect(node) is not None
     ]
     out = []
-    # Each stack entry carries whether a collapsed ancestor was seen.
-    stack = [(A.app_root(), False)]
+    # Each stack entry carries whether a collapsed ancestor was seen, and the
+    # floating layer it sits in ("document" until a menu or dialog opens one).
+    stack = [(A.app_root(), False, "document")]
     while stack:
-        node, collapsed_ancestor = stack.pop()
+        node, collapsed_ancestor, layer = stack.pop()
         raw = extent_box(node)
         if collapsed_ancestor or (raw is not None and (raw[2] <= 0 or raw[3] <= 0)):
             continue
@@ -200,9 +215,12 @@ def visible_text_nodes():
             if (text or role in GEOMETRY_ONLY_ROLES) and showing(node) and not has_text_descendant(node):
                 if box is not None:
                     chrome = role in CHROME_ROLES or any(inside(box, region) for region in chrome_boxes)
-                    out.append((role, text or GEOMETRY_ONLY_ROLES[role], box, chrome))
+                    out.append((role, text or GEOMETRY_ONLY_ROLES[role], box, chrome, layer))
+        child_layer = layer
+        if role in FLOATING_ROLES and box is not None:
+            child_layer = f"{role}@{box[0]},{box[1]}"
         for child in reversed(children(node)):
-            stack.append((child, collapsed_ancestor))
+            stack.append((child, collapsed_ancestor, child_layer))
     return out
 
 
@@ -244,11 +262,22 @@ def check_state(report, label, viewport):
     nodes = visible_text_nodes()
     left, right = viewport[0], viewport[0] + viewport[2]
 
-    # --- overlap: readable text drawn on readable text ---
+    # Say how many layers were compared. A pass with the overlay in a layer of
+    # its own holding one node would be a pass that measured nothing, and the
+    # only way to tell that apart from a real clean layout is to print it.
+    layers = {}
+    for _role, _text, _box, _chrome, layer in nodes:
+        layers[layer] = layers.get(layer, 0) + 1
+    print(f"        {label}: {len(nodes)} text nodes, "
+          + ", ".join(f"{name}={count}" for name, count in sorted(layers.items())), flush=True)
+
+    # --- overlap: readable text drawn on readable text, in the same layer ---
     reported = 0
     for i in range(len(nodes)):
         for j in range(i + 1, len(nodes)):
             if nodes[i][3] != nodes[j][3]:
+                continue
+            if nodes[i][4] != nodes[j][4]:
                 continue
             if not overlaps(nodes[i][2], nodes[j][2]):
                 continue
@@ -264,7 +293,7 @@ def check_state(report, label, viewport):
         report.fail(f"{label}: text overlaps text", f"{reported} overlapping pairs in total")
 
     # --- overflow: content past the edges of the document box ---
-    for role, text, box, _chrome in nodes:
+    for role, text, box, _chrome, _layer in nodes:
         if box[0] + box[2] > right + 1:
             report.fail(
                 f"{label}: content overflows the viewport to the right",
@@ -275,7 +304,7 @@ def check_state(report, label, viewport):
                 f"{role} left edge {box[0]} < {left}  {text.replace(chr(10), ' ')[:40]!r}")
 
     # --- invisible: announced and showing, but too small to draw ---
-    for role, text, box, _chrome in nodes:
+    for role, text, box, _chrome, _layer in nodes:
         if box[2] < MIN_BOX or box[3] < MIN_BOX:
             report.fail(
                 f"{label}: visible text has no room to be drawn",

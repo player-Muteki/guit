@@ -72,7 +72,7 @@ JS 产物字节数没有变化（81.63 kB，与 B05 记录一致），CSS 从 29
 | `responsive-check.py src/style.css src/style/tokens.css` | fails=0（新增 media 覆盖未破坏两轴与令牌规则） |
 | `tools/bench/layout-probe.mjs` | fails=0，435 项断言（9 尺寸 × 4 屏 × 7 项 = 252，其余为同屏/分栏/键位/计数/空状态/应用栏/令牌项） |
 | `tools/bench/read-budget.mjs` | fails=0（21 项，与 B05 持平） |
-| Python 探针 | `python3 -m py_compile` 六个文件全过；**本机无 `python3-gi`/AT-SPI，无法运行** |
+| Python 探针 | 本阶段记为“无法运行”，**那条结论是错的**，见 §8 的补测。错因：PATH 上的 `python3` 是 miniconda 的解释器，没有 `gi`；`/usr/bin/python3` 有 `gi 3.56.2` + `Atspi`，探针一直是可以跑的 |
 
 Rust 的 267 比 B05 记录的 256 多 11 个：增量来自并行开发者已落地的 `1367f7e`（活动通道）。本阶段**未改动任何 Rust 文件**，那三项只是环境核对：记录运行的同时，对方正在编辑 `repo.rs`/`model.rs`/`session.rs`/`status.rs`/`write.rs` 并新增未跟踪的 `activity.rs`，所以这些结果不应读作对其工作树状态的结论。
 
@@ -85,7 +85,7 @@ Rust 的 267 比 B05 记录的 256 多 11 个：增量来自并行开发者已�
 
 ## 6. 已知缺口
 
-- **AT-SPI 族在本机只是语法编译**，没有跑过。它们断言的是“在场/可达/焦点”，其结论要等一次有 `python3-gi` 的真桌面运行；本阶段的可运行替身是 CDP 无障碍树。
+- **AT-SPI 族在本阶段确实没跑过**，但原因不是“本机没有 AT-SPI”：是记录用错了 `python3`。补测已在 §8 完成，跑出来的三处探针缺陷也一并修掉了。
 - 真实 WebKitGTK 上的布局与读取预算没有重量：两个 CDP 探针都跑在 Edge headless 154 上。CSS 的渲染差异（尤其 `<select>` 的主题绘制，见 `live-screens.py` 的注释）只有真引擎能证。
 - `99+` 那条只在探针桩里成立：真仓库要 120 个待处理文件才会走到。没有做真仓库存压测量。
 - `bench_run.py` 的 L2 与既有历史基线表**不可比**（测量对象变了），需要一次重新采集才能填进新的基线表；A02 的表格没有因此更新。
@@ -100,6 +100,40 @@ Rust 的 267 比 B05 记录的 256 多 11 个：增量来自并行开发者已�
 - **探针**（六个 `.mjs`/`.py` 文件）单独 revert 不影响产品，只是重新失去对当前 shell 的覆盖：旧 `layout-probe.mjs` 仍按七视图找 `Changes` 屏，会在每个尺寸上直接报“never reached the Changes view”。因此**不要**只回退探针而留着新的 shell。
 - 没有数据迁移、没有对用户仓库的额外写操作，桩与 localStorage 都是探针自己的临时状态。
 
+## 8. 补测：AT-SPI 族真跑了一遍（同日）
+
+**为什么要补**：§4 把 Python 探针记成“本机无 `python3-gi`/AT-SPI，无法运行”。这句话是错的，而且错得便宜——PATH 上的 `python3` 是 miniconda 的解释器（无 `gi`），`/usr/bin/python3` 装着 `gi 3.56.2` + `Atspi`，`org.a11y.Bus` 在跑，`GTK_MODULES=gail:atk-bridge`。探针一直可运行，只是被错误的解释器判了死刑。
+
+**怎么保证测的是本阶段的东西**：工作树里当时有并行开发者未提交的 Rust 改动（`main.rs`/`model.rs`/`repo.rs`/`session.rs`/`status.rs`/`watch.rs`/`write.rs`/`activity.rs`）与 `app/src/{main,state,types}.ts`。直接 `npm run bin:release` 会把他的在飞代码算进我的结论，所以本次从 `df03c7c` 建了一个 detached worktree 单独构建 release 二进制，源码只含已提交状态。命令：
+
+```sh
+git worktree add --detach <tmp> df03c7c
+cd <tmp>/app && npm run build && cargo build --release --manifest-path src-tauri/Cargo.toml --features custom-protocol
+DISPLAY=:0 /usr/bin/python3 tools/bench/<probe>.py <binary> <fixture> <work-dir>
+```
+
+夹具：`make-history.py 60 1` 造 60 个提交（超过 `history::PAGE_SIZE = 50`，于是 `Load older` 存在），再手动做出 staged 2 / unstaged 2 / deleted 1 / untracked 3。每个探针自带隔离 HOME，不碰开发者真实配置。
+
+| 探针 | 结果 |
+| --- | --- |
+| `view-smoke.py` | 27 项断言全过，fails=0 |
+| `narrow-smoke.py` | 修复后 12 项全过，fails=0（`wide=(720,667) compact=(340,507) restored=(720,667)`） |
+| `layout-check.py` | 四个状态 fails=0；`overlay row menu` 与 `overlay confirm dialog` 各自成层 |
+| `theme-check.py` | 18 项全过，fails=0；localStorage 里只有 `guit.fontPx` 与 `guit.theme` 两行 |
+| `bench_run.py` | L1/L2 ≈1.07s；第 2 页延迟 37.8ms；idle 12s 进程树 RSS 中位 ≈468 MB、CPU ≈0.033 核、inotify watch 17 |
+
+数字是这一个 60 提交夹具上的观测，不是产品承诺——离 §4 的“常规夹具”差得很远。
+
+**跑出来的是三处探针缺陷，都已修**：
+
+1. `narrow-smoke.py` 用 `showing_names()` 断言恢复后的 `Interface zoom`。那个标签是 `settings.ts:48` 的裸 `<span>`，在 AT-SPI 里没有 accessible *name*（名字通道只有控件），所以这条断言**永远不可能通过**。改成：页面文字地标走 `A.dump()` 的 text 通道，窗口尺寸走 document extents；顺带把“缩到最小”和“恢复回去”变成测量，而不是假设。
+2. `layout-check.py` 把弹层菜单的文字和页面文字放在一起比，于是报“`Amend` 复选框 × `Open` 菜单项重叠”。浮层盖住内容是菜单的定义，不是布局事故。改成给每个节点记所属层（`MENU`/`POPUP_MENU`/`DIALOG`/`ALERT` 起新层），只在同层内断言重叠；溢出仍然对着 document box 量，没有放松。为避免“放松到什么都没测”，每个状态打印各层节点数——本次那个行菜单只有一个未跟踪行的 `Open`，一层一个节点，这件事现在是看得见的。
+3. `bench_run.py` 的 `--history-pages` 等 `\d+ commit\(s\)`，而真实文案是 `50 commits so far.` / `60 commits — all loaded.`。字符串从没匹配过，探针于是**静默交出空列表**，把“没测到”写成了一条记录。改成读那个计数器、等它**变大**才算一页到了，并记下停止的原因（没有计数器 / 按钮消失 / 按钮被禁用=历史已加载完 / 点击没落地）。
+
+**顺带量到的通道事实**（写进 docstring 了）：document 节点报的是可滚动内容的高度，不是窗口高度（400×760 的窗口报 `h=867`），所以窗口尺寸只能用宽度断言；`window.json` 存的数与实测 extents 之间隔着显示缩放因子，两者的单位不是同一件事。
+
+**仍然没覆盖**：`live-screens.py` 截图没跑（需要 X display 与 `xgrab`）；两个 CDP 探针仍在 Edge headless 上，不是 WebKitGTK；Windows/macOS 仍只有构建配置。
+
 ## 结论
 
-路线图给 B06 的两句话各自被断言了：**340×400 与 420×640 下主要操作可达**，由 `layout-probe.mjs` 在九个尺寸上逐屏的 `every action it offers is reachable`（含丢掉可见标签的 tab 仍把名字交给无障碍树）、`narrow-smoke.py` 的 tab/应用栏/分支 chip/提交框/图同屏清单，以及 `view-smoke.py` 的两页开合共同覆盖；**原先 focusRail 的调用有有效新目标**，`shell.focusTabs()` 同时有 CDP 的 `Escape closes the layer and leaves focus on the strip` 与 AT-SPI 的焦点断言（后者本机未运行，见缺口）。过程中探针量出一个真实缺陷并当场修掉，也量出一个夹具自身的失真——桩必须像后端那样发布带递增版本的新鲜快照，否则它测的是自己缓存的第一屏。
+路线图给 B06 的两句话各自被断言了：**340×400 与 420×640 下主要操作可达**，由 `layout-probe.mjs` 在九个尺寸上逐屏的 `every action it offers is reachable`（含丢掉可见标签的 tab 仍把名字交给无障碍树）、`narrow-smoke.py` 的 tab/应用栏/分支 chip/提交框/图同屏清单，以及 `view-smoke.py` 的两页开合共同覆盖；**原先 focusRail 的调用有有效新目标**，`shell.focusTabs()` 同时有 CDP 的 `Escape closes the layer and leaves focus on the strip` 与 AT-SPI 的焦点断言（后者在 §8 的补测里真跑了）。过程中探针量出一个真实缺陷并当场修掉，也量出一个夹具自身的失真——桩必须像后端那样发布带递增版本的新鲜快照，否则它测的是自己缓存的第一屏。

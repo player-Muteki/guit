@@ -120,6 +120,27 @@ def inotify_watch_count(pids):
     return total
 
 
+def loaded_commits():
+    """The graph's own loaded-commit count, from its status label.
+
+    The label reads "50 commits so far." / "60 commits — all loaded."; the count
+    is the only number that says how much history has arrived, and the rows
+    themselves are virtualised, so counting nodes would measure the viewport.
+    """
+    match = re.search(r"(\d+) commits? (?:so far|[—-] all loaded)", A.dump())
+    return int(match.group(1)) if match else None
+
+
+def wait_for_count(at_least, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        count = loaded_commits()
+        if count is not None and count >= at_least:
+            return count
+        time.sleep(0.02)
+    return None
+
+
 def main():
     args = argparse.ArgumentParser()
     args.add_argument("--binary", required=True)
@@ -212,25 +233,47 @@ def main():
 
     if args.history_pages and l2 is not None:
         # The graph shares the Main panel with the changes list, so it is
-        # already in the accessibility tree; wait for its own counter rather
-        # than for a page switch that no longer exists.
+        # already in the tree. A page has arrived only when the loaded count
+        # grows: the counter's mere presence is satisfied by the first page, and
+        # measuring that would report a latency for work never done.
         page_times = []
-        if A.wait_for(r"\d+ commit\(s\)|No commits yet", 30) is None:
-            result["history_page_latencies_s"] = page_times
+        before = loaded_commits()
+        if before is None:
+            result["history_pages_measured"] = False
+            result["history_pages_note"] = "no loaded-commit counter in the tree"
         else:
+            result["history_pages_measured"] = True
+            pages_done = 0
             for _ in range(args.history_pages):
                 button = A.find_button(name="Load older")
                 if button is None:
+                    result["history_pages_note"] = "no Load older button (history already fully loaded)"
                     break
                 started = time.monotonic()
                 if not A.click(button):
+                    # A refused click and a click on a button the app had just
+                    # disabled are different facts; only the second one is the
+                    # end of the history.
+                    states = A._once(
+                        lambda: [s.value_name for s in button.get_state_set().get_states()], default=[]) or []
+                    result["history_pages_note"] = (
+                        "Load older was disabled, so the history is fully loaded"
+                        if "ATSPI_STATE_ENABLED" not in states
+                        else "Load older is enabled but the click did not land")
                     break
-                if A.wait_for(r"\d+ commit\(s\)", 30) is None:
+                after = wait_for_count(before + 1, 30)
+                if after is None:
+                    result["history_pages_note"] = f"count stayed at {before} for 30s"
                     break
                 page_times.append(time.monotonic() - started)
+                before = after
+                pages_done += 1
+            if pages_done < args.history_pages and "history_pages_note" not in result:
+                result["history_pages_note"] = "stopped early"
             result["history_page_latencies_s"] = page_times
     else:
         result["history_page_latencies_s"] = []
+        result["history_pages_measured"] = False
 
     idle_start = time.monotonic()
     time.sleep(max(0.0, args.idle))

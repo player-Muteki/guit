@@ -3,11 +3,22 @@
 
 Drives Settings → Developer "Test compact window", which resizes the window to
 the project's declared 340x400 minimum, and asserts the shell's primary actions
-are still in the accessibility tree at that size. Horizontal overflow is not
-directly observable over AT-SPI, so what is asserted is that nothing a user
-needs disappears at the minimum size.
+are still reachable at that size, then that the restore gives the window its own
+box back. Overflow is layout-check.py's job; this suite is about reachability at
+the minimum size and about the resize round-trip.
 
-Usage: narrow-smoke.py <release-binary> <fixture-repo> <work-dir>
+Three channels, and the assertion has to use the one that can see its subject:
+- `showing_names()` carries *controls* — tab items, buttons, inputs. A plain
+  label span has no accessible name at all, so Settings' "Interface zoom" text
+  is invisible here and can never be a landmark;
+- `A.dump()` carries that label text, which is where page landmarks come from;
+- the document's extents carry geometry, in physical pixels while the app sizes
+  are logical ones, so the round-trip is compared against its own wide box
+  rather than against a number.
+
+Usage: /usr/bin/python3 narrow-smoke.py <release-binary> <fixture-repo> <work-dir>
+Needs python3-gi and a live AT-SPI bus; the release binary comes from
+`npm run bin:release`.
 """
 
 import os
@@ -52,6 +63,29 @@ def showing_names():
     return names
 
 
+def document_rect():
+    """The webview document's own screen box, polled through a relayout.
+
+    This is the channel that answers "how big is the window" — names carry
+    controls, not geometry. Only the *width* is a window fact: the document node
+    reports its scrollable content height (a 400x760 window reports h=867), so
+    the height here says what the page needs, not what the frame got. A document
+    that has just switched views reports a zero extent, so poll rather than read
+    once. Extents and the sizes the app asks for are not the same unit (a seeded
+    `window.json` width of 800 measured 400), so the round-trip is compared
+    against the same window's own box, never against a number.
+    """
+    for _ in range(20):
+        for node in A.tree(A.app_root()):
+            if (A._once(lambda: node.get_role().value_name, default="") or "") != "ATSPI_ROLE_DOCUMENT_WEB":
+                continue
+            extent = A._once(lambda: node.get_component().get_extents(A.Atspi.CoordType.SCREEN), default=None)
+            if extent is not None and extent.width > 0 and extent.height > 0:
+                return extent.width, extent.height
+        time.sleep(0.25)
+    return None
+
+
 def main():
     binary, repo, work = sys.argv[1], sys.argv[2], sys.argv[3]
     subprocess.run(["rm", "-rf", work], check=True)
@@ -77,10 +111,16 @@ def main():
                      ",".join(sorted(TABS - wide)))
 
         # --- shrink to the declared minimum, 340x400 ---
+        wide_rect = document_rect()
         A.click(A.find_button(name="Settings"))
         time.sleep(1.0)
         A.click(A.find_button(name="Test compact window"))
         time.sleep(2.5)
+        compact_rect = document_rect()
+        report.check("the window really shrinks to the minimum",
+                     wide_rect is not None and compact_rect is not None
+                     and compact_rect[0] < wide_rect[0],
+                     f"wide={wide_rect} compact={compact_rect}")
         narrow = showing_names()
         report.check("both pages are still reachable at 340x400", TABS <= narrow,
                      f"{len(TABS & narrow)}/{len(TABS)} visible")
@@ -108,9 +148,20 @@ def main():
         report.check("the interface zoom controls survive 340x400", ZOOM <= narrow,
                      ",".join(sorted(ZOOM - narrow)))
         A.click(A.find_button(name="Restore window size"))
-        time.sleep(2.0)
-        # Still on Settings, so the landmark is Settings' own content.
-        report.check("the window restores to a usable size", "Interface zoom" in showing_names())
+        restored = document_rect()
+        # Still on Settings, so the landmark is Settings' own content. Read it
+        # through the text channel: a plain label span has no accessible *name*,
+        # so showing_names() — which is controls only — can never see it.
+        after_restore = "Interface zoom" in A.dump()
+        report.check("the page content is on screen after restore", after_restore,
+                     "" if after_restore else "no Settings label in the text dump")
+        # The restore is asserted as the width the window had before the shrink,
+        # within a compositor rounding allowance. Width only, for the reason in
+        # document_rect: the height would be a claim about content, not frame.
+        report.check("the window restores to the width it had before the shrink",
+                     wide_rect is not None and restored is not None
+                     and abs(restored[0] - wide_rect[0]) <= 16,
+                     f"wide={wide_rect} compact={compact_rect} restored={restored}")
     finally:
         try:
             os.killpg(os.getpgid(proc.pid), 15)
