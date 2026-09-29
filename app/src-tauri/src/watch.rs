@@ -148,6 +148,36 @@ impl Window {
         self.changed.clear();
         self.removed.clear();
     }
+
+    /// The three read-only ends of a window, for the one consumer that acts on
+    /// paths rather than treating every fire as a whole re-capture.
+    pub(crate) fn is_incomplete(&self) -> bool {
+        self.incomplete
+    }
+
+    pub(crate) fn changed(&self) -> &HashSet<PathBuf> {
+        &self.changed
+    }
+
+    pub(crate) fn removed(&self) -> &HashSet<PathBuf> {
+        &self.removed
+    }
+
+    /// The two shapes a consumer of paths has to be able to be handed, built
+    /// without running the loop that normally produces them.
+    #[cfg(test)]
+    pub(crate) fn naming(changed: &[PathBuf], removed: &[PathBuf]) -> Window {
+        Window {
+            changed: changed.iter().cloned().collect(),
+            removed: removed.iter().cloned().collect(),
+            incomplete: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn without_detail() -> Window {
+        Window::full_rescan()
+    }
 }
 
 /// Event-driven (Watch) or interval-driven (Poll) refresh loop with burst
@@ -489,10 +519,11 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
         POLL_INTERVAL,
         HEARTBEAT,
         &mut rearm,
-        // Which paths moved is not read yet: every refresh below re-captures the
-        // whole snapshot, so the window is carried, not consumed. A future reader
-        // must not mistake that for the events being uninteresting.
-        &mut |_window: Window| {
+        // The window's paths are consumed by the activity index, which is the
+        // one read that can answer a burst by measuring the files it names
+        // instead of asking Git what the whole repository looks like. The
+        // snapshot is still a whole re-capture: it has no per-path form.
+        &mut |window: Window| {
             let started = Instant::now();
             let outcome = session::refresh(&emitter.state::<SessionState>());
             perf::mark("watch.refresh", started.elapsed());
@@ -507,10 +538,8 @@ fn supervisor(app: tauri::AppHandle, identity: RepoIdentity, shutdown: Arc<Atomi
                     // belongs to the repository it is looking at.
                     let session_id = snapshot.session_id;
                     let _ = emitter.emit("repo-refreshed", snapshot);
-                    let _ = emitter.emit(
-                        "activity-updated",
-                        tracker.rescan(&identity, session_id, &shutdown),
-                    );
+                    let view = tracker.apply(&window, &identity, session_id, &shutdown);
+                    let _ = emitter.emit("activity-updated", view);
                     if refresh_failed {
                         refresh_failed = false;
                         let _ = emitter.emit(

@@ -20,12 +20,13 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::repo::{self, RepoIdentity};
 use crate::runner;
+use crate::watch::Window;
 
 /// The listing is one record per candidate file, so its size grows with the
 /// number of files in the repository — the way `git status` output does, and
@@ -151,7 +152,15 @@ impl MtimeIndex {
     /// maximum or it does not, and both answers cost one comparison and one
     /// insert. Equal timestamps resolve to the greater path so the displayed
     /// name does not depend on the order the listing came back in.
-    pub fn note(&mut self, path: OsString, mtime: i64) {
+    ///
+    /// The return value says when that shortcut no longer holds — the path
+    /// recorded *is* the cached maximum and its new value is smaller. A checkout,
+    /// a revert or a tool that preserves timestamps can move a file's mtime
+    /// backwards, and then the answer is elsewhere in the table.
+    pub fn note(&mut self, path: OsString, mtime: i64) -> bool {
+        let maximum_fell = self.newest.as_ref().is_some_and(|(best_path, best_mtime)| {
+            best_path.as_os_str() == path && mtime < *best_mtime
+        });
         let becomes_newest = match &self.newest {
             None => true,
             Some((best_path, best)) => (mtime, path.as_os_str()) >= (*best, best_path.as_os_str()),
@@ -160,6 +169,7 @@ impl MtimeIndex {
             self.newest = Some((path.clone(), mtime));
         }
         self.entries.insert(path, mtime);
+        maximum_fell
     }
 
     pub fn latest(&self) -> Option<i64> {
@@ -175,6 +185,55 @@ impl MtimeIndex {
         self.entries.clear();
         self.newest = None;
     }
+
+    /// Whether this path was listed by the enumeration that built the index.
+    /// It is the question that decides whether a window can be answered without
+    /// Git: a name the enumeration never produced may be a new file, a
+    /// directory, or a file Git is told to ignore, and `lstat` cannot tell those
+    /// apart either.
+    fn contains(&self, path: &OsStr) -> bool {
+        self.entries.contains_key(path)
+    }
+
+    /// Drop one path and everything below it. The window does not say whether a
+    /// vanished name was a file or a directory, so both are tried: an exact key
+    /// and every key that has it as a directory prefix. The comparison is by
+    /// path component, so removing `dir` cannot also remove a sibling named
+    /// `dir-2`. Returns whether the cached maximum was among what went.
+    fn evict(&mut self, path: &OsStr) -> bool {
+        let prefix = Path::new(path);
+        let held = &self.newest;
+        let mut lost = false;
+        self.entries.retain(|key, _| {
+            let gone = Path::new(key).starts_with(prefix);
+            if gone && held.as_ref().is_some_and(|(best, _)| best == key) {
+                lost = true;
+            }
+            !gone
+        });
+        lost
+    }
+
+    /// Re-derive the maximum after a loss. This is the only operation on the
+    /// index that walks the whole table, and it is what `note`'s single
+    /// comparison buys: it happens when the file holding the answer is gone or
+    /// has moved backwards, not when some other file was written.
+    fn rebuild_newest(&mut self) {
+        let mut best: Option<(&OsString, i64)> = None;
+        for (path, mtime) in &self.entries {
+            let take = match best {
+                None => true,
+                Some((best_path, best_mtime)) => {
+                    (*mtime, path.as_os_str()) >= (best_mtime, best_path.as_os_str())
+                }
+            };
+            if take {
+                best = Some((path, *mtime));
+            }
+        }
+        let rebuilt = best.map(|(path, mtime)| (path.clone(), mtime));
+        self.newest = rebuilt;
+    }
 }
 
 /// The refresh loop's own copy of the index: one owner, no lock, born with the
@@ -183,27 +242,109 @@ impl MtimeIndex {
 pub struct ActivityTracker {
     index: MtimeIndex,
     generation: u64,
+    /// Whether an enumeration has ever built this index. Until it has, a window
+    /// cannot be answered by amending nothing: the panel has not asked Git what
+    /// the candidates are, and reporting an empty working tree out of that
+    /// silence is the false-clean shape this codebase refuses.
+    measured: bool,
+    /// How many rounds paid for a Git enumeration, and how many lost the file
+    /// that held the maximum. Both are counted because both are claims about
+    /// cost that a test, not a review, has to keep true.
+    #[allow(dead_code)]
+    enumerations: u64,
+    #[allow(dead_code)]
+    rebuilds: u64,
+    ignore: ExternalIgnore,
+}
+
+/// The one ignore source that lives outside the repository, and therefore
+/// outside the watch set. `core.excludesFile` and the XDG default path are read
+/// by Git on every enumeration, so no event has to name them for the *rules* to
+/// apply — only for guit to notice that they moved. Watching their parent
+/// directories was measured to cost an inotify watch per directory under the
+/// user's home, shared with the panel's own budget, and a missing path silently
+/// never comes back; a `stat` of the resolved path costs neither.
+#[derive(Debug, Default)]
+struct ExternalIgnore {
+    /// The path this probe compares, once Git has been asked what it is.
+    path: Option<PathBuf>,
+    /// Whether that question has been asked. Without it, a machine with no home
+    /// directory would pay one Git process per round for a permanent answer.
+    asked: bool,
+    /// Modification time and size of the last observation, used only to answer
+    /// "did the same path change". `None` means "did not exist".
+    stamp: Option<(i64, u64)>,
+    /// The path moved, so the value Git gives for `core.excludesFile` has to be
+    /// asked again: the file that changed may have been the configuration that
+    /// points at it.
+    stale: bool,
+    /// The probe could not read what it pointed at, which means the candidate
+    /// set was built without rules guit cannot see.
+    unreadable: bool,
 }
 
 impl ActivityTracker {
-    /// Re-enumerate the repository and re-measure it. Everything the read can
-    /// mean — a listing that failed, a listing that was too long, a directory
-    /// Git could not open, a file that could not be measured — comes back as a
-    /// state rather than an error, because "we cannot tell" is the answer the
-    /// panel has to be able to show.
-    pub fn rescan(
+    /// Answer one round of the refresh loop with the paths that window named.
+    ///
+    /// The window decides which of two costs this pays. A name the last
+    /// enumeration already listed is a file this round can settle with one
+    /// `lstat` and one comparison. A name it never listed — a new file, a
+    /// directory, the far side of a rename, anything whose ignore status has
+    /// never been asked — cannot be classified by looking at it, and costs one
+    /// enumeration; adding it blindly would put a file Git excludes into the
+    /// age. The index walk that re-derives the maximum is the third cost, and
+    /// the only thing it is ever paid for: a candidate leaving, or the file
+    /// holding the answer moving backwards.
+    ///
+    /// Everything else about the round is the same as a re-measurement's: a
+    /// state that says how far the number reaches, never an error the caller has
+    /// to guess a rendering for.
+    pub fn apply(
         &mut self,
+        window: &Window,
         identity: &RepoIdentity,
         session_id: u64,
         cancelled: &AtomicBool,
     ) -> ActivityView {
         let started = Instant::now();
         self.generation += 1;
-        let view = self.rescan_inner(identity, session_id, cancelled);
-        crate::perf::mark("activity.rescan", started.elapsed());
+        let work_root = identity.work_dir().ok().and_then(|root| {
+            root.canonicalize()
+                .ok()
+                .or_else(|| Some(root.to_path_buf()))
+        });
+        let view = match &work_root {
+            // A bare repository has no working tree to amend a record of, and
+            // saying so is a one-line answer rather than a walk.
+            None => self.rescan_inner(identity, session_id, cancelled),
+            Some(root) => {
+                let git_dirs = [identity.git_dir.as_path(), identity.common_dir.as_path()];
+                let moved = self.probe_external_ignore(root, cancelled);
+                let reading = self.plan(window, root, git_dirs);
+                if matches!(reading, Reading::Rules) {
+                    // The rules moved, so the file they live in may have moved
+                    // with them. The next round asks Git again about it.
+                    self.ignore.stale = true;
+                }
+                match reading {
+                    Reading::Amend(updates)
+                        if !window.is_incomplete() && !moved && self.measured =>
+                    {
+                        self.amend(window, &updates, root, git_dirs, session_id)
+                    }
+                    _ => self.rescan_inner(identity, session_id, cancelled),
+                }
+            }
+        };
+        crate::perf::mark("activity.apply", started.elapsed());
         view
     }
 
+    /// Re-enumerate the repository and re-measure it. Everything the read can
+    /// mean — a listing that failed, a listing that was too long, a directory
+    /// Git could not open, a file that could not be measured — comes back as a
+    /// state rather than an error, because "we cannot tell" is the answer the
+    /// panel has to be able to show.
     fn rescan_inner(
         &mut self,
         identity: &RepoIdentity,
@@ -220,7 +361,15 @@ impl ActivityTracker {
             }
         };
         let listing = match enumerate(work_root, cancelled) {
-            Ok(listing) => listing,
+            Ok(listing) => {
+                self.enumerations += 1;
+                // From here on the index is a statement about what Git considers
+                // a candidate, which is what lets a later round amend it instead
+                // of asking again. A round that never got a listing has not
+                // earned that trust.
+                self.measured = true;
+                listing
+            }
             Err(reason) => {
                 // An unreadable listing says nothing about which files exist,
                 // so the index is dropped rather than kept showing a number
@@ -242,7 +391,11 @@ impl ActivityTracker {
             };
             match std::fs::symlink_metadata(work_root.join(&key)) {
                 Ok(metadata) if metadata.file_type().is_file() => match metadata.modified() {
-                    Ok(mtime) => self.index.note(key, epoch_millis(mtime)),
+                    Ok(mtime) => {
+                        // A fresh table is built in listing order, so the maximum
+                        // can only rise here.
+                        self.index.note(key, epoch_millis(mtime));
+                    }
                     Err(_) => unreadable = true,
                 },
                 // A directory, a gitlink, a socket: the listing says what Git
@@ -263,7 +416,7 @@ impl ActivityTracker {
         // Git opens what it can, leaves the rest out of the listing, and exits
         // 0. Whether it had anything to say is the only distinction it offers:
         // the text is Git's, and the first line of it carries no prefix.
-        let partial = unreadable || listing.warned;
+        let partial = unreadable || listing.warned || self.ignore.unreadable;
         let state = if partial {
             ActivityState::Partial
         } else if self.index.is_empty() {
@@ -273,6 +426,136 @@ impl ActivityTracker {
         };
         let reason = partial.then_some(ActivityReason::UnreadablePaths);
         self.view(Some(session_id), state, reason)
+    }
+
+    /// What one window obliges this round to do.
+    fn plan(&self, window: &Window, work_root: &Path, git_dirs: [&Path; 2]) -> Reading {
+        // A rule source is never just another file: it decides which names the
+        // enumeration would have produced, so it is asked again rather than
+        // measured. Both sets carry it — deleting a `.gitignore` moves the rules
+        // exactly as writing one does.
+        for path in window.changed().union(window.removed()) {
+            if is_rule_source(path, work_root, git_dirs) {
+                return Reading::Rules;
+            }
+        }
+        let mut updates = Vec::with_capacity(window.changed().len());
+        for path in window.changed() {
+            if is_git_internal(path, git_dirs) {
+                // Git's own metadata can justify a fresh snapshot; it is not a
+                // working-tree file and must never enter the age.
+                continue;
+            }
+            let Some(key) = relative(path, work_root) else {
+                return Reading::Enumerate;
+            };
+            if !self.index.contains(&key) {
+                return Reading::Enumerate;
+            }
+            updates.push((path.clone(), key));
+        }
+        Reading::Amend(updates)
+    }
+
+    /// Apply a window to the index without asking Git anything.
+    fn amend(
+        &mut self,
+        window: &Window,
+        updates: &[(PathBuf, OsString)],
+        work_root: &Path,
+        git_dirs: [&Path; 2],
+        session_id: u64,
+    ) -> ActivityView {
+        let mut unreadable = self.ignore.unreadable;
+        let mut lost = false;
+        for (path, key) in updates {
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_file() => match metadata.modified() {
+                    Ok(mtime) => {
+                        lost |= self.index.note(key.clone(), epoch_millis(mtime));
+                    }
+                    Err(_) => unreadable = true,
+                },
+                // A candidate that is not a file any more has left the set,
+                // whether it became a directory, a symlink or nothing at all.
+                Ok(_) => lost |= self.index.evict(key),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    lost |= self.index.evict(key)
+                }
+                Err(_) => unreadable = true,
+            }
+        }
+        for path in window.removed() {
+            if is_git_internal(path, git_dirs) {
+                continue;
+            }
+            let Some(key) = relative(path, work_root) else {
+                continue;
+            };
+            // The window never says whether a vanished name was a file or a
+            // directory, and an event for the directory is the only news about
+            // everything it held: evict both the name and its subtree.
+            lost |= self.index.evict(&key);
+        }
+        if lost {
+            self.rebuilds += 1;
+            self.index.rebuild_newest();
+        }
+        let state = if unreadable {
+            ActivityState::Partial
+        } else if self.index.is_empty() {
+            ActivityState::Empty
+        } else {
+            ActivityState::Ready
+        };
+        self.view(
+            Some(session_id),
+            state,
+            unreadable.then_some(ActivityReason::UnreadablePaths),
+        )
+    }
+
+    /// Compare the one ignore source that lives outside the repository, so
+    /// outside the watch set. One `stat`, no Git process.
+    fn probe_external_ignore(&mut self, work_root: &Path, cancelled: &AtomicBool) -> bool {
+        if !self.ignore.asked || self.ignore.stale {
+            self.ignore.path = resolve_external_ignore(work_root, cancelled);
+            self.ignore.asked = true;
+            self.ignore.stamp = None;
+            self.ignore.stale = false;
+        }
+        let Some(path) = self.ignore.path.as_deref() else {
+            // Nothing to compare: no configured file and no home to hold the
+            // default. That is "there is no global ignore", not a failure.
+            return false;
+        };
+        self.ignore.unreadable = false;
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                let seen = metadata
+                    .modified()
+                    .ok()
+                    .map(|mtime| (epoch_millis(mtime), metadata.len()));
+                if seen == self.ignore.stamp {
+                    false
+                } else {
+                    self.ignore.stamp = seen;
+                    true
+                }
+            }
+            // Absent is a state, not an error: no global rules apply, and the
+            // enumeration that follows will simply not have any.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.ignore.stamp.take().is_some()
+            }
+            // There and unreadable, so Git applied rules this panel cannot see.
+            // The number still covers what was measured, which is exactly what
+            // `partial` is for.
+            Err(_) => {
+                self.ignore.unreadable = true;
+                false
+            }
+        }
     }
 
     /// The value for a round that never consulted the index: the snapshot
@@ -322,6 +605,102 @@ impl ActivityTracker {
         }
     }
 }
+
+/// What one window obliges the round to do.
+enum Reading {
+    /// Every changed name is already a candidate, so the answer is a comparison
+    /// per file and no Git process.
+    Amend(Vec<(PathBuf, OsString)>),
+    /// A name this index has never seen cannot be classified by looking at it:
+    /// it may be a new file, a directory, or a file Git is told to ignore.
+    Enumerate,
+    /// The rules themselves moved, which changes the candidate set rather than a
+    /// measurement of it.
+    Rules,
+}
+
+/// A path whose contents decide which names the enumeration produces. `.gitignore`
+/// belongs to the working tree at any depth, `info/exclude` and `config` to the
+/// repository's own directories — including the shared one a linked worktree
+/// reads through.
+fn is_rule_source(path: &Path, work_root: &Path, git_dirs: [&Path; 2]) -> bool {
+    if path.file_name().is_some_and(|name| name == ".gitignore") {
+        return path.starts_with(work_root);
+    }
+    git_dirs
+        .into_iter()
+        .any(|dir| path == dir.join("info").join("exclude") || path == dir.join("config"))
+}
+
+/// Whether the path is Git's own bookkeeping. Those events refresh the snapshot
+/// and nothing else: `.git/objects` is not a working-tree file, and counting it
+/// would make a commit look like an edit.
+fn is_git_internal(path: &Path, git_dirs: [&Path; 2]) -> bool {
+    git_dirs.iter().any(|dir| path.starts_with(dir))
+}
+
+/// The index key for a path this module produced itself. `None` for a path that
+/// is not inside the work root — a name outside the repository cannot be one of
+/// its entries, and guessing would be worse than asking again.
+fn relative(path: &Path, work_root: &Path) -> Option<OsString> {
+    let stripped = path.strip_prefix(work_root).ok()?;
+    (!stripped.as_os_str().is_empty()).then(|| stripped.as_os_str().to_os_string())
+}
+
+/// Ask Git which file outside the repository carries its ignore rules. `--null`
+/// keeps a value containing a newline whole, and the leading `~` is expanded the
+/// way Git expands it rather than the way a caller might guess.
+fn resolve_external_ignore(work_root: &Path, cancelled: &AtomicBool) -> Option<PathBuf> {
+    let mut command = repo::user_git_command(work_root);
+    command.args(["config", "--get", "--null", "core.excludesFile"]);
+    let output = runner::run_with_limit(
+        command,
+        cancelled,
+        Duration::ZERO,
+        CONFIG_TIMEOUT,
+        runner::DEFAULT_OUTPUT_LIMIT,
+        |_, _| {},
+    )
+    .ok()?;
+    // `git config` exits 1 for a key that is simply not set, which is the
+    // ordinary case rather than a failure worth reporting.
+    let configured = output
+        .status
+        .success()
+        .then(|| {
+            output
+                .stdout
+                .split(|byte| *byte == 0)
+                .next()
+                .filter(|value| !value.is_empty())
+                .and_then(|value| crate::write::raw_to_os(value).ok())
+        })
+        .flatten();
+    match configured {
+        Some(value) => {
+            let text = Path::new(&value);
+            match text
+                .strip_prefix("~")
+                .ok()
+                .filter(|rest| !rest.as_os_str().is_empty())
+            {
+                Some(rest) => home_dir().map(|home| home.join(rest)),
+                None => Some(PathBuf::from(value)),
+            }
+        }
+        // Git's own default, including the XDG override of it.
+        None => std::env::var_os("XDG_CONFIG_HOME")
+            .or_else(|| home_dir().map(|home| home.join(".config").into_os_string()))
+            .map(|base| Path::new(&base).join("git").join("ignore")),
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// A configuration read answers in milliseconds or not at all.
+const CONFIG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What one enumeration learned, before any of it became a number.
 struct Listing {
@@ -443,9 +822,62 @@ mod tests {
         repo::git_with(repo, &[], &["commit", "-qm", message]);
     }
 
+    /// One round with nothing to say about paths, which is what the first round
+    /// of a session always is: the tracker has never enumerated, so there is no
+    /// index for a window to amend.
     fn scan(repo: &Path) -> ActivityView {
-        let identity = repo::detect(repo).expect("test repository");
-        ActivityTracker::default().rescan(&identity, 1, &AtomicBool::new(false))
+        Rounds::new(repo).first()
+    }
+
+    /// A tracker held across rounds, which is the only way to ask what a round
+    /// *cost*: the shipped owner lives on the refresh loop's stack and the
+    /// answer to "did that file need Git" is a counter on it.
+    struct Rounds {
+        identity: RepoIdentity,
+        tracker: ActivityTracker,
+    }
+
+    impl Rounds {
+        fn new(repo: &Path) -> Rounds {
+            Rounds {
+                identity: repo::detect(repo).expect("test repository"),
+                tracker: ActivityTracker::default(),
+            }
+        }
+
+        fn first(&mut self) -> ActivityView {
+            self.tracker.apply(
+                &Window::default(),
+                &self.identity,
+                1,
+                &AtomicBool::new(false),
+            )
+        }
+
+        /// A watch round that names the paths it saw.
+        fn named(&mut self, changed: &[PathBuf], removed: &[PathBuf]) -> ActivityView {
+            let window = Window::naming(changed, removed);
+            self.tracker
+                .apply(&window, &self.identity, 1, &AtomicBool::new(false))
+        }
+
+        /// A round naming exactly one path: what saving a file inside the
+        /// repository arrives as.
+        fn saved(&mut self, path: &Path) -> ActivityView {
+            let names = [path.to_path_buf()];
+            self.named(&names, &[])
+        }
+
+        /// A poll tick or a watch fallback: something moved, and which paths is
+        /// no longer known.
+        fn blind(&mut self) -> ActivityView {
+            self.tracker.apply(
+                &Window::without_detail(),
+                &self.identity,
+                1,
+                &AtomicBool::new(false),
+            )
+        }
     }
 
     const OLD: i64 = 1_700_000_000_000;
@@ -630,19 +1062,324 @@ mod tests {
         let bare = root.path().join("bare.git");
         std::fs::create_dir(&bare).unwrap();
         repo::git_with(&bare, &[], &["init", "-q", "--bare"]);
-        let identity = repo::detect(&bare).expect("bare repository");
-        let view = ActivityTracker::default().rescan(&identity, 1, &AtomicBool::new(false));
+        let view = scan(&bare);
         assert_eq!(view.state, ActivityState::Empty);
         assert_eq!(view.latest_modified_at, None);
     }
 
+    /// The cost claim the incremental update exists to keep: a candidate the
+    /// index already holds is one `lstat` and one comparison. A file saved again
+    /// and again is the ordinary shape of that — each save is later than the one
+    /// before, so the maximum only ever rises or stays put, whether the writer is
+    /// on the newest file in the tree or on some other one.
+    #[test]
+    fn a_re_written_candidate_costs_neither() {
+        let (_root, repo) = repository(&[("quiet.txt", OLD), ("busy.txt", NEWER)]);
+        track(&repo, "base");
+        let mut rounds = Rounds::new(&repo);
+        rounds.first();
+        assert_eq!(
+            (rounds.tracker.enumerations, rounds.tracker.rebuilds),
+            (1, 0)
+        );
+
+        let busy = repo.join("busy.txt");
+        let quiet = repo.join("quiet.txt");
+        for step in 0..20 {
+            stamp(&busy, NEWER + step);
+            assert_eq!(rounds.saved(&busy).state, ActivityState::Ready);
+            stamp(&quiet, OLD + step);
+            assert_eq!(rounds.saved(&quiet).state, ActivityState::Ready);
+        }
+        assert_eq!(
+            (rounds.tracker.enumerations, rounds.tracker.rebuilds),
+            (1, 0),
+            "forty saves of known files cost a Git read or a walk over the table"
+        );
+        assert_eq!(rounds.tracker.index.latest(), Some(NEWER + 19));
+    }
+
+    /// The one case that does cost a walk: the file holding the answer left.
+    /// It is still not a case that costs Git, which is the whole trade.
+    #[test]
+    fn losing_the_holder_costs_one_walk_not_one_enumeration() {
+        let (_root, repo) = repository(&[("older.txt", OLD), ("holder.txt", NEWER)]);
+        track(&repo, "base");
+        let mut rounds = Rounds::new(&repo);
+        rounds.first();
+        std::fs::remove_file(repo.join("holder.txt")).unwrap();
+        let view = rounds.named(&[], &[repo.join("holder.txt")]);
+        assert_eq!(view.state, ActivityState::Ready);
+        assert_eq!(view.latest_modified_at, Some(OLD));
+        assert_eq!(view.display_name.as_deref(), Some("older.txt"));
+        assert_eq!(
+            (rounds.tracker.enumerations, rounds.tracker.rebuilds),
+            (1, 1),
+            "the maximum was either re-derived from Git or left at the deleted file"
+        );
+    }
+
+    /// A deleted directory is named by its own path and by nothing below it, so
+    /// eviction has to take the whole subtree — and only that subtree, since a
+    /// sibling whose name merely starts with the same letters is not below it.
+    #[test]
+    fn a_removed_directory_takes_its_subtree_out_of_the_age() {
+        let (_root, repo) = repository(&[
+            ("dir/holder.txt", NEWER),
+            ("dir-2/sibling.txt", OLD),
+            ("rest.txt", OLD),
+        ]);
+        track(&repo, "base");
+        let mut rounds = Rounds::new(&repo);
+        rounds.first();
+        std::fs::remove_dir_all(repo.join("dir")).unwrap();
+        let view = rounds.named(&[], &[repo.join("dir")]);
+        assert_eq!(view.latest_modified_at, Some(OLD));
+        assert_eq!(
+            rounds.tracker.index.entries.len(),
+            2,
+            "either the subtree survived or the sibling was taken with it"
+        );
+        assert_eq!(rounds.tracker.rebuilds, 1);
+    }
+
+    /// A name the enumeration never produced cannot be classified by looking at
+    /// it, so it costs one Git read — and exactly one, because that read rebuilds
+    /// the index every later round amends.
+    #[test]
+    fn a_new_file_costs_one_enumeration_then_is_amendable() {
+        let (_root, repo) = repository(&[("a.txt", OLD)]);
+        track(&repo, "base");
+        let mut rounds = Rounds::new(&repo);
+        rounds.first();
+        let fresh = repo.join("fresh.txt");
+        std::fs::write(&fresh, b"body\n").unwrap();
+        stamp(&fresh, FUTURE);
+
+        let view = rounds.saved(&fresh);
+        assert_eq!(view.state, ActivityState::Ready);
+        assert_eq!(view.latest_modified_at, Some(FUTURE));
+        assert_eq!(rounds.tracker.enumerations, 2, "a new name needs Git");
+
+        stamp(&fresh, NEWER);
+        let second = rounds.saved(&fresh);
+        assert_eq!(second.latest_modified_at, Some(NEWER));
+        assert_eq!(
+            rounds.tracker.enumerations, 2,
+            "a name the index holds asked Git again"
+        );
+    }
+
+    /// The other way a number goes down without a file leaving: a checkout, a
+    /// revert or a tool that preserves timestamps can write an *older* mtime onto
+    /// the very file that holds the maximum. One comparison cannot answer that, so
+    /// `note` says so and the round re-derives — a walk, not Git.
+    #[test]
+    fn an_older_mtime_on_the_holder_does_not_leave_the_age_behind() {
+        let (_root, repo) = repository(&[("a.txt", OLD), ("holder.txt", FUTURE)]);
+        track(&repo, "base");
+        let mut rounds = Rounds::new(&repo);
+        rounds.first();
+        let holder = repo.join("holder.txt");
+        stamp(&holder, NEWER);
+        let view = rounds.named(&[holder], &[]);
+        assert_eq!(
+            view.latest_modified_at,
+            Some(NEWER),
+            "the holder moved backwards and the age stayed at the future"
+        );
+        assert_eq!(
+            (rounds.tracker.enumerations, rounds.tracker.rebuilds),
+            (1, 1),
+            "a backwards mtime was answered with Git rather than with the walk it costs"
+        );
+    }
+
+    /// The failure this rule exists to prevent: the watcher names a file Git
+    /// excludes, and measuring it would put a build artifact on the age line.
+    #[test]
+    fn a_new_file_git_excludes_never_reaches_the_age_line() {
+        let (_root, repo) = repository(&[(".gitignore", OLD), ("a.txt", OLD)]);
+        std::fs::write(repo.join(".gitignore"), b"build/\n").unwrap();
+        stamp(&repo.join(".gitignore"), OLD);
+        std::fs::create_dir_all(repo.join("build")).unwrap();
+        let artifact = repo.join("build/artifact.o");
+        std::fs::write(&artifact, b"body\n").unwrap();
+        stamp(&artifact, FUTURE);
+        track(&repo, "base");
+
+        let mut rounds = Rounds::new(&repo);
+        rounds.first();
+        let view = rounds.saved(&artifact);
+        assert_eq!(
+            view.latest_modified_at,
+            Some(OLD),
+            "an excluded file moved the age line"
+        );
+        assert!(
+            !rounds
+                .tracker
+                .index
+                .contains(OsStr::new("build/artifact.o")),
+            "the excluded file entered the index even though the age ignored it"
+        );
+        assert_eq!(rounds.tracker.enumerations, 2);
+    }
+
+    /// Git writes its own bookkeeping constantly: an index refresh, a new
+    /// object, a ref move. Those events justify a fresh snapshot and nothing
+    /// else — counting them would make a commit look like an edit.
+    #[test]
+    fn an_event_inside_the_git_directory_moves_nothing() {
+        let (_root, repo) = repository(&[("a.txt", OLD)]);
+        track(&repo, "base");
+        let mut rounds = Rounds::new(&repo);
+        rounds.first();
+        let head = repo.join(".git/HEAD");
+        let index = repo.join(".git/index");
+        let view = rounds.named(&[head, index], &[]);
+        assert_eq!(view.latest_modified_at, Some(OLD));
+        assert_eq!(
+            (rounds.tracker.enumerations, rounds.tracker.rebuilds),
+            (1, 0),
+            "Git's own metadata cost a Git read, or evicted a candidate"
+        );
+    }
+
+    /// A rule file is not an ordinary candidate: it decides which names the
+    /// enumeration produces, so rewriting it re-measures the repository even
+    /// though the file itself is already in the index and perfectly measurable.
+    #[test]
+    fn a_re_written_gitignore_re_measures_the_repository() {
+        let (_root, repo) = repository(&[("a.txt", OLD), (".gitignore", OLD)]);
+        std::fs::write(repo.join(".gitignore"), b"build/\n").unwrap();
+        stamp(&repo.join(".gitignore"), OLD);
+        std::fs::create_dir_all(repo.join("build")).unwrap();
+        let artifact = repo.join("build/artifact.o");
+        std::fs::write(&artifact, b"body\n").unwrap();
+        stamp(&artifact, FUTURE);
+        track(&repo, "base");
+
+        let mut rounds = Rounds::new(&repo);
+        assert_eq!(rounds.first().latest_modified_at, Some(OLD));
+        // Dropping the rule is an event on the rule file, never on the artifact.
+        std::fs::write(repo.join(".gitignore"), b"\n").unwrap();
+        stamp(&repo.join(".gitignore"), OLD);
+        let after = rounds.named(&[repo.join(".gitignore")], &[]);
+        assert_eq!(
+            after.latest_modified_at,
+            Some(FUTURE),
+            "un-ignoring a file left it out of the age"
+        );
+        assert_eq!(after.display_name.as_deref(), Some("build/artifact.o"));
+        assert_eq!(rounds.tracker.enumerations, 2);
+    }
+
+    /// The window that has given up its detail must never be answered from the
+    /// index: the bounded set drops names, and a guess about which files are
+    /// left is how an overflowed watcher comes to look like an idle repository.
+    #[test]
+    fn a_window_without_detail_is_not_answered_from_the_index() {
+        let (_root, repo) = repository(&[("a.txt", OLD)]);
+        track(&repo, "base");
+        let mut rounds = Rounds::new(&repo);
+        rounds.first();
+        let fresh = repo.join("fresh.txt");
+        std::fs::write(&fresh, b"body\n").unwrap();
+        stamp(&fresh, FUTURE);
+        assert_eq!(rounds.blind().latest_modified_at, Some(FUTURE));
+        assert_eq!(rounds.tracker.enumerations, 2);
+    }
+
+    /// A linked worktree can hand over an event whose path is not under the
+    /// directory being measured. Stripping the prefix anyway would produce a key
+    /// that is not the file's candidate name, so the round asks Git instead.
+    #[test]
+    fn a_path_outside_the_work_root_is_not_guessed_at() {
+        let (root, repo) = repository(&[("a.txt", OLD)]);
+        track(&repo, "base");
+        let mut rounds = Rounds::new(&repo);
+        rounds.first();
+        let outside = root.path().join("sibling.txt");
+        std::fs::write(&outside, b"body\n").unwrap();
+        let view = rounds.named(&[outside], &[]);
+        assert_eq!(
+            view.latest_modified_at,
+            Some(OLD),
+            "a file outside the repository joined its age line"
+        );
+        assert_eq!(rounds.tracker.enumerations, 2);
+    }
+
+    /// The one ignore source no watcher can report, because it lives outside the
+    /// repository: Git reads it afresh on every enumeration, so guit compares
+    /// its stamp and re-measures when it moves. The window here names a file the
+    /// index already holds, which means the enumeration below can only have come
+    /// from that comparison.
+    #[test]
+    fn a_change_to_the_external_ignore_source_re_measures_the_repository() {
+        let (root, repo) = repository(&[("a.txt", OLD)]);
+        let global = root.path().join("global-ignore");
+        std::fs::write(&global, b"late.txt\n").unwrap();
+        repo::git_with(
+            &repo,
+            &[],
+            &["config", "core.excludesFile", &global.to_string_lossy()],
+        );
+        let late = repo.join("late.txt");
+        std::fs::write(&late, b"body\n").unwrap();
+        stamp(&late, FUTURE);
+
+        let mut rounds = Rounds::new(&repo);
+        assert_eq!(
+            rounds.first().latest_modified_at,
+            Some(OLD),
+            "the external rule never reached the enumeration"
+        );
+        std::fs::write(&global, b"").unwrap();
+        let second = rounds.named(&[repo.join("a.txt")], &[]);
+        assert_eq!(
+            second.latest_modified_at,
+            Some(FUTURE),
+            "a rule change outside the repository went unnoticed"
+        );
+        assert_eq!(rounds.tracker.enumerations, 2);
+    }
+
+    /// The outside source exists but cannot be opened, so the candidate set was
+    /// built with rules this panel cannot see: the number still says what it
+    /// measured, and `partial` is what says it may not be all of it.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_external_ignore_source_reports_partial() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, repo) = repository(&[("a.txt", OLD)]);
+        let held = root.path().join("private");
+        std::fs::create_dir(&held).unwrap();
+        let global = held.join("ignore");
+        std::fs::write(&global, b"").unwrap();
+        repo::git_with(
+            &repo,
+            &[],
+            &["config", "core.excludesFile", &global.to_string_lossy()],
+        );
+        std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let view = scan(&repo);
+        std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(view.state, ActivityState::Partial);
+        assert_eq!(view.reason, Some(ActivityReason::UnreadablePaths));
+        assert!(
+            view.latest_modified_at.is_some(),
+            "a partial answer still reports what it read"
+        );
+    }
+
     /// The cached maximum is what makes an update a comparison instead of a
     /// search, so the property it rests on is asserted directly: a long run of
-    /// smaller values leaves the answer exactly where it was. Note does not
-    /// re-derive the maximum when the entry that *holds* it is rewritten, and
-    /// that is sound only while nothing forgets — the losing-holder path is
-    /// what the incremental update has to add, together with a count of how
-    /// often it pays for a walk.
+    /// smaller values leaves the answer exactly where it was. `note` does not
+    /// re-derive the maximum on its own — it reports the one case it cannot
+    /// answer, the holder moving backwards — and the two rounds that pay for it
+    /// are tested above, with the eviction path, as counted walks.
     #[test]
     fn a_steady_writer_does_not_move_the_maximum() {
         let mut index = MtimeIndex::default();
@@ -686,7 +1423,7 @@ mod tests {
         let identity = repo::detect(&repo).unwrap();
         let cancelled = AtomicBool::new(false);
         let mut tracker = ActivityTracker::default();
-        tracker.rescan(&identity, 1, &cancelled);
+        tracker.apply(&Window::default(), &identity, 1, &cancelled);
         let view = tracker.unavailable(ActivityReason::RefreshFailed);
         assert_eq!(view.state, ActivityState::Unavailable);
         assert_eq!(view.session_id, None);
@@ -707,8 +1444,8 @@ mod tests {
         let identity = repo::detect(&repo).unwrap();
         let cancelled = AtomicBool::new(false);
         let mut tracker = ActivityTracker::default();
-        let first = tracker.rescan(&identity, 7, &cancelled);
-        let second = tracker.rescan(&identity, 7, &cancelled);
+        let first = tracker.apply(&Window::default(), &identity, 7, &cancelled);
+        let second = tracker.apply(&Window::default(), &identity, 7, &cancelled);
         assert_eq!((first.generation, second.generation), (1, 2));
         assert_eq!(second.session_id, Some(7));
         assert_eq!(first.latest_modified_at, second.latest_modified_at);
