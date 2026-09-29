@@ -29,7 +29,7 @@ const LOG_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 pub const MAX_LANES: u8 = 24;
 pub const PAGE_SIZE: u64 = 50;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitView {
     pub oid: String,
@@ -346,12 +346,27 @@ fn lossy(bytes: &[u8]) -> String {
 /// caller attaches afterwards so that a `CommitView` cannot exist without the
 /// graph row that describes where it sits: a commit drawn with a placeholder
 /// would put its line in a column nobody else agrees on.
+///
+/// `nodes` must be the topology those rows were assigned from — the same read,
+/// the same window. The rows say where a commit is drawn; only the nodes say
+/// *what* is drawn at that position, and a page has to be about one history:
+/// see the check under the loop.
 pub fn parse(
     bytes: &[u8],
+    nodes: &[Node],
     graph: &[GraphRow],
     start: usize,
     remotes: &[String],
 ) -> Result<Vec<CommitView>, ProbeError> {
+    let mismatch = || {
+        // Named once so every shape of disagreement answers with the same
+        // sentence: the code can see that the two reads are not describing one
+        // history, but not which of them moved, so it does not claim to.
+        ProbeError::new(
+            "history_graph_mismatch",
+            "The commit list and the graph did not describe the same history; the page was refused.",
+        )
+    };
     let mut commits = Vec::new();
     for record in bytes.split(|b| *b == RECORD_SEP) {
         if record.is_empty() {
@@ -381,23 +396,25 @@ pub fn parse(
             None => String::new(),
         };
         let offset = start + commits.len();
-        let row = graph.get(offset).ok_or_else(|| {
-            // The two reads described different histories. Drawing a line to
-            // a commit that is not the one this row holds would be a lie
-            // about the shape of the history, so the page is refused.
-            ProbeError::new(
-                "history_graph_mismatch",
-                "The history changed while the graph was being drawn; reload to try again.",
-            )
-        })?;
+        let oid = lossy(fields[0]);
+        let parents: Vec<String> = lossy(fields[1])
+            .split(' ')
+            .filter(|parent| !parent.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let row = graph.get(offset).ok_or_else(mismatch)?;
+        // Having a slot is not the same claim as this commit owning it. Both
+        // reads are asked for one pinned commit, so a pair of histories of the
+        // same length used to pass straight through here: the row would be
+        // drawn from a commit the topology read never saw at that position.
+        let node = nodes.get(offset).ok_or_else(mismatch)?;
+        if node.oid != oid || node.parents != parents {
+            return Err(mismatch());
+        }
         let decorations = lossy(fields[8]);
         commits.push(CommitView {
-            oid: lossy(fields[0]),
-            parents: lossy(fields[1])
-                .split(' ')
-                .filter(|p| !p.is_empty())
-                .map(str::to_owned)
-                .collect(),
+            oid,
+            parents,
             subject,
             author_name: lossy(fields[2]),
             author_email: lossy(fields[3]),
@@ -460,10 +477,14 @@ fn parse_topology(bytes: &[u8]) -> Result<Vec<Node>, ProbeError> {
 /// slice the graph is laid out over. Deliberately a separate, cheap call:
 /// it carries no message bytes, so the prefix a deep page needs stays small
 /// enough that the graph can never be the thing that trips the capture bound.
+///
+/// `target` is required and is the commit the page's other read was asked for:
+/// a revspec here would be resolved a second time, in a second process, and the
+/// two answers are then free to be about different histories.
 fn topology(
     directory: &Path,
     count: u64,
-    target: Option<&str>,
+    target: &str,
     first_parent: bool,
 ) -> Result<Vec<Node>, ProbeError> {
     let mut command = repo::user_git_command(directory);
@@ -478,9 +499,7 @@ fn topology(
     if first_parent {
         command.arg("--first-parent");
     }
-    if let Some(rev) = target {
-        command.arg(rev);
-    }
+    command.arg(target);
     command.arg("--");
     let output = runner::run_with_limit(
         command,
@@ -504,6 +523,67 @@ fn topology(
     parse_topology(&output.stdout)
 }
 
+/// The commit a page is read from, as one full object id.
+///
+/// A page asks Git twice, and two answers are about one history only if both
+/// were asked about the same commit. So the revspec is resolved — or taken from
+/// the caller, who is holding the commit the session was published with — and
+/// both reads then name that object. `None` means nobody said which: only a
+/// repository whose snapshot reports no branch at all (a bare one, where Git
+/// refuses to report a status) arrives here with nothing pinned, and this is
+/// where it pays for the one extra read the session could answer for free.
+///
+/// A commit id, not a branch name, is also what makes a page reproducible: the
+/// branch a page was read from can move while the page is on screen, and a graph
+/// drawn from the name would then be a graph of whatever the name reached.
+fn pinned_rev(directory: &Path, target: Option<&str>) -> Result<String, ProbeError> {
+    if let Some(rev) = target {
+        // Checked here as well as at the command layer: this string is about to
+        // become an argument to Git, and the module that runs the command owns
+        // what its argv accepts. Anything that is not a full object id — a
+        // revspec, an option, a path — never reaches the process.
+        if !valid_oid(rev) {
+            return Err(ProbeError::new(
+                "history_target_invalid",
+                "History can only be requested for a full commit id from the current view.",
+            ));
+        }
+        return Ok(rev.to_owned());
+    }
+    let mut command = repo::user_git_command(directory);
+    command.args(["rev-parse", "--verify", "HEAD"]);
+    let output = runner::run_with_limit(
+        command,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+        Duration::from_secs(30),
+        LOG_OUTPUT_LIMIT,
+        |_, _| {},
+    )?;
+    if !output.status.success() {
+        // Git's own words here are about a branch that has no commits, and that
+        // is a fact a snapshot can answer better than a stderr line: an unborn
+        // session is gated by the command layer and never reaches this read. What
+        // is left is a HEAD that names no commit for a reason this read cannot
+        // see, which is reported as a failed read rather than as a history with
+        // nothing in it.
+        return Err(ProbeError::new(
+            "history_head_unresolved",
+            "This repository's HEAD names no commit, so no history was read.",
+        ));
+    }
+    // Truncation needs no branch of its own: an answer cut short is not a
+    // complete object id, and the check below refuses it.
+    let rev = lossy(output.stdout.trim_ascii()).trim().to_owned();
+    if !valid_oid(&rev) {
+        return Err(ProbeError::new(
+            "history_protocol_error",
+            "Git did not answer with a single commit id; refusing to read a history from it.",
+        ));
+    }
+    Ok(rev)
+}
+
 /// One deterministic page of history. `--topo-order` keeps the sequence
 /// stable for a fixed commit graph, and `--skip`/`-n` on the caller's
 /// `start` cursor reproduces earlier pages byte for byte.
@@ -522,6 +602,7 @@ pub fn page(
     limit: u64,
     first_parent: bool,
 ) -> Result<HistoryPage, ProbeError> {
+    let rev = pinned_rev(directory, target)?;
     let mut command = repo::user_git_command(directory);
     command.args([
         "log",
@@ -534,14 +615,13 @@ pub fn page(
         "--skip",
         &start.to_string(),
     ]);
-    // Both reads carry the flag: the graph is laid out over the same history
-    // the page lists, or the lanes would describe commits that are not there.
+    // Both reads carry the flag and the pinned commit: the graph is laid out
+    // over the same history the page lists, or the lanes would describe commits
+    // that are not there.
     if first_parent {
         command.arg("--first-parent");
     }
-    if let Some(rev) = target {
-        command.arg(rev);
-    }
+    command.arg(&rev);
     command.arg("--");
     let output = runner::run_with_limit(
         command,
@@ -564,17 +644,18 @@ pub fn page(
     }
     let parse_start = Instant::now();
     // The graph is laid out first so `parse` can hand every commit the row
-    // for its own index and refuse the page if the two reads disagree.
+    // for its own index, and compare the commit itself against the topology it
+    // came from, refusing the page if the two reads disagree on either.
     let graph_start = parse_start;
     let nodes = topology(
         directory,
         start.saturating_add(limit).saturating_add(1),
-        target,
+        &rev,
         first_parent,
     )?;
     let rows = assign_lanes_with(&nodes, MAX_LANES, !first_parent);
     let remotes = remote_names(directory);
-    let mut commits = parse(&output.stdout, &rows, start as usize, &remotes)?;
+    let mut commits = parse(&output.stdout, &nodes, &rows, start as usize, &remotes)?;
     perf::mark("history.graph", graph_start.elapsed());
     perf::mark("history.parse", parse_start.elapsed());
     let has_more = commits.len() as u64 > limit;
@@ -730,6 +811,30 @@ mod tests {
             .collect()
     }
 
+    /// The topology those rows were assigned from: the same straight line, so a
+    /// test hands `parse` a matching pair of reads rather than one at a time.
+    fn plain_nodes(rows: usize) -> Vec<Node> {
+        (0..rows)
+            .map(|index| Node {
+                oid: format!("{:040x}", index),
+                parents: (index + 1 < rows)
+                    .then(|| format!("{:040x}", index + 1))
+                    .into_iter()
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// One record in exactly the shape `LOG_FORMAT` emits: ten fields, the
+    /// message closed by Git's own newline, the record closed by NUL.
+    fn record(oid: &str, parents: &[&str]) -> String {
+        format!(
+            "{oid}\x1f{}\x1fguit test\x1fguit@example.invalid\x1f2026-01-01T00:00:00+00:00\
+             \x1fguit test\x1fguit@example.invalid\x1f2026-01-01T00:00:00+00:00\x1f\x1fmessage\n\x00",
+            parents.join(" "),
+        )
+    }
+
     fn commit(repo: &Path, message: &str) -> String {
         git(
             repo,
@@ -840,30 +945,112 @@ mod tests {
     #[test]
     fn parsing_rejects_short_records_instead_of_guessing() {
         let broken = b"abc\x1fdef"; // fewer than FIELD_COUNT fields
-        let error = parse(broken, &plain_graph(4), 0, &[]).unwrap_err();
+        let error = parse(broken, &plain_nodes(4), &plain_graph(4), 0, &[]).unwrap_err();
         assert_eq!(error.code.as_str(), "history_protocol_error");
         // Empty input and trailing separators parse to zero commits.
-        assert_eq!(parse(&[], &plain_graph(4), 0, &[]).unwrap().len(), 0);
-        assert_eq!(parse(b"\x00", &plain_graph(4), 0, &[]).unwrap().len(), 0);
+        assert_eq!(
+            parse(&[], &plain_nodes(4), &plain_graph(4), 0, &[])
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            parse(b"\x00", &plain_nodes(4), &plain_graph(4), 0, &[])
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn a_row_without_a_graph_slot_is_refused_not_defaulted() {
         // A commit must never be drawn in a column nobody else agrees on: if
         // the graph ran out, the page is refused.
-        let record = b"\x00".to_vec();
-        let _ = record;
-        let one = format!(
-            "{}\x1f\x1fa\x1fa@b\x1f2026-01-01T00:00:00Z\x1fa\x1fa@b\x1f2026-01-01T00:00:00Z\x1f\x1fmsg\n\x00",
-            "a".repeat(40)
-        );
+        let one = record(&"a".repeat(40), &[]);
         assert_eq!(
-            parse(one.as_bytes(), &[], 0, &[])
+            parse(one.as_bytes(), &[], &[], 0, &[])
                 .unwrap_err()
                 .code
                 .as_str(),
             "history_graph_mismatch"
         );
+    }
+
+    /// A commit is not a slot. The two reads a page is made of are asked for one
+    /// pinned commit, and `parse` checks that both answered about the same
+    /// commit at every position — the first version of this only looked for a
+    /// slot, so two histories of the same length drew one page out of both.
+    #[test]
+    fn two_reads_are_committed_to_the_same_commits_not_just_the_same_length() {
+        let nodes = plain_nodes(2);
+        let rows = plain_graph(2);
+        // A slot exists at this position, and the commit listed there is not the
+        // one the topology put there.
+        let other_commit = record(&"f".repeat(40), &[]);
+        assert_eq!(
+            parse(other_commit.as_bytes(), &nodes, &rows, 0, &[])
+                .unwrap_err()
+                .code
+                .as_str(),
+            "history_graph_mismatch"
+        );
+        // The id agrees and the parents do not. Lanes are assigned from the
+        // parent list alone, so this row would draw a line into nothing.
+        let first = format!("{:040x}", 0u32);
+        let moved_parent = record(&first, &[&"e".repeat(40)]);
+        assert_eq!(
+            parse(moved_parent.as_bytes(), &nodes, &rows, 0, &[])
+                .unwrap_err()
+                .code
+                .as_str(),
+            "history_graph_mismatch"
+        );
+        // The one pair the two reads do agree on parses, and keeps its parents.
+        let agreed = record(&first, &[&format!("{:040x}", 1u32)]);
+        let commits = parse(agreed.as_bytes(), &nodes, &rows, 0, &[]).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].oid, first);
+    }
+
+    /// A page names one commit in both of its reads, so the history it returns
+    /// cannot be a history that moved while the page was being read.
+    #[test]
+    fn a_pinned_commit_is_the_history_a_page_is_about() {
+        let (_root, repo) = fixture();
+        let first = commit(&repo, "first");
+        commit(&repo, "second");
+        let pinned = page(&repo, 0, Some(&first), 10, false).unwrap();
+        // `first` is the head of that history even though HEAD has moved on:
+        // the page is about the commit it was asked for, and nothing else.
+        assert_eq!(pinned.commits.len(), 1);
+        assert_eq!(pinned.commits[0].oid, first);
+        assert!(!pinned.commits[0].parents.iter().any(|p| p == &first));
+        // Asked with nothing pinned, the same repository answers for its HEAD.
+        let head = page(&repo, 0, None, 10, false).unwrap();
+        assert_eq!(head.commits[0].oid, oid(&repo, "HEAD"));
+        assert_eq!(head.commits.len(), 2);
+    }
+
+    /// A repository may be written to while guit reads it, and Git guards those
+    /// writes with `.git/index.lock`. A history read that needed that lock would
+    /// fail every time an editor or a `git` command was mid-write, and the panel
+    /// would report a repository whose history could not be read at all.
+    /// Measured on Git 2.53 on this host; a Windows or macOS lock file is not a
+    /// claim this test can make.
+    #[test]
+    fn a_page_read_needs_no_lock_someone_else_is_holding() {
+        let (_root, repo) = fixture();
+        commit(&repo, "one");
+        let lock = repo.join(".git/index.lock");
+        std::fs::write(&lock, b"").unwrap();
+        let held = page(&repo, 0, None, 10, false).expect("a held lock is not a failed history");
+        assert_eq!(held.commits.len(), 1);
+        assert!(lock.exists(), "the read must not take over the lock either");
+        std::fs::remove_file(&lock).unwrap();
+        // Same repository, same read, lock gone: nothing about the held lock
+        // changed what came back.
+        let free = page(&repo, 0, None, 10, false).unwrap();
+        assert_eq!(free.commits, held.commits);
     }
 
     #[test]
@@ -879,10 +1066,59 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code.as_str(), "history_page_failed");
         assert!(!error.message.is_empty());
-        // Unborn HEAD: the caller gates on the session branch state, the
-        // raw page surfaces Git's refusal without pretending to be empty.
+        // An unborn HEAD: the pin has nothing to name, and that is said as a
+        // failed read rather than returned as a history with nothing in it. The
+        // command layer gates this on the session's branch state first, so this
+        // is the shape the module keeps for what does reach Git.
         let error = page(&repo, 0, None, 10, false).unwrap_err();
-        assert_eq!(error.code.as_str(), "history_page_failed");
+        assert_eq!(error.code.as_str(), "history_head_unresolved");
+        assert!(!error.message.is_empty());
+    }
+
+    /// A bare repository reports no branch in its snapshot, so nothing can be
+    /// pinned from the session and the page resolves the commit itself. Turning
+    /// an ordinary repository bare after committing is the same object store the
+    /// session read would be handed, with no work tree in front of it.
+    #[test]
+    fn a_bare_repository_resolves_its_own_head_for_every_page() {
+        let (_root, repo) = fixture();
+        let only = commit(&repo, "only");
+        git(&repo, &["config", "core.bare", "true"]);
+        let first = page(&repo, 0, None, 10, false).unwrap();
+        assert_eq!(first.commits.len(), 1);
+        assert_eq!(first.commits[0].oid, only);
+        assert_eq!(first.commits[0].subject, "only");
+        // The same repository a second time answers the same way: the pin is
+        // re-resolved per page, not remembered from the page before.
+        assert_eq!(
+            page(&repo, 0, None, 10, false).unwrap().commits,
+            first.commits
+        );
+        // A bare repository with nothing committed is a refusal, not a void.
+        let root = tempfile::tempdir().unwrap();
+        let empty = root.path().join("empty.git");
+        std::fs::create_dir(&empty).unwrap();
+        git(
+            &empty,
+            &["init", "--quiet", "--bare", "--initial-branch=main"],
+        );
+        assert_eq!(
+            page(&empty, 0, None, 10, false).unwrap_err().code.as_str(),
+            "history_head_unresolved"
+        );
+    }
+
+    #[test]
+    fn a_target_that_is_not_a_full_commit_id_never_reaches_git() {
+        let (_root, repo) = fixture();
+        commit(&repo, "one");
+        // A revspec, an option and a path are all things a `git log` argument
+        // could be made to mean. The page module owns its own argv, so this is
+        // refused there and never spoken to the process.
+        for candidate in ["HEAD", "--all", "refs/heads/main", "one", ""] {
+            let error = page(&repo, 0, Some(candidate), 10, false).unwrap_err();
+            assert_eq!(error.code.as_str(), "history_target_invalid", "{candidate}");
+        }
     }
 
     #[test]

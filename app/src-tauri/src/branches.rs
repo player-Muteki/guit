@@ -816,11 +816,12 @@ mod tests {
         let version = switched.snapshot.expect("re-read").version;
         let preview = preview_delete_branch(&writes, &sessions, version, "main", false);
         assert_eq!(preview.unwrap_err().code.as_str(), "branch_missing");
-        // `git log` would error on an unborn HEAD — guit's command layer
-        // gates this on head_state, and the module keeps the structured
-        // failure for anything that does reach Git.
+        // `git log` would error on an unborn HEAD. guit's command layer gates
+        // this on head_state; deeper in, a page has to name the commit it is
+        // about before asking Git anything, and an unborn HEAD names none — so
+        // the refusal is the pin failing, never a history that looks empty.
         let error = history::page(dir, 0, None, history::PAGE_SIZE, false).unwrap_err();
-        assert_eq!(error.code.as_str(), "history_page_failed");
+        assert_eq!(error.code.as_str(), "history_head_unresolved");
 
         // A commit made in an external terminal must flip the snapshot and
         // make every read path meaningful without reopening the repository.

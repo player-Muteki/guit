@@ -571,10 +571,15 @@ async fn history_page(
                 },
             ));
         }
+        // A page is two Git reads, so it is one history only if both name the
+        // same commit. When the caller named none, the commit is the one this
+        // session was published with — the same value `historyGeneration` counts
+        // moving — rather than a `HEAD` resolved afresh in each of the two reads.
+        let target = oid.or_else(|| sessions.pinned_head());
         history::page(
             directory,
             start,
-            oid.as_deref(),
+            target.as_deref(),
             history::PAGE_SIZE,
             first_parent.unwrap_or(false),
         )

@@ -119,6 +119,26 @@ impl SessionState {
         self.snapshot()
     }
 
+    /// The commit this session's graph domain is drawn from, when its published
+    /// snapshot knows one.
+    ///
+    /// A page of history is two Git reads, and they are about one history only
+    /// if both name the same commit. The snapshot that minted the generation a
+    /// read was requested under already answers "which commit" —
+    /// `graph_input` counts this very oid — so asking it costs no read and keeps
+    /// the answer inside the history the caller asked about. Resolving `HEAD`
+    /// again at read time would be free of that guarantee: the page could then
+    /// describe a commit newer than the branch label rendered beside it.
+    ///
+    /// `None` is a snapshot that reports no head at all: a bare repository, where
+    /// Git refuses to report a status, and an unborn branch, which has no commit
+    /// to name. The reader resolves those itself and says so when it cannot.
+    pub(crate) fn pinned_head(&self) -> Option<String> {
+        self.snapshot()
+            .and_then(|view| view.branch)
+            .and_then(|branch| branch.oid)
+    }
+
     /// Resolves the repository a session-scoped read must be served from, and
     /// the context the answer is echoed under. A context that is not the live
     /// one is refused before Git is asked: this is not a read that failed, it
