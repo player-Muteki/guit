@@ -63,11 +63,16 @@ body {
    would drop the window cluster to a second line at the shipped size with nothing
    else on the bar to blame. The item still grows into whatever room the row has
    and still ellipsises at the same cap; what changed is that it asks for none of
-   the row up front. */
+   the row up front. The four-character floor is separate and smaller on purpose:
+   an item that takes whatever is left can be left with five pixels, which is text
+   present on the page and undrawable — measured at 600 wide before the floor was
+   there. Four characters is the smallest share still worth painting an ellipsis
+   into, and it is in `ch` so it moves with the interface size rather than being a
+   pixel the zoom would walk past. */
 .appbar-repo {
   color: var(--text-muted);
   flex: 1 1 0;
-  min-width: 0;
+  min-width: 4ch;
   max-width: 40%;
   overflow: hidden;
   text-overflow: ellipsis;

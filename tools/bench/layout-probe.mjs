@@ -410,6 +410,37 @@ const MEASURE = `(() => {
     // divided by a computed font-size to recover a rem length.
     appbarPx: document.querySelector(".appbar")
       ? document.querySelector(".appbar").offsetHeight : null,
+    // How many lines the bar is drawn in. The bar gives way downwards on purpose
+    // once the controls with hard floors on it need more width than the window
+    // has, so a height alone cannot say whether those lines got dense: two
+    // full-height lines and two compacted ones measure the same number. A line is
+    // counted by vertical band — items share one when their boxes overlap
+    // vertically — which is what the row drew, not a length this check brought
+    // along and hopes to find.
+    appbarLines: (() => {
+      const bar = document.querySelector(".appbar");
+      if (!bar) return null;
+      const boxes = Array.from(bar.children)
+        .map((node) => node.getBoundingClientRect())
+        .filter((box) => box.width > 0 && box.height > 0)
+        .sort((a, b) => a.top - b.top);
+      let lines = 0;
+      let bandBottom = -Infinity;
+      for (const box of boxes) {
+        if (box.top >= bandBottom) { lines += 1; bandBottom = box.bottom; }
+        else if (box.bottom > bandBottom) { bandBottom = box.bottom; }
+      }
+      return lines > 0 ? lines : null;
+    })(),
+    // The gap between those lines, in the same layout pixels as the height: it is
+    // room the row spends between lines, not room one line takes, so a per-line
+    // length that left it in would blame the token for the gap.
+    appbarGapPx: (() => {
+      const bar = document.querySelector(".appbar");
+      if (!bar) return null;
+      const gap = parseFloat(getComputedStyle(bar).rowGap);
+      return Number.isFinite(gap) ? gap : 0;
+    })(),
     docScrollX: document.documentElement.scrollWidth > window.innerWidth + 1,
     docScrollY: document.documentElement.scrollHeight > window.innerHeight + 1,
     shell: bounds(root),
@@ -939,6 +970,27 @@ async function main() {
     // measures the renderer's zoom rather than the breakpoint.
     const appbarRem = (geo.appbarPx && geo.rootFontSize)
       ? geo.appbarPx / (parseFloat(geo.rootFontSize) || 16) : null;
+    // Per line, not per bar. The bar is allowed to need a second line when the
+    // controls with hard floors on it ask for more width than the window has —
+    // that is the answer this layout gives instead of a sideways scroll — and the
+    // breakpoint's promise is about what each of those lines costs, so a wrapped
+    // bar made of compact lines still keeps it and a wrapped bar made of
+    // full-height lines no longer does.
+    const rootFont = parseFloat(geo.rootFontSize) || 16;
+    const barLines = geo.appbarLines || null;
+    const perLineRem = (geo.appbarPx && barLines)
+      ? (geo.appbarPx - (geo.appbarGapPx || 0) * (barLines - 1)) / rootFont / barLines : null;
+    const barShape = `app bar ${appbarRem === null ? "?" : appbarRem.toFixed(2)}rem in `
+      + `${barLines === null ? "?" : barLines} line(s), `
+      + `${perLineRem === null ? "?" : perLineRem.toFixed(2)}rem each`;
+    if (size.width >= 1100) {
+      // One line where there is room for one. Wrapping is the last resort, so a
+      // window with slack in it must not be drawn as two rows of chrome: this is
+      // the shape the shipped look rests on, read at the widths that are never
+      // short of pixels.
+      check(`[${size.label}] a wide window draws the app bar as one line`,
+            barLines === 1, `${barShape}`);
+    }
     // A token that is declared in the source, present in the bundle, and
     // still reads back empty is the signature of a rule that a *syntax* error
     // swallowed: a missing brace after an @media turns everything that follows
@@ -964,17 +1016,17 @@ async function main() {
           `top-level :root rules=${cascade.rootRules}, --appbar-height="${cascade.token}"`);
 
     if (size.height <= 440) {
-      check(`[${size.label}] a very short window compacts the app bar twice`,
-            appbarRem !== null && appbarRem <= 2.05,
-            `app bar is ${appbarRem === null ? "?" : appbarRem.toFixed(2)}rem (base 2.5rem, 440px breakpoint 2rem)`);
+      check(`[${size.label}] a very short window compacts each line of the app bar twice`,
+            perLineRem !== null && perLineRem <= 2.05,
+            `${barShape} (base 2.5rem, 440px breakpoint 2rem)`);
     } else if (size.height <= 560) {
-      check(`[${size.label}] a short window compacts the app bar`,
-            appbarRem !== null && appbarRem <= 2.3,
-            `app bar is ${appbarRem === null ? "?" : appbarRem.toFixed(2)}rem (base 2.5rem, 560px breakpoint 2.25rem)`);
+      check(`[${size.label}] a short window compacts each line of the app bar`,
+            perLineRem !== null && perLineRem <= 2.3,
+            `${barShape} (base 2.5rem, 560px breakpoint 2.25rem)`);
     } else {
       check(`[${size.label}] a roomy window keeps the full app bar`,
-            appbarRem !== null && appbarRem > 2.4,
-            `app bar is ${appbarRem === null ? "?" : appbarRem.toFixed(2)}rem (base 2.5rem)`);
+            perLineRem !== null && perLineRem > 2.4,
+            `${barShape} (base 2.5rem)`);
     }
 
     // The macaron scheme must reach the running document, in both schemes.
