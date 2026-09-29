@@ -68,6 +68,20 @@ def main():
         report.check(f"{os.path.basename(path)} never closes more than it opens",
                      escaped_at is None, f"an extra }} near line {escaped_at}" if escaped_at else "")
 
+        # 0b. Every @media sits at the top level. Counting braces is not
+        #     enough: a block that closes one line late is still balanced, and
+        #     the media queries that follow it are then nested inside a
+        #     contradictory condition — `@media (min-width: 1100px)` inside
+        #     `@media (max-width: 480px)` never matches, so a documented wide
+        #     layout ships dead while the gate above stays green.
+        nested = []
+        for match in re.finditer(r"@media\s*[^{]{0,200}\{", bare):
+            depth = bare[:match.start()].count("{") - bare[:match.start()].count("}")
+            if depth > 0:
+                nested.append((bare[:match.start()].count("\n") + 1, match.group(0)[:48]))
+        report.check(f"{os.path.basename(path)} nests no media query in another block",
+                     not nested, "; ".join(f"line {line}: {head.strip()}" for line, head in nested))
+
     # 1. No bare viewport-height lengths outside a comment.
     stripped = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
     vh = re.findall(r"\b\d+(?:\.\d+)?vh\b", stripped)

@@ -702,6 +702,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   .worktrees-view .ref-row { flex-wrap: wrap; height: auto; min-height: var(--row-height); row-gap: 0.1rem; padding-block: 0.2rem; }
   .worktrees-view .ref-row .ref-name { flex: 1 1 auto; min-width: 0; }
   .worktrees-view .ref-row .ref-meta { flex: 1 1 100%; margin-left: 0; padding-left: 0; }
+}
 
 /* --- every shape of window -----------------------------------------------
    The narrow rules above only ever asked "is this narrower than 480?". A
@@ -789,4 +790,3 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   overflow-wrap: anywhere;
 }
 
-}
