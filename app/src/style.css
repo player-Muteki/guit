@@ -28,11 +28,26 @@ body {
 .shell { display: flex; flex-direction: column; }
 
 /* --- app bar --- */
+/* The bar wraps rather than outgrow the window. Every shrink rule above it is
+   keyed to the viewport in CSS pixels, and the interface size changes the root
+   font without changing that number: measured at the shipped 720 width, the bar
+   fitted exactly at 16px, asked for 736 at 18px and 970 at the 24px ceiling, so
+   the four window buttons landed past the right edge of the frame and the panel
+   had to be scrolled sideways to reach its own close. A row cannot answer that
+   by squeezing, because the floors on it are controls — so the row gives way
+   downwards instead. The one-row bar keeps measuring the token it used to be
+   written with — 40px at the shipped size and 32px in the dense setting the tokens
+   define for a short window, both read off the header's own box — because
+   `min-height` lets the token floor the row without capping it, and the row's
+   tallest item is smaller than that floor at both sizes. */
 .appbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.4rem;
-  height: var(--appbar-height);
+  row-gap: 0.25rem;
+  min-height: var(--appbar-height);
+  height: auto;
   padding-inline: 0.5rem;
   background: var(--surface-panel);
   border-bottom: 1px solid var(--line);
@@ -40,8 +55,19 @@ body {
   flex: 0 0 auto;
 }
 .appbar-wordmark { font-weight: 700; letter-spacing: 0.02em; color: var(--accent); }
+/* The path is the only thing on this row that a reader can do without, and it is
+   the only one written in a length nobody controls: a deep repository path is a
+   hundred pixels of text that has to ellipise. `flex-basis: 0` is what keeps that
+   text out of the line-break decision — a wrapping row is broken by each item's
+   basis, not by the shrunken width it ends up with, so a basis written as the path
+   would drop the window cluster to a second line at the shipped size with nothing
+   else on the bar to blame. The item still grows into whatever room the row has
+   and still ellipsises at the same cap; what changed is that it asks for none of
+   the row up front. */
 .appbar-repo {
   color: var(--text-muted);
+  flex: 1 1 0;
+  min-width: 0;
   max-width: 40%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -111,14 +137,19 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
    together — a screen reader announces them as one "Window" group — and separated by a
    rule so a repository button is never mistaken for one of them. `flex: 0 0 auto` is the
    part that matters at the narrow width: the cluster may not be squeezed, because a
-   button that loses its box loses the way out of a bad theme too. */
+   button that loses its box loses the way out of a bad theme too.
+   `margin-inline-start: auto` is what keeps it at the corner once the bar wraps. The
+   spacer takes the slack first, because it comes earlier in the row, so at every width
+   this panel fits on one line the cluster lands exactly where it always did; when the
+   line is full the cluster is the thing that goes down, and the auto margin is what
+   puts it back against the right edge instead of leaving it at the left of its own row. */
 .window-controls {
   display: flex;
   align-items: center;
   gap: 0.1rem;
   flex: 0 0 auto;
   padding-inline-start: 0.4rem;
-  margin-inline-start: 0.1rem;
+  margin-inline-start: auto;
   border-left: 1px solid var(--line);
 }
 
