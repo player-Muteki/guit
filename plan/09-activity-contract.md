@@ -950,6 +950,105 @@ C01 记录里已经写明为空的那件事，两件事同一批兑现。
 未被本次抓取到），只记观测到的逐字节相等。实现不得依赖“它一定等价于加了 `--cached`”，
 也不得依赖反方向；命令形状按第 1 条逐字写死即可避开这个问题。
 
+#### C03 落地后的形状修正与实现记录（`dec4cdf` + `b4fc2af`，锚点按符号）
+
+上面三节是决定过程；这一小节是交付事实。差异写在差异的位置上，正文原样不动。
+
+**入口从一个动作变成一个回合。** `ActivityTracker::rescan` 删除，改为
+`apply(&Window, &RepoIdentity, session_id, &AtomicBool)`：C01 交出来的那个窗口第一次
+被消费。`run_loop` 的 `fire` 闭包不再丢弃 `window`，把 `repo-refreshed` 之后发出的
+`activity-updated` 交给它。Poll 模式与 Watch 兜底交出的都是 `incomplete` 窗口，
+因此它们的每一轮仍是全量重扫——**增量只发生在 Watch 模式的事件分支上**，
+这条与 §3 开头那句“事件路径给出线索后按项更新”的适用范围一致。
+`Window` 为此只外露三个只读端（`is_incomplete` / `changed` / `removed`）加两个
+`#[cfg(test)]` 的构造函数（`naming` / `without_detail`），字段没有变可见。
+
+**§3 的“局部重枚举”落到的是一次全量枚举。** 触发粒度是“这个回合需要问 Git”，
+不是“带路径范围的枚举”——§3.1 实测的结论就是不缩。目录事件与未列过的文件因此走
+同一条 `Reading::Enumerate`，`plan` 里没有目录这一支。
+
+**一个没列过的名字付一次枚举，这是本轮唯一推翻“按项更新”字面意思的规则。**
+`lstat` 决定不了它是不是被忽略的：notify 对重命名只给出**来源**那一侧，目标是一个
+全新的路径；新建目录里的文件、原子保存换出去的那个临时名同理。盲目 `note` 会把
+Git 排除的文件放上年龄线，而那个错误方向上没有任何东西能把它撤回。
+所以判据是“上一次枚举是否列过它”（`MtimeIndex::contains`），而不是“它现在在不在盘上”。
+
+**§3 最后一条的“索引/HEAD 移动需重枚举”实现为不强制枚举。** `.git` 内的路径由
+`is_git_internal` 丢弃，既不 `note`、也不 `evict`、也不触发枚举（钉在
+`an_event_inside_the_git_directory_moves_nothing`：一次点名 `.git/HEAD` 与 `.git/index`
+的窗口，`enumerations` 与 `rebuilds` 都不动）。理由不是省事：让候选集合改变的那次操作
+**同时改写工作树文件**，其中新出现的已跟踪路径必然是“未列过的名字”，per-name 规则
+已经为它付了那次枚举；而“工作树一个文件都没动、只有 `.git` 变了”的形式
+（commit、`reset --soft`、`stash drop`）确实不改变候选集合。规则改变的形式由规则源
+扫描接住：`is_rule_source` 认任意深度的 `.gitignore`（工作树内）、两个 git 目录下的
+`info/exclude` 与 `config`，`changed` 与 `removed` 两侧都算（删掉规则文件和写下规则文件
+改变的是同一件事）。
+**残留形状一条**：`git rm --cached` 之后一个原本已跟踪的路径变成“未跟踪且被忽略”，
+索引里那条会一直留着，直到下一次枚举——上界与 §1.5 的兜底 tick 同一个（≤5 s），
+不是“直到下一次事件”。
+
+**第三个代价是 §3 没列的：持有者的日期倒退。** `MtimeIndex::note` 现在返回一个布尔量，
+含义是“我缓存的最大值可能已经不成立了”——被记录的这条路径**正是**持有者且新值更小。
+两个提交之前的形状（C02 记录里写的“note 不重算最大值是 sound 的，只要没有东西遗忘”）
+在只增不减的写入下成立，但 checkout、revert 与保留时间戳的工具会把一个文件写成
+**更早**的 mtime，那时答案在表里的别处。`amend` 把它和“持有者被删除”合并成同一个
+`lost` 旗标，走一次 `rebuild_newest`。删除那半按路径**成分**做前缀淘汰
+（`Path::starts_with`），所以去掉 `dir` 不会带走 `dir-2`，而目录整棵子树会一起出局
+（窗口不区分消失的是文件还是目录，一次目录删除是关于其下所有内容唯一的消息）。
+
+**成本由计数钉，不由 review 钉。** `ActivityTracker` 上新增 `enumerations` 与 `rebuilds`
+两个计数器，测试断的是 `(enumerations, rebuilds)` 这一对数：
+`a_re_written_candidate_costs_neither`（持有者与被持有者交替各写二十次 ⇒ `(1, 0)`，
+即 §2.1 要的 O(1)）、`a_new_file_costs_one_enumeration_then_is_amendable`
+（新名字 ⇒ `(2, …)`，同名第二次写不再问 Git）、
+`losing_the_holder_costs_one_walk_not_one_enumeration`（`(1, 1)`）、
+`a_removed_directory_takes_its_subtree_out_of_the_age`、
+`an_older_mtime_on_the_holder_does_not_leave_the_age_behind`、
+`an_event_inside_the_git_directory_moves_nothing`、
+`a_re_written_gitignore_re_measures_the_repository`（规则源那一侧付枚举，年龄从 `OLD`
+跳到被解除忽略的那个 `FUTURE`）、`a_window_without_detail_is_not_answered_from_the_index`、
+`a_path_outside_the_work_root_is_not_guessed_at`（worktree 外或软链后的路径不猜相对名，
+`relative` 同时拒绝剥空后的空 remainder）、
+`a_new_file_git_excludes_never_reaches_the_age_line`（被排除的名字连索引都不进）。
+两个计数器在非测试构建里没人读，因此带 `#[allow(dead_code)]`，理由与
+`model.rs::PathTable::len` 上那一条同源。
+三处变异验证：把 `note` 的倒退判定写死成 `false` ⇒ 倒退那条与新名字那两条同时红；
+把 `plan` 里“未列过就枚举”写死成 `false` ⇒ 排除项那条与新名字那一条红；
+删掉 `plan` 的规则源扫描 ⇒ 规则源那条红。改回即绿。
+
+**仓库外那一个忽略来源的核对，节拍比 §3 定的更密。** §3 选择“复用兜底 tick”，
+实现是**每一轮**比一次 `metadata` 的 `(mtime, size)`。改密的理由只有代价这一维，
+而且是净减少：§1.5 那张表算的是**一次兜底 tick** 的三项合计（`status` + 合并枚举 +
+`lstat` 一遍），它同时是 C02 交付后**每一次 `fire`** 的成本——那时还没有消费路径的读者。
+C03 之后被命名文件的事件回合省掉那次枚举（本仓库那一档在 §1.5 的表里是 1.3 ms），
+只付每个被命名路径一次 `lstat` 加这一次
+仓库外路径的 `stat`，而 tick 那一支仍然付全表；轮与轮之间的节流出在 C01 已定的形状上
+（连续写入受 `MAX_WAIT` 压到约每秒一次，空闲时没有 `fire` 就一次都不做）。**§3 里那条不许动的东西没动：核对不发 Git 命令。**
+重新解析 `core.excludesFile` 的触发也换了：不是“核对发现路径本身变了”，
+而是任一规则源事件把 `ExternalIgnore::stale` 置位后、在**下一轮**重新解析；
+本轮的枚举已经按新规则执行（Git 在 `ls-files` 里自己读配置），所以候选集合不会错，
+滞后的只是“这个面板接下来打算比对哪一个路径”。`asked` 旗标是 §3 没要求但必须有的：
+没有它，一个没有 home 的机器会每轮付一个 Git 进程去问同一个空答案。
+用的命令是 `config --get --null` 而不是 §3 写的 `--show-origin`：只需要值，
+`--null` 让含换行的值保持完整，而 `--show-origin` 的前缀是 Git 的文本格式。
+读不到该路径（父目录不可穿越）⇒ `unreadable`，它同时进入枚举侧与增量侧的 `partial`
+（`an_unreadable_external_ignore_source_reports_partial`）；不存在 ⇒ 就是“没有全局忽略”，
+不是失败（`a_deleted_external_ignore_source_is_not_a_failure` 钉的是它另外两件事：
+删除仍然触发一次重枚举，且那一轮的 `reason` 是 `None`）。
+
+**工作树根每轮规范化一次**（`apply` 里对 `identity.work_dir()` 取 `canonicalize`，
+失败就用原路径），因为 notify 给出的事件路径是规范形态；不规范化时
+`relative` 会在 `/tmp` 是指向 `/private/tmp` 那类主机上把每一个事件都判成
+“仓库外”，增量分支整条退化成全量。裸仓库没有工作树，直接走 `rescan_inner`。
+`measured` 是新加的旗标：只有真正拿到过一次列表的回合才允许被增量回答，
+否则“索引里没有这个名字”等于“仓库里没有文件”，那正是本模块存在的目的所拒绝的读法。
+
+**一条 C02 记录里已经点名的义务就此兑现**：`a_steady_writer_does_not_move_the_maximum`
+钉的语义没变（一次比较、一次插入、平局由路径裁决），它旁边多了 `saved`/`named`/
+`blind` 那组夹具来钉**成本**。未兑现的还剩一条，仍不是漏网：年龄那一行的显示、
+它的 CHANGELOG 条目、以及“被忽略的文件与嵌套仓库内部不移动年龄”这条用户可见的
+限制记录，一起留给有显示的那一批。
+
 ## 4. C04/C05 的接口约束（依据现状代码）
 
 - 后端已有单调 `version`（`session.rs::publish`）与只在本快照内有效的 `FileId`；
