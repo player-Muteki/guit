@@ -424,9 +424,14 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   fileList.addEventListener("scroll", () => {
     if (listRows.length > 0) renderFileRows();
   }, { passive: true });
-  window.addEventListener("resize", () => {
+  // The window is not the only thing that resizes a list any more: the split
+  // between this region and the history moves whenever the user drags it, and
+  // the rows on screen have to be re-measured for the height they now have.
+  // Watching the scroller itself covers every cause — a drag, a zoom, a
+  // narrower window — without this view knowing about any of them.
+  new ResizeObserver(() => {
     if (listRows.length > 0) renderFileRows();
-  });
+  }).observe(fileList);
   // Keyboard navigation over the virtual list: arrows move between files
   // (headings skipped), Home/End jump, Enter toggles the selected file's group.
   fileList.addEventListener("keydown", (event) => {

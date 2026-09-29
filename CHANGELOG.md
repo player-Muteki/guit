@@ -34,6 +34,14 @@ is the record of what is not verified.
   between. The repository entry is Main's empty state, and the branch picker is
   a layer over Main rather than a page of its own. `Ctrl/Cmd+1` and `+2` reach
   the two pages; the old `+3`…`+7` view switches are gone.
+- The two halves of Main divide its height between themselves. The bar between
+  the file list and the graph takes a drag, or the arrow and Page keys once it
+  has focus, and the share you leave it at is remembered. Each half has a floor
+  it cannot be dragged past; a window too short to give both their floors scrolls
+  the page instead of crushing the commit footer into nothing.
+- Each list re-measures itself when its own box changes — a dragged split,
+  interface zoom, a narrower window — rather than only when the window was
+  resized, so the rows on screen always match the height they are drawn in.
 - Stash, worktree and submodule management and remote management no longer have
   a page. Their commands stay registered while their entry points are retired in
   the open, so nothing is reachable by accident.

@@ -405,6 +405,17 @@
   --gutter-tight: 0.5rem; /* vertical view padding */
   --block-gap: 0.4rem;
   --splitter-size: 5px;   /* a drag target stays a drag target when zoomed */
+  /* The two regions of the main panel each keep a list floor of three rows:
+     fewer is a list that cannot be scrolled or read, whatever share the split
+     gives it. The regions' own floors come from their content, so these are
+     the only numbers to adjust if the chrome around a list changes. They are
+     floors, not shares, so they are deliberately *not* restated for a short
+     window — below them the panel scrolls rather than crushing a control. */
+  --main-list-floor: calc(3 * var(--row-height));
+  --main-graph-floor: calc(3 * var(--row-height-history));
+  /* The share of the panel the changes area starts with; a drag rewrites it
+     on the panel element and the value outlives the session. */
+  --main-split: 45;
   /* Content that may take a share of the *short* axis. Expressed against the
      window's own height so a 1400x420 letterbox window does not hand a list
      190px and call it a panel. */

@@ -61,6 +61,7 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
         el("dt", { text: "Ctrl/Cmd + O" }), el("dd", { text: "Open repository" }),
         el("dt", { text: "Ctrl/Cmd + R" }), el("dd", { text: "Refresh status" }),
         el("dt", { text: "Ctrl/Cmd + 1 / 2" }), el("dd", { text: "Main page / Settings" }),
+        el("dt", { text: "↑ / ↓ / Page keys" }), el("dd", { text: "Resize Main's split (divider focused)" }),
         el("dt", { text: "Ctrl/Cmd + Enter" }), el("dd", { text: "Commit (from the message box)" }),
         el("dt", { text: "Ctrl/Cmd + = / − / 0" }), el("dd", { text: "Interface zoom in / out / reset" }),
         el("dt", { text: "Escape" }), el("dd", { text: "Close a dialog, menu or layer" }),

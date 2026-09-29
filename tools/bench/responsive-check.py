@@ -77,7 +77,8 @@ def main():
     # 2. The tokens those shares now run through actually exist, in both the
     #    base block and the short-window overrides.
     for token in ("--detail-cap", "--list-cap", "--gutter", "--gutter-tight",
-                  "--block-gap", "--tab-min-width", "--tab-item-size", "--splitter-size"):
+                  "--block-gap", "--tab-min-width", "--tab-item-size", "--splitter-size",
+                  "--main-split", "--main-list-floor", "--main-graph-floor"):
         report.check(f"{token} is declared", token in token_css)
     for token in ("--detail-cap", "--list-cap", "--appbar-height", "--statusbar-height"):
         report.check(f"{token} is restated for a short window", token_css.count(token) >= 2,

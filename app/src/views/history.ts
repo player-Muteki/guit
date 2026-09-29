@@ -690,9 +690,13 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   listPane.addEventListener("scroll", () => {
     if (visible.length > 0) renderRows();
   }, { passive: true });
-  window.addEventListener("resize", () => {
+  // The graph is drawn row by row, so its geometry has to follow the height
+  // the pane actually has. A resize observer on the scroller catches every
+  // cause — the panel split being dragged, interface zoom, a narrower window —
+  // that a `window` listener would miss.
+  new ResizeObserver(() => {
     if (visible.length > 0) renderRows();
-  });
+  }).observe(listPane);
   listPane.addEventListener("keydown", (event) => {
     if (visible.length === 0) return;
     const viewport = listPane.clientHeight || 240;

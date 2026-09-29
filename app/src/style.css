@@ -225,8 +225,30 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 /* --- main panel --- */
 /* The changes area and the history of the current branch share one page and
    are visible together, so neither region is a page of its own. They split the
-   page by height rather than by content, and each keeps its own scroller. */
-.main-panel > .view-body { flex: 1 1 0; min-height: 0; }
+   page by height rather than by content, and each keeps its own scroller.
+   `--main-split` is the share the changes area asks for and the history takes
+   the rest.
+
+   A region cannot be dragged below its floor: the rows its list must show
+   (`--main-list-floor`, `--main-graph-floor`) plus `--region-chrome`, the height
+   of everything the region has to show besides its list — an operation banner,
+   the commit box, the graph's head and detail. The chrome is measured by
+   `mainPanel.ts` rather than written down here: an intrinsic `min-content` floor
+   reads the whole list instead of the region's own parts in one engine and
+   nothing in another, and either way the commit box is what gets clipped. A
+   guessed constant fails the same way, quietly. When the window is too short to
+   give both regions their floor the panel itself scrolls, so the commit footer
+   stays reachable instead of covered. */
+.main-panel { overflow-y: auto; }
+.main-panel > .changes-view { flex: var(--main-split, 45) 1 0; min-height: calc(var(--main-list-floor) + var(--region-chrome, 0px)); }
+.main-panel > .history-view { flex: calc(100 - var(--main-split, 45)) 1 0; min-height: calc(var(--main-graph-floor) + var(--region-chrome, 0px)); }
+.main-panel > .changes-view .file-list { min-height: var(--main-list-floor); }
+.main-panel > .history-view .history-list { min-height: var(--main-graph-floor); }
+.main-splitter { position: relative; }
+/* The bar reads as a hairline and is grabbed as a handle: the hit area is
+   taller than the line, so a drag starts without the panel growing a second
+   divider the user did not ask for. */
+.main-splitter::after { content: ""; position: absolute; inset-inline: 0; inset-block: -0.25rem; }
 
 /* --- overlay --- */
 /* The branch picker covers the panel instead of becoming a third page. It is
