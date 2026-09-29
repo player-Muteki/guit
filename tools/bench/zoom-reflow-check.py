@@ -26,9 +26,14 @@ a document wider than the window is the same fact as "this page needs a sideways
 scroll". Deep in the tree a row inside its own scrolling list may measure wider
 than anything, which is why the assertion is not "no node is wider than the
 window" — the header, footer and landmarks are read only to name the suspect when
-the two numbers disagree. The last thing checked is the geometry of the one
-control set that must not be lost: each of the four window buttons has to sit
-inside the frame's own box, on both pages, at the largest size the control offers.
+the two numbers disagree. The walk is taken at every size the control offers, not at
+its two ends, because the middle is where a reader actually sits, and the same
+claims are then asked again in the minimum window: shrinking the panel and growing
+the interface are two separate controls, and only the first moves the viewport the
+stylesheet's breakpoints are keyed to. The last thing checked is the geometry of the
+one control set that must not be lost: each of the four window buttons has to sit
+inside the frame's own box, on both pages, at both window sizes and the largest size
+the control offers.
 
 Usage: /usr/bin/python3 zoom-reflow-check.py <release-binary> <fixture-repo> <work-dir>
 Needs python3-gi and a live AT-SPI bus; the release binary comes from
@@ -154,6 +159,41 @@ def click_named(name):
     return A.click(A.find_button(name=name))
 
 
+def ask_pages(report, size, where):
+    """The two width claims, asked on both pages, at one window and one size.
+
+    The app bar is shared and the Main page carries the widest rows, so a width read
+    on one of them says nothing about the other. `where` names the window the reading
+    was taken in, because the same size is asked for in the window the build ships
+    with and again in the minimum one: those are two facts, not one repeated.
+    """
+    for page in ("Main", "Settings"):
+        if not click_named(page):
+            report.check(f"{page} is reachable", False)
+            continue
+        time.sleep(1.2)
+        frame = frame_box()
+        if frame is None:
+            report.check(f"{page} has a window to measure", False)
+            continue
+        widths = boxes_by_role()
+        page_width = (widths.get("document_web") or (None,))[0]
+        report.check(f"{page} does not outgrow {where} at {size}px",
+                     page_width is not None and page_width <= frame.width,
+                     f"window={frame.width} page={page_width!r} suspects="
+                     + str({role: box for role, box in sorted(widths.items()) if box[0] > frame.width}))
+        outside = []
+        for control in sorted(WINDOW_CLUSTER):
+            box = control_box(control)
+            if box is None:
+                outside.append(f"{control}:missing")
+            elif box.x + box.width > frame.x + frame.width or box.y + box.height > frame.y + frame.height:
+                outside.append(f"{control}@{box.x}+{box.width}")
+        report.check(f"{page} keeps all four window buttons inside {where} at {size}px",
+                     not outside,
+                     f"window={frame.x}..{frame.x + frame.width} " + ",".join(outside))
+
+
 def main():
     if len(sys.argv) != 4:
         print(__doc__)
@@ -186,6 +226,17 @@ def main():
         time.sleep(1.0)
         start_size = shown_size()
         report.check("the Settings page reports the interface size", start_size is not None, f"shown={start_size!r}")
+        # Read at every step, not at the two ends. The control offers a range and the
+        # layout is allowed to give way somewhere inside it, so the only sizes a
+        # two-point check could speak to are the ones nobody chose; a step in the middle
+        # that runs out of width is the same defect wearing a smaller number. The bar's
+        # shape is sampled on Main at each size, since that is the page whose rows are
+        # widest and therefore the first to reach the window's edge. Where it first stops
+        # being one line is printed with the walk: that is a design outcome, not a
+        # promise, so it is recorded rather than asserted.
+        walk = []
+        overflowed = []
+        wrapped_from = None
         for _ in range(MAX_STEPS):
             before = shown_size()
             if not click_named("Zoom in"):
@@ -196,36 +247,35 @@ def main():
                 break
             steps_up += 1
             seen.append(after)
-        report.check("the interface size can actually be moved", steps_up > 0, f"steps={steps_up} sizes={seen}")
-
-        # Ask on both pages: the app bar is shared and the Main page is the one that
-        # carries the widest rows.
-        for page in ("Main", "Settings"):
-            if not click_named(page):
-                report.check(f"{page} is reachable", False)
-                continue
-            time.sleep(1.2)
+            click_named("Main")
+            time.sleep(1.0)
             frame = frame_box()
-            if frame is None:
-                report.check(f"{page} has a window to measure", False)
-                continue
-            size = seen[-1] if seen else "?"
-            widths = boxes_by_role()
-            page_width = (widths.get("document_web") or (None,))[0]
-            report.check(f"{page} does not outgrow its window at the largest interface size {size}px",
-                         page_width is not None and page_width <= frame.width,
-                         f"window={frame.width} page={page_width!r} suspects="
-                         + str({role: box for role, box in sorted(widths.items()) if box[0] > frame.width}))
-            outside = []
-            for control in sorted(WINDOW_CLUSTER):
-                box = control_box(control)
-                if box is None:
-                    outside.append(f"{control}:missing")
-                elif box.x + box.width > frame.x + frame.width or box.y + box.height > frame.y + frame.height:
-                    outside.append(f"{control}@{box.x}+{box.width}")
-            report.check(f"{page} keeps all four window buttons inside the window at {size}px",
-                         not outside,
-                         f"window={frame.x}..{frame.x + frame.width} " + ",".join(outside))
+            page_width = (boxes_by_role().get("document_web") or (None,))[0]
+            line = on_one_line("Switch branch", "Always on top")
+            walk.append((after, page_width, frame.width if frame else None, line))
+            if frame is not None and page_width is not None and page_width > frame.width:
+                overflowed.append(after)
+            if line is False and wrapped_from is None:
+                wrapped_from = after
+            click_named("Settings")
+            time.sleep(1.0)
+        report.check("the interface size can actually be moved", steps_up > 0, f"steps={steps_up} sizes={seen}")
+        report.check("no interface size between the shipped one and the ceiling needs a sideways scroll",
+                     steps_up > 0 and not overflowed,
+                     f"wrapped_from={wrapped_from} overflowed_at={overflowed} "
+                     + ",".join(f"{size}px:page={page}/window={window}" for size, page, window, _ in walk))
+
+        # Then the two claims in full, on both pages, in this window — and again once the
+        # same window has been shrunk to the minimum it declares. A panel can be made
+        # small and large at once by two different controls, and only one of them moves
+        # the viewport the stylesheet's own breakpoints are keyed to.
+        ceiling = seen[-1] if seen else "?"
+        ask_pages(report, ceiling, "the shipped window")
+        if click_named("Test compact window"):
+            time.sleep(2.5)
+            ask_pages(report, ceiling, "the minimum window")
+        else:
+            report.check("the Settings page offers the minimum window", False)
     finally:
         try:
             os.killpg(os.getpgid(process.pid), 15)
