@@ -495,3 +495,89 @@ git log --no-color -z --topo-order --format=<LOG_FORMAT> -n 51 --skip=<start> <r
 后半要做的是给这条 gutter 一个共享的横向原点（一轮滚轮/一组方向键平移整列，
 `at(column)` 减去原点），并让计数行说出现在看的是哪几格；`--graph-*` 令牌与
 `GRAPH_LANE_REM` 那组常量由 G 的字体工作约束，改的只能是原点，不是尺子。
+
+## 8. D03b 后半：把界外的那几格移进来看（`graphPan` + 一条 gutter 的原点）
+
+§7.4 那条待办按它写的样子做完了：尺子一根没动，动的只有原点。
+
+### 8.1 现在的形状
+
+| 位置 | 改动 |
+| --- | --- |
+| `historyModel.ts` | `graphPan(columns, laneWidth, maxGutterWidth, origin) → {origin, shown, columns, over}`：`shown = floor(上限 / 道宽)`，原点钳在 `[0, columns - shown]` |
+| `rowGeometry` | 第 7 个参数 `origin = 0`；`at(column) = (column - origin + 0.5) * laneWidth`。`width` 不看原点，`clipped` 看 |
+| `views/history.ts` | 一份 `graphOrigin`；`graphWindow(fontPx?)` 由它和当前字号现算；`shiftGraph(by)` 一次改原点、重画行、改计数行 |
+| 手势 | 横向滚轮、Shift + 纵向滚轮、`ArrowLeft`/`ArrowRight`；`over` 为假时一个都不接管（不 `preventDefault`） |
+| `loadPage(reset)` | 重置回 0：换一份历史就从它自己的左边缘看起 |
+
+三处都从同一个纯函数算，没有第二份状态：`shown` 由令牌来，所以 G 那边若把
+`--graph-gutter-max` 或 `--graph-lane` 改了，能平移多远、计数行说看了第几格，都跟着一起变。
+
+### 8.2 两条不是显然的取舍
+
+**步长是"一格"，不是滚轮的像素数。** 计数行说的是列，渐隐说的是列，一条道就是一个色相单位；
+按像素平移会让那句"现在看的是第 5–12 格"和屏幕上真的那几格差半格。触控板因此可能凭惯性
+一路推到端点——这条没测手感，只测了"一步恰好一格"（§8.4 第 3 条、§8.5 第 6–9 条）。
+
+**接管与否看 `over`，不看这一行有没有被裁。** 窗口里只要还有列在界外，这一下手势就归图；
+已经推到端点时仍然归图（不落到列表上去滚），因为同一个动作在这里有两个意思是错的。
+`clipped` 仍然是**逐行**的：它决定那一行戴不戴渐隐，平移进来之后 `at(widest)` 落回盒内，
+fade 自己就摘掉了——"还有"不再成立的时候，那句谎得同时收回。
+
+### 8.3 计数行新增的那句话
+
+`… The graph shows columns 5–12 of 12; scroll sideways or use the arrow keys to move it.`
+
+`countLabel` 是 `role="status"`，所以每平移一格朗读会跟着报新的一格。折叠与这句话不会同时出现：
+折叠的窗口里 `lanes` 是空的，`columns` 回到 1，`over` 自然是假。
+
+### 8.4 模型侧新增的三条断言（`app/tests/history-model.mjs`）
+
+1. **天花板确实窄于后端的上限。** `shown < MAX_LANES`，其中 `MAX_LANES` 是**读 `history.rs` 源文件**
+   拿到的数字——同一条契约的两端之一写在另一端那里，抬高后端上限应当拓宽可平移的范围，
+   而不是悄悄让 8 格窗口去裁一个 40 格的图。
+2. `graphPan` 的钳制与 `over`：`origin` 停在 `columns - shown`，负数回到 0，放得下的历史 `over` 为假
+   且被存储的越界原点不会把它留在那个位置上。
+3. **平移把远列移进盒子。** 列 10 的道在 `origin = 10` 时落在 `0.5 * lane`，`width` 不变（还是上限），
+   `clipped` 转假；圆点与那条道各自相对静止位置移动了恰好 `10 * lane`——两条一起断言是因为
+   "整行一起挪"和"每行各走各的"在单看一条线时没有区别。
+
+门槛：`npm run build`（`tsc --noEmit` + vite）clean；`npm run test:fixture` **338 pass / 0 fail**
+（+2：`graphPan` 的钳制与关系一条、平移把远列移进盒子一条）；`read-budget.mjs` fails=0；
+`color-contrast.py dist/assets` fails=0；`responsive-check.py` fails=0。Rust 本轮未改，§7.3 那组仍有效。
+
+### 8.5 引擎里的实测：`tools/bench/graph-pan-engine-probe.ts`
+
+模型能决定算式，决定不了"这两个手势真的动了那几列没有"。新探针把 `views/history.ts` 在
+WebKitGTK 里建两个会话（一个 12 列的历史、一个 6 列的），派发真的 `WheelEvent` /
+`KeyboardEvent`，读真的 SVG 属性和 `getBoundingClientRect`。15 条全过：
+
+| 断言 | 实测 |
+| --- | --- |
+| 道宽 / 上限 / 放得下几格 | 13 px / 104 px / 8（字号 16 px） |
+| 未平移时最右一条道 | x = 149.5 px，界外 45.5 px，行戴 `data-fade` |
+| 计数行 | `… columns 1–8 of 12; scroll sideways or use the arrow keys to move it.` |
+| 横向滚轮、Shift+纵向滚轮、`→` | 各动一格（136.5 → 123.5 → 110.5），事件都被接管，句子跟着改 |
+| 普通纵向滚轮 | 不接管、一格也不动（123.5 → 123.5） |
+| 推到端点之后再多按 3 次 `→` | 停在 `columns 5–12 of 12`，最右一条 97.5 px ≤ 104 px，`data-fade` 自己摘掉 |
+| 整段平移过程中 `.commit-subject` 的左边界 | 277.578125 px，一次未变 |
+| 全部返回 | 最右一条回到 149.5 px，句子回到 `1–8 of 12` |
+| 6 列的历史 | 句子里没有 "columns"，`→` 不被接管，gutter 宽 78 px = 6 × 13 px |
+
+复现：`/usr/bin/python3 ../tools/bench/webkit-engine-probe.py graph-pan-engine-probe.ts src/style.css src/style/tokens.css`
+（需要显示器与 WebKitGTK 绑定；`-v` 会把上面这些数字全部打出来）。
+
+### 8.6 残差
+
+- **左边缘是硬切，右边缘有渐隐。** `style.css` 里 `.graph-gutter[data-fade]` 那道 mask 只写
+  `to right`；原点大于 0 时，界外那几列在 x = 0 处被切平。补它要在样式表里加一条
+  `data-fade-left`（或把两侧合成一个 `mask-composite: intersect`），而 `style.css` 是并行开发者的
+  文件，这一条留给那边定，不是这边顺手改的。**注意**：内联两层 mask 并不能绕过它——默认的
+  `add` 合成会把两处渐隐互相抵消掉。
+- **手感没有量过。**"一步一格"是指令层的事实，触控板惯性事件密度会让它推得很快；端点有钳制，
+  所以后果只是到得早，不是走到空处。
+- **折叠的窗口没有东西可平移**（`lanes` 为空）。闸门里"超过 24 轨道不静默简化"由 §7 那条
+  `folded` + 计数行那句话负责，横向可达负责的是 8 < 列数 ≤ 24 这一段。
+- 真机上还需要一个用户知道手势存在。句子写了"scroll sideways or use the arrow keys"，但没有
+  任何地方解释"sideways"在一台只有纵向滚轮的设备上就是 Shift——文案归 D04/D05 之后一起审。
+

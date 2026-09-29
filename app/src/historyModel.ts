@@ -54,8 +54,10 @@ export function graphNodePx(baseFontPx: number): number {
 // repays its width in every row on screen: the subject text slides right as
 // soon as "Load older" reaches it. Rows that exceed the ceiling still draw
 // every lane they have — the view fades the over-wide part at the right edge
-// instead of pretending it is not there. The ceiling is eight lanes, about
-// what a merge-heavy history opens at most before the backend folds it.
+// instead of pretending it is not there, and pans it (see `graphPan`) so the
+// lanes past the edge are reachable rather than lost. The ceiling is eight
+// lanes; the backend keeps drawing a graph up to twenty-four open lanes before
+// it folds, so a wide history is expected to need the pan, not the fold.
 export const GRAPH_GUTTER_MAX_REM = 6.5;
 
 export function graphGutterMaxPx(baseFontPx: number): number {
@@ -79,6 +81,41 @@ export function graphColumns(commits: readonly CommitView[]): number {
     if (graph.node + 1 > widest) widest = graph.node + 1;
   }
   return widest;
+}
+
+// Where the gutter's one fixed width sits over a history that opens more
+// columns than it has room for. The pan is a shared horizontal origin
+// measured in columns and applied to every row alike: a lane keeps its colour
+// as you scroll, and it has to keep its column as you pan.
+export interface GraphPan {
+  // The leftmost column drawn, never past the last column that fits.
+  origin: number;
+  // Columns the drawn width has room for.
+  shown: number;
+  // Columns the loaded history opens.
+  columns: number;
+  // True when a column lies off the edge, so the view offers the pan and
+  // names the columns on screen.
+  over: boolean;
+}
+
+export function graphPan(
+  columns: number,
+  laneWidth: number,
+  maxGutterWidth: number,
+  origin: number,
+): GraphPan {
+  const whole = Math.max(1, Math.trunc(columns));
+  const shown = Math.min(whole, Math.max(1, Math.floor(maxGutterWidth / laneWidth)));
+  // Panning stops with the last column drawn: past it the gutter would show a
+  // lane of empty width rather than the history's own edge.
+  const limit = Math.max(0, whole - shown);
+  return {
+    origin: Math.min(Math.max(0, Math.trunc(origin)), limit),
+    shown,
+    columns: whole,
+    over: whole > shown,
+  };
 }
 
 // One primitive of a row's drawing, in pixels. The view turns each into an
@@ -117,9 +154,13 @@ export function rowGeometry(
   rowHeight: number,
   nodeRadius: number,
   maxGutterWidth: number,
+  origin = 0,
 ): RowGeometry {
   const mid = rowHeight / 2;
-  const at = (column: number): number => (column + 0.5) * laneWidth;
+  // Column `origin` is drawn in the gutter's first lane. Every row shifts by
+  // the same amount, which is what lets a lane that runs off the left edge
+  // arrive at the same x as its neighbours above and below.
+  const at = (column: number): number => (column - origin + 0.5) * laneWidth;
   const parts: GraphPart[] = [];
 
   // A lane this row merely passes through runs the full height, so it joins

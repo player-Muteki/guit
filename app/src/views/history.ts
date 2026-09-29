@@ -18,6 +18,7 @@ import {
   graphGutterMaxPx,
   graphLanePx,
   graphNodePx,
+  graphPan,
   historyPageStart,
   indexNames,
   matchPosition,
@@ -27,6 +28,7 @@ import {
   stepMatch,
   unknownNames,
   type FindQuery,
+  type GraphPan,
   type NameIndex,
   type RefSummary,
 } from "../historyModel";
@@ -154,6 +156,12 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // screen: sizing it to what is visible would slide the subject text
   // sideways every time a wider part of the graph scrolled into view.
   let gutterColumns = 1;
+  // The leftmost column the gutter draws. The ceiling is eight lanes and the
+  // backend draws up to twenty-four before it folds, so a wide history has
+  // columns past the edge; the pan is how the user reaches them. One value
+  // shared by every row, because a lane that shifted per row would be a
+  // different lane.
+  let graphOrigin = 0;
   // The loaded history wired backwards, so a graph tooltip can answer where
   // a commit is included rather than only repeating what its row already
   // says. Rebuilt with every page, and answers cached per commit until then.
@@ -504,7 +512,21 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     return `${commit.authorName} — ${commit.subject}\nIncluded in: ${included}`;
   };
 
-  const graphSvg = (commit: CommitView, height: number, fontPx: number): SVGSVGElement => {
+  // Where the gutter's one fixed width sits over the loaded history, at the
+  // size it is drawn. Derived rather than stored: the four numbers are a
+  // function of the columns loaded, the ceiling and the requested origin, so
+  // a kept copy would be one more thing to remember to refresh — and a line
+  // above the list naming columns the drawing does not show is the pan
+  // describing a graph it did not move.
+  const graphWindow = (fontPx = currentFontPx()): GraphPan =>
+    graphPan(gutterColumns, graphLanePx(fontPx), graphGutterMaxPx(fontPx), graphOrigin);
+
+  const graphSvg = (
+    commit: CommitView,
+    height: number,
+    fontPx: number,
+    origin: number,
+  ): SVGSVGElement => {
     const geometry = rowGeometry(
       commit.graph,
       gutterColumns,
@@ -512,6 +534,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       height,
       graphNodePx(fontPx),
       graphGutterMaxPx(fontPx),
+      origin,
     );
     const svg = document.createElementNS(SVG_NS, "svg");
     svg.setAttribute("class", "graph-gutter");
@@ -656,19 +679,28 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // the listing that described them.
   const namesUnknown = (): boolean => refTips.unknown && namesContext !== undefined;
 
-  const countSentence = (): string =>
-    plural(commits.length, "commit") +
-    (hasMore ? " so far." : " — all loaded.") +
-    (firstParent ? " on the mainline." : "") +
-    // A folded graph is drawn on the first-parent line, so the shape on screen
-    // is simpler than the history. Say which it is rather than let the drawing
-    // imply a history with no branches in it.
-    (graphFolded
-      ? " Branches are not drawn: this history has more lines open at once than the graph has room for."
-      : "") +
-    // An unlabelled column of rows is also what a repository with no branches
-    // or tags looks like, so the two have to be told apart somewhere.
-    (namesUnknown() ? " The names could not be read, so no row is labelled." : "");
+  const countSentence = (): string => {
+    const pan = graphWindow();
+    return (
+      plural(commits.length, "commit") +
+      (hasMore ? " so far." : " — all loaded.") +
+      (firstParent ? " on the mainline." : "") +
+      // A folded graph is drawn on the first-parent line, so the shape on screen
+      // is simpler than the history. Say which it is rather than let the drawing
+      // imply a history with no branches in it.
+      (graphFolded
+        ? " Branches are not drawn: this history has more lines open at once than the graph has room for."
+        : "") +
+      // The fade at the gutter's edge says lanes stop there; only this line says
+      // whether anything lies past it, how wide the view is and what moves it.
+      (pan.over
+        ? ` The graph shows columns ${pan.origin + 1}–${pan.origin + pan.shown} of ${pan.columns}; scroll sideways or use the arrow keys to move it.`
+        : "") +
+      // An unlabelled column of rows is also what a repository with no branches
+      // or tags looks like, so the two have to be told apart somewhere.
+      (namesUnknown() ? " The names could not be read, so no row is labelled." : "")
+    );
+  };
 
   const updateCount = (): void => {
     // A placeholder owns the line while the list itself is hidden.
@@ -683,6 +715,23 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     updateCount();
     paintDetailNames();
     if (visible.length > 0) renderRows();
+  };
+
+  // Moving the gutter by whole columns. One step answers both halves of the
+  // gesture: the drawing shifts and the line above the list names the columns
+  // now on screen. A pane with nothing off its edge has no pan to offer, so
+  // the caller keeps its default handling — and while there are columns past
+  // the edge the gesture belongs to the graph even at either end of the run,
+  // where a scroll that fell through to the list would be a second meaning
+  // for the same movement of the wheel.
+  const shiftGraph = (by: number): boolean => {
+    const before = graphWindow();
+    if (!before.over) return false;
+    graphOrigin = before.origin + by;
+    const after = graphWindow();
+    if (after.origin !== before.origin) renderRows();
+    updateCount();
+    return true;
   };
 
   const loadPage = async (reset: boolean): Promise<void> => {
@@ -708,6 +757,9 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       commits = reset ? page.commits : commits.concat(page.commits);
       hasMore = page.hasMore;
       gutterColumns = graphColumns(commits);
+      // A reset is a different history, not a longer one: it starts at its own
+      // left edge rather than carrying over where the old one was panned to.
+      if (reset) graphOrigin = 0;
       refMap = buildRefMap(commits);
       refSummaries.clear();
       graphFolded = commits.some((commit) => commit.graph.folded);
@@ -771,6 +823,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     if (visible.length === 0) return;
     const rows = buildHistoryRows(visible);
     const fontPx = currentFontPx();
+    const pan = graphWindow(fontPx);
     const rowHeightNow = rowHeightPx(fontPx, HISTORY_ROW_REM);
     const viewport = listPane.clientHeight || 240;
     const slice = visibleWindow(rows.length, listPane.scrollTop, viewport, rowHeightNow, OVERSCAN);
@@ -802,7 +855,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       // The graph leads the row, so it is prepended last: `prepend` puts the
       // element at the very front, and the gutter belongs left of the refs
       // chips and the subject.
-      element.prepend(graphSvg(commit, rowHeightNow, fontPx));
+      element.prepend(graphSvg(commit, rowHeightNow, fontPx, pan.origin));
       element.addEventListener("click", () => setSelected(commit, index));
       element.addEventListener("dblclick", () => void runCommitDiff());
       fragment.append(element);
@@ -871,6 +924,18 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   listPane.addEventListener("scroll", () => {
     if (visible.length > 0) renderRows();
   }, { passive: true });
+  // A wheel turned sideways, or one turned down under Shift, moves the graph
+  // rather than the list: the pane cannot scroll horizontally — every row
+  // shares one gutter width — so there is nothing else this gesture could be
+  // asking for. It steps a column at a time because a column is the unit the
+  // gutter is drawn and named in; a pan measured in pixels would leave the
+  // line above the list naming columns that are only half on screen.
+  listPane.addEventListener("wheel", (event) => {
+    const sideways = Math.abs(event.deltaX) > Math.abs(event.deltaY);
+    const by = sideways ? Math.sign(event.deltaX) : event.shiftKey ? Math.sign(event.deltaY) : 0;
+    if (by === 0) return;
+    if (shiftGraph(by)) event.preventDefault();
+  }, { passive: false });
   // The graph is drawn row by row, so its geometry has to follow the height
   // the pane actually has. A resize observer on the scroller catches every
   // cause — the panel split being dragged, interface zoom, a narrower window —
@@ -889,6 +954,15 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       case "ArrowUp": target = selectedIndex < 0 ? 0 : Math.max(selectedIndex - 1, 0); break;
       case "Home": target = 0; break;
       case "End": target = visible.length - 1; break;
+      case "ArrowLeft":
+        // The sideways keys move the graph, not the selection: nothing here
+        // scrolls horizontally, and the columns a pan reaches are the ones the
+        // row keys cannot show at all.
+        if (shiftGraph(-1)) event.preventDefault();
+        return;
+      case "ArrowRight":
+        if (shiftGraph(1)) event.preventDefault();
+        return;
       case "Enter":
         if (selectedIndex >= 0) setSelected(visible[selectedIndex], selectedIndex);
         event.preventDefault();

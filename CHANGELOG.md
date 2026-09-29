@@ -146,6 +146,15 @@ is the record of what is not verified.
 - The graph gutter keeps a fixed maximum width: a deep fan fades its extra
   lanes at the right edge rather than widening every row and sliding the
   subjects sideways once "Load older" reaches it.
+- What that fade hides is reachable now. A wheel turned sideways, a wheel
+  turned down under Shift, and the left and right arrow keys move the gutter one
+  column at a time, and the line above the list names the columns on screen —
+  "The graph shows columns 5–12 of 12". The pan stops with the history's own
+  last column, never past it into empty width, and a row whose lanes have all
+  come back inside the box stops fading. The gutter keeps that one width
+  throughout, so the subject text never moves with the pan. A graph narrow
+  enough to fit asks for none of it: those keys and that wheel are left to the
+  list, and the line above it says nothing about columns.
 - The node the pointer is over grows, so the graph acknowledges the mouse
   before the detail pane opens. A merge's ring grows and its inner dot does
   not, so the join still reads as a join.

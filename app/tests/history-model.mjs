@@ -12,6 +12,7 @@ import {
   graphGutterMaxPx,
   graphLanePx,
   graphNodePx,
+  graphPan,
   graphWidth,
   historyPageStart,
   indexNames,
@@ -206,6 +207,76 @@ test("an over-wide row is capped at the gutter ceiling and marked clipped", () =
   assert.equal(narrow.clipped, false, "a row inside the ceiling carries no fade");
   const tighter = rowGeometry(graph({ entry: true, exit: true, merge: true, lanes: [1] }), 2, 10, 28, 3, 5);
   assert.equal(tighter.width, 10, "never narrower than one lane, ceiling or not");
+});
+
+// The backend folds a window above this many live lanes; the gutter draws any
+// graph up to that number and leaves the ones past its ceiling to the pan.
+// Read out of the Rust so the two ends of one contract cannot drift apart in
+// silence — a raised `MAX_LANES` is supposed to widen what the pan reaches.
+const backendLaneCap = () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("../src-tauri/src/history.rs", import.meta.url)),
+    "utf8",
+  );
+  const match = source.match(/pub const MAX_LANES: Lane = (\d+);/);
+  assert.ok(match, "the backend's lane cap is a declared constant");
+  return Number(match[1]);
+};
+
+test("the ceiling leaves columns for the pan, and the pan reaches them", () => {
+  const lane = graphLanePx(16);
+  const cap = graphGutterMaxPx(16);
+  const shown = Math.floor(cap / lane);
+  assert.ok(
+    shown < backendLaneCap(),
+    "the gutter shows fewer columns than the backend draws, so a wide graph is panned, not folded",
+  );
+  const history = graphPan(backendLaneCap(), lane, cap, 0);
+  assert.equal(history.shown, shown, "the pan counts the columns the drawn width has room for");
+  assert.equal(history.columns, backendLaneCap());
+  assert.equal(history.over, true, "columns past the edge are announced");
+  assert.equal(history.origin, 0);
+  // Panning stops where the history does: past the last column the gutter
+  // would show empty width and claim it was the edge of a branch.
+  const far = graphPan(backendLaneCap(), lane, cap, 999);
+  assert.equal(far.origin, backendLaneCap() - shown, "the run ends with the last column drawn");
+  assert.equal(graphPan(backendLaneCap(), lane, cap, -3).origin, 0, "and never before the first");
+  const fits = graphPan(shown, lane, cap, 4);
+  assert.equal(fits.over, false, "a history that fits has nothing to pan");
+  assert.equal(fits.origin, 0, "and a stored overshoot is not a position it can be left at");
+});
+
+test("panning brings a far column into the box without moving the gutter", () => {
+  const lane = 10;
+  const cap = 80;
+  const wide = graph({ entry: true, exit: true, lanes: [10] });
+  const before = rowGeometry(wide, 20, lane, 28, 3, cap, 0);
+  assert.equal(before.width, cap, "one width for every origin, so the subject text cannot slide");
+  assert.equal(before.clipped, true, "the lane hangs off the edge");
+  const after = rowGeometry(wide, 20, lane, 28, 3, cap, 10);
+  assert.equal(after.width, cap, "the gutter does not follow the pan");
+  const moved = after.parts.find((part) => part.kind === "line" && part.lane === 10);
+  assert.equal(moved.x, 0.5 * lane, "column 10 is drawn in the gutter's first lane");
+  assert.equal(after.clipped, false, "a row inside the box carries no fade");
+  // Every column in the row moves by the same distance. A pan that shifted
+  // the lanes and not the dots — or one row and not its neighbour — would
+  // break a lane apart at the row boundary and draw a history that does not
+  // connect.
+  const place = (origin) => {
+    const parts = rowGeometry(wide, 20, lane, 28, 3, cap, origin).parts;
+    return [
+      parts.find((part) => part.kind === "node").cx,
+      parts.find((part) => part.kind === "line" && part.lane === 10).x,
+    ];
+  };
+  const [dotRest, laneRest] = place(0);
+  const [dotPanned, lanePanned] = place(10);
+  assert.equal(dotRest - dotPanned, 10 * lane, "the dot moves ten columns left under the pan");
+  assert.equal(
+    laneRest - lanePanned,
+    10 * lane,
+    "and its lane by exactly the same, so a lane still meets its neighbours",
+  );
 });
 
 test("a straight line enters from above, leaves below, and joins at the dot", () => {

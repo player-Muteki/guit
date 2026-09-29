@@ -72,7 +72,8 @@ flowchart LR
 | 阶段 D：D01 历史读取的身份与双读一致 | 已实施（同文 §4，提交 `861a1ca`；页内的 `%D` 标签随 D02 撤走，标签移动已在无头 Edge 驱动构建产物上测到，但 `history_head_unresolved` 那条拒绝在真实 WebView 里仍没被看见过） |
 | 阶段 D：D02 结构化引用与独立刷新 | 已实施（同文 §5，提交 `315e988`/`61d9d4f`/`532be32`；名字不再进页面读取，一次 listing 读按代次同时喂两个视图。Refs 读的迟到、超过约十一万条 ref 的仓库都没有被测过） |
 | 阶段 D：D03a 深页的相位测量 | 已测量（同文 §6：一页的代价与深度无关、与仓库大小成正比，`--topo-order` 让两条读各付一次整仓库遍历；检查点省不掉那份遍历，能省掉其中一次。约十万提交深度处先碰捕获上界的是图读，那一条是算术而非观测） |
-| 阶段 D：D03b–D05 | 待实施 |
+| 阶段 D：D03b 轨道宽度的类型与横向可达 | 已实施（同文 §7–§8，提交 `a1bb405` 与本条：列号由 `ship()` 那一处自己窄化，上限两侧各差一格的形状钉了测试；界外的列由一份共享原点平移进来，计数行说出现在看的是第几格。`tools/bench/graph-pan-engine-probe.ts` 在真实 WebKitGTK 里派发滚轮与方向键量了 15 条（一步恰好一格、gutter 一根宽度不动、推到端点不再走、放得下的历史不接管任何键）。未闭合：原点到 0 以外时左边缘是硬切（那道 mask 只写 `to right`，`style.css` 归并行开发者），触控板惯性的手感没量过，真机上还没有地方解释 Shift 就是" sideways"） |
+| 阶段 D：D03c–D05 | 待实施 |
 | 阶段 G：W01 版本化外观记录 | 已实施（`app/src/preferencesModel.ts` 与 `appearanceStore.ts`，读不懂的记录拒绝改写；规则由 `app/tests/preferences-model.mjs`、`app/tests/preferences-store.mjs` 钉住）。同一份隔离 HOME 上的第二次启动已经跑过：`tools/bench/restart-persistence-check.py` 用面板自己的关闭钮结束第一个窗口，再启动一次，量到方案、界面缩放和窗口尺寸都按记录读回（关闭时 340，重开 340；记的是 18px，屏幕上也写 18px，默认那 16px 不在页面上）。读不懂的**偏好**记录只在纯模型层被拒（`app/tests/preferences-model.mjs`），真实窗口里那一眼要手写 WebKit 自己的存储文件格式，harness 不做，因此“坏配置可恢复”这一条对偏好记录仍未闭合。要打字的三类字段——两个文字字体、代码字体、那行年龄的秒数、自定义片段——这台宿主没有可写的通道，留在 `tools/bench/recovery-checks.sh` 尾部 manual 4 由人跑；跨比例因子与第二块显示器的钳位同上 manual 3，本宿主只有一块显示器，因此没有运行时证据 |
 | 阶段 G：W02 三类字体与回退 | 已实施（三个名字一行一条，样本行用面板自己的两个字体属性绘制；等宽是否真对齐问过引擎，见 `tools/bench/font-engine-probe.ts` 与 `app/tests/font-stack.mjs`。该问题只朝 WebKitGTK 问过，其他引擎从未运行） |
 | 阶段 G：W03 自定义 CSS 主题 | 已实施（子集逐条审阅、预览、应用、`Ctrl/Cmd+Shift+T` 与页面按钮同一条出路、崩溃后用留下的标记恢复）；未验证部分是事后那一眼只看控件有没有盒子（`app/tests/theme-apply.mjs` 与 `tools/bench/theme-check.py` 的口径），子集也只对 WebKitGTK 这一个引擎固定（`tools/bench/webkit-engine-probe.py`） |
