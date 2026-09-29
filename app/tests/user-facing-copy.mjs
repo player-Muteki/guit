@@ -15,7 +15,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,11 +43,17 @@ function* filesIn(directory, extensions) {
   }
 }
 
+// The documents are whatever the repository ships today: a directory that is
+// not there has no text to name the schedule, and the rule is about text, not
+// about one fixed path surviving forever.
+const documents = (directory) =>
+  existsSync(directory)
+    ? readdirSync(directory).filter((name) => name.endsWith(".md")).map((name) => join(directory, name))
+    : [];
+
 const targets = [
   ...["README.md", "README-en.md", "README-zh.md", "CHANGELOG.md"].map((name) => join(root, name)),
-  ...readdirSync(join(root, "docs"))
-    .filter((name) => name.endsWith(".md"))
-    .map((name) => join(root, "docs", name)),
+  ...documents(join(root, "docs")),
   ...filesIn(join(root, "app/src"), [".ts", ".css", ".html"]),
   ...filesIn(join(root, "app/src-tauri/src"), [".rs"]),
   ...filesIn(join(root, "app/src-tauri/capabilities"), [".json"]),
