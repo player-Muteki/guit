@@ -89,6 +89,94 @@ test("the pre-versioned keys become one record, and only then disappear", () => 
   assert.deepEqual(store.keys(), [PREFERENCES_KEY], "the record replaces the keys it read");
 });
 
+// The panel moves onto the record one owner at a time: the zoom and the theme
+// arrived first, and the split drag and the interval row still keep their own keys.
+// While that is true the record must neither delete those keys nor claim a value
+// they contradict — an owner that appears to save a setting which comes back
+// different is the failure this list exists to stop.
+
+test("a migration leaves the keys it does not own where their owners can read them", () => {
+  const store = storageOf({
+    initial: legacy({
+      [LEGACY_KEYS.fontPx]: "18",
+      [LEGACY_KEYS.split]: "62",
+      [LEGACY_KEYS.interval]: "9",
+    }),
+  });
+  const state = loadPreferences(store, ["split", "interval"]);
+  assert.equal(state.migrated, true);
+  assert.equal(state.prefs.fontPx, 18);
+  assert.equal(state.prefs.split, 62);
+  assert.equal(state.prefs.intervalSeconds, 9);
+  assert.equal(store.peek(LEGACY_KEYS.fontPx), null, "a key whose owner moved is replaced by the record");
+  assert.deepEqual(
+    store.keys().filter((key) => key !== PREFERENCES_KEY).sort(),
+    [LEGACY_KEYS.interval, LEGACY_KEYS.split].sort(),
+    "a key still owned elsewhere survives",
+  );
+});
+
+test("a live legacy key is read over the record, and reconciled on the next save", () => {
+  const store = storageOf();
+  const started = updatePreferences(store, loadPreferences(store, ["split"]), { theme: "dark" });
+  assert.equal(started.prefs.split, DEFAULT_PREFERENCES.split);
+
+  store.setItem(LEGACY_KEYS.split, "70"); // the way that owner still writes today
+  const writes = store.attempts.set;
+  const reloaded = loadPreferences(store, ["split"]);
+  assert.equal(reloaded.prefs.split, 70, "the value the owner stored is the field's current value");
+  assert.deepEqual(reloaded.corrected, []);
+  assert.equal(reloaded.upgraded, false, "reading a live key is not a correction owed to storage");
+  assert.equal(store.attempts.set, writes, "and it does not rewrite a record this build agrees with");
+
+  const raw = () => JSON.parse(store.peek(PREFERENCES_KEY));
+  assert.equal(raw().split, DEFAULT_PREFERENCES.split, "the load itself leaves the record as it found it");
+  assert.equal(store.peek(LEGACY_KEYS.split), "70", "the key itself stays, because its owner has not moved");
+
+  const later = updatePreferences(store, reloaded, { theme: "light" });
+  assert.equal(later.prefs.split, 70);
+  assert.equal(raw().split, 70, "an unrelated save carries the reconciled value");
+});
+
+test("a live legacy key absent from storage leaves the record alone", () => {
+  const store = storageOf({ initial: { [PREFERENCES_KEY]: JSON.stringify({ schemaVersion: 1, split: 30 }) } });
+  assert.equal(loadPreferences(store, ["split"]).prefs.split, 30, "no key is not a zero, or a default");
+});
+
+test("a live legacy key out of range is corrected the way a stored one is", () => {
+  const store = storageOf({
+    initial: {
+      [PREFERENCES_KEY]: JSON.stringify({ schemaVersion: 1, split: 30 }),
+      [LEGACY_KEYS.split]: "95",
+    },
+  });
+  const state = loadPreferences(store, ["split"]);
+  assert.equal(state.prefs.split, 85);
+  assert.deepEqual(state.corrected, ["split"]);
+});
+
+test("a save that names the field outranks a key still owned elsewhere", () => {
+  // The re-read happens on every write, so the one thing that can beat it is the
+  // caller's own decision — otherwise a deferred key would make its field
+  // unsettable through the record that claims to hold it.
+  const store = storageOf({
+    initial: {
+      [PREFERENCES_KEY]: JSON.stringify({ schemaVersion: 1, split: 30 }),
+      [LEGACY_KEYS.split]: "70",
+    },
+  });
+  const state = updatePreferences(store, loadPreferences(store, ["split"]), { split: 50 });
+  assert.equal(state.prefs.split, 50);
+  assert.equal(JSON.parse(store.peek(PREFERENCES_KEY)).split, 50);
+});
+
+test("a reset reaches the keys still owned elsewhere", () => {
+  const store = storageOf({ initial: legacy({ [LEGACY_KEYS.split]: "70" }) });
+  const state = resetPreferences(store, loadPreferences(store, ["split"]));
+  assert.equal(state.prefs.split, DEFAULT_PREFERENCES.split);
+  assert.equal(store.peek(LEGACY_KEYS.split), null, "a default the person asked for is not undone next start");
+});
+
 test("a migrated value out of range is corrected in the open", () => {
   const store = storageOf({ initial: legacy({ [LEGACY_KEYS.fontPx]: "400", [LEGACY_KEYS.interval]: "0" }) });
   const state = loadPreferences(store);

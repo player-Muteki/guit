@@ -92,6 +92,16 @@ python3 ../tools/bench/color-contrast.py dist/assets
 python3 ../tools/bench/responsive-check.py src/style.css src/style/tokens.css
 ```
 
+A claim about what the *renderer* does — that a stored theme repaints a row, that a
+refused font stack still measures the row it claims, that a refused fragment leaves the
+list alone — is measured rather than assumed by a third probe. Unlike the two gates
+above it this one needs a display, the WebKitGTK bindings and the interpreter that has
+them (`/usr/bin/python3`); it refuses with a reason when any of the three is missing:
+
+```sh
+/usr/bin/python3 ../tools/bench/webkit-engine-probe.py appearance-engine-probe.ts src/style.css src/style/tokens.css
+```
+
 `app/src-tauri/examples/watch_probe.rs` is a manual `cargo run --example`.
 
 ## Architecture

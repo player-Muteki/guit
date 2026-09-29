@@ -2,9 +2,9 @@
 // Developer. The environment probes (git/tool/window checks, the
 // compact-window test, the diagnostics export manifest, the process probe)
 // live here so the everyday views stay focused on the Git
-// workflow. Theme follows the
-// system by default; the selector is stored in localStorage and applied as
-// a `data-theme` attribute on <html>. The refresh interval of the age line is a
+// workflow. Theme follows the system by default; the selector is one of the
+// appearance choices, so it is stored and applied by the module that owns them and
+// read back from the same place. The refresh interval of the age line is a
 // row on this page, but the timer it changes belongs to the panel drawing that
 // line — this view asks, that panel re-arms its one interval.
 
@@ -13,7 +13,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { button, el, icon, plural } from "../dom";
 import { createConfirmDialog, type ConfirmRequest } from "../dialogs/confirm";
 import { isAlwaysOnTop, isRestoreEnabled, setAlwaysOnTop, compactWindow, restoreWindowSize, windowGeometry } from "../window";
-import { currentFontPx, applyFontPx, FONT_DEFAULT } from "../font";
+import { applyFontPx, applyTheme, currentFontPx, currentTheme, FONT_DEFAULT } from "../font";
 import { INTERVAL_MAX, INTERVAL_MIN } from "../activityModel";
 import type { IntervalApplied } from "../activityModel";
 import type { GitProbe, ToolProbe } from "../types";
@@ -239,19 +239,12 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     }
   });
   // --- events ---
+  // The row shows the theme the panel applied, which is not always the one that
+  // was asked for: a choice the record will not take leaves the attribute where it
+  // was, and a box set to a scheme the window is not drawing is a box that has
+  // started lying.
   themeSelect.addEventListener("change", () => {
-    const value = themeSelect.value;
-    try {
-      if (value === "system") {
-        localStorage.removeItem("guit.theme");
-        document.documentElement.removeAttribute("data-theme");
-      } else {
-        localStorage.setItem("guit.theme", value);
-        document.documentElement.setAttribute("data-theme", value);
-      }
-    } catch {
-      // Storage may be unavailable; the attribute still applies this session.
-    }
+    themeSelect.value = applyTheme(themeSelect.value);
   });
   onTopToggle.addEventListener("change", async () => {
     try {
@@ -296,7 +289,7 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     restoreButton.disabled = !isRestoreEnabled();
     const zoom = `${currentFontPx()}px`;
     if (zoomLabel.textContent !== zoom) zoomLabel.textContent = zoom;
-    themeSelect.value = document.documentElement.getAttribute("data-theme") ?? "system";
+    themeSelect.value = currentTheme();
     // The in-force interval, unless the caret is in the box: this view is redrawn
     // whenever the repository behind it changes, and a watcher event landing
     // mid-edit would otherwise type over the number being written.

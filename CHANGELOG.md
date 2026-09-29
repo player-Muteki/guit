@@ -33,6 +33,17 @@ is the record of what is not verified.
 
 ### Changed
 
+- Interface zoom and theme are stored in one versioned record rather than each in
+  a key of its own. Neither row behaves differently: the choice still comes back
+  after a restart, and a stored number outside the range the panel can draw is
+  still corrected to its bound. What changed is what the stored text can say — it
+  names the version that wrote it, an unreadable or newer record is left whole
+  rather than overwritten, and a value that cannot be understood is corrected to
+  the bound it fell outside of.
+  The split position and the refresh interval stay in the keys their own rows write
+  until they move across too, and moving one row at a time is deliberate: a
+  migration that deleted a key some part of the panel still writes would cost that
+  setting the next time it was changed.
 - A commit graph's lane turns are one smooth curve now — level where they
   leave the node, vertical where they meet the row's edge — instead of a
   straight step through a quarter-round corner.

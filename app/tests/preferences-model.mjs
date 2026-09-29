@@ -230,26 +230,42 @@ test("the interval bounds agree with the model that owns the timer", () => {
   assert.deepEqual(found, { MIN: INTERVAL_MIN, MAX: INTERVAL_MAX, DEFAULT: INTERVAL_DEFAULT });
 });
 
+/** The pre-versioned keys and the source that still writes each one.
+ *
+ * When a writer moves onto the versioned record it stops writing its legacy name,
+ * and that row is deleted from this list in the same change — the key stays a
+ * migration source for stored values, but it is no longer a live name. The paired
+ * gate below reads the record's own list of deferred keys, so a row deleted here
+ * without moving the writer (or the other way round) fails. */
+const writers = {
+  split: "../src/views/mainPanel.ts",
+  interval: "../src/views/changes.ts",
+};
+
 test("each legacy key is still the name some source writes", () => {
   // A migration that reads a name nobody writes any more reports a finished
   // migration and loses the setting, which is the one failure every other test
   // in this file would still pass through. So the names are read from the writers.
-  //
-  // When a writer moves onto the versioned record it stops writing its legacy
-  // name, and that row is deleted from this list in the same change — the key
-  // stays a migration source for stored values, but it is no longer a live name.
-  const writers = {
-    fontPx: "../src/font.ts",
-    theme: "../src/views/settings.ts",
-    split: "../src/views/mainPanel.ts",
-    interval: "../src/views/changes.ts",
-  };
   for (const [field, url] of Object.entries(writers)) {
     const source = readFileSync(new URL(url, import.meta.url), "utf8");
     const key = LEGACY_KEYS[field];
     const literal = new RegExp(`"${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`);
     assert.match(source, literal, `${url} no longer writes "${key}"`);
   }
+});
+
+test("the keys the panel refuses to clear are exactly the live writers", () => {
+  // `font.ts` hands `loadPreferences` the list of keys to leave alone and to read
+  // over the record. Either half drifting is a lost setting: a name left on the
+  // list after its owner moved keeps a stale key authoritative over the module
+  // that stopped looking at it, and a name dropped while its owner still writes
+  // deletes that key on the first migration, which is the failure the list exists
+  // to prevent. So the two lists are required to be the same list.
+  const source = readFileSync(new URL("../src/font.ts", import.meta.url), "utf8");
+  const listed = source.match(/OWNED_ELSEWHERE[^=]*=\s*\[([\s\S]*?)\]/);
+  assert.ok(listed, "font.ts must name the keys it does not own");
+  const deferred = [...listed[1].matchAll(/"([a-zA-Z]+)"/g)].map(([, name]) => name).sort();
+  assert.deepEqual(deferred, Object.keys(writers).sort());
 });
 
 // The theme's two safety fields. They decide whether a fragment that failed last

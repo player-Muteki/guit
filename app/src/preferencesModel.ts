@@ -404,13 +404,27 @@ export const PREFERENCES_KEY = "guit.preferences";
 
 /** The keys written before a versioned record existed. A test reads the source
  * that writes each one, because migrating a name nobody uses any more reads as a
- * successful migration and silently drops the value. */
+ * successful migration and silently drops the value. The same list is what a
+ * caller names in `loadPreferences` when only some of its owners have moved onto
+ * the record: see `PreferencesState.legacyOwned`. */
 export const LEGACY_KEYS = {
   fontPx: "guit.fontPx",
   theme: "guit.theme",
   split: "guit.mainSplit",
   interval: "guit.activityInterval",
 } as const;
+
+export type LegacyName = keyof typeof LEGACY_KEYS;
+
+const ALL_LEGACY_NAMES = Object.keys(LEGACY_KEYS) as LegacyName[];
+
+/** Where each pre-versioned value lives once the record owns it. */
+const LEGACY_FIELD: Record<LegacyName, keyof Preferences> = {
+  fontPx: "fontPx",
+  theme: "theme",
+  split: "split",
+  interval: "intervalSeconds",
+};
 
 export interface PreferenceStorage {
   getItem(key: string): string | null;
@@ -431,6 +445,14 @@ export interface PreferencesState {
   migrated: boolean;
   /** True while a record older than this build is still what storage holds. */
   upgraded: boolean;
+  /** The pre-versioned keys whose owner has not moved onto this record yet.
+   * While a name is listed, the value stored under it *is* that field's current
+   * value — read over whatever the record says, written back into the record on
+   * every save, and never deleted. Both halves matter: clearing a key some module
+   * still writes leaves that module writing into a name nothing reads any more,
+   * and the record keeps the single value the migration happened to catch.
+   * `resetPreferences` is the one call that clears them anyway. */
+  legacyOwned: LegacyName[];
   extras: Record<string, unknown>;
 }
 
@@ -446,27 +468,56 @@ function readStored(storage: PreferenceStorage | null, key: string): string | nu
   }
 }
 
-function readLegacy(storage: PreferenceStorage | null): LegacyValues {
-  return {
-    fontPx: readStored(storage, LEGACY_KEYS.fontPx),
-    theme: readStored(storage, LEGACY_KEYS.theme),
-    split: readStored(storage, LEGACY_KEYS.split),
-    interval: readStored(storage, LEGACY_KEYS.interval),
-  };
+function readLegacy(storage: PreferenceStorage | null, names: LegacyName[] = ALL_LEGACY_NAMES): LegacyValues {
+  const values: LegacyValues = { fontPx: null, theme: null, split: null, interval: null };
+  for (const name of names) values[name] = readStored(storage, LEGACY_KEYS[name]);
+  return values;
+}
+
+/** Read the keys whose owners have not moved yet over the record's own values.
+ * Absent is not zero: a key that is gone leaves the record alone, because the
+ * module that used to write it may simply have never been used this lifetime.
+ *
+ * `except` names the fields the caller is writing on purpose. The deferred key is
+ * the authority while its owner still writes it, but a patch that names the field
+ * itself is a newer decision than whatever is stored, and overwriting it would
+ * make the record's own API unable to set one of its fields. */
+function applyLegacyOwners(
+  storage: PreferenceStorage | null,
+  state: PreferencesState,
+  except: readonly (keyof Preferences)[] = [],
+): PreferencesState {
+  const names = state.legacyOwned;
+  if (storage === null || names.length === 0) return state;
+  const values = readLegacy(storage, names);
+  const legacy = migrateLegacy(values);
+  const prefs = { ...state.prefs };
+  const slots: Record<keyof Preferences, Preferences[keyof Preferences]> = prefs;
+  const corrected = [...state.corrected];
+  for (const name of names) {
+    const raw = values[name];
+    if (raw === null || raw.trim() === "") continue;
+    const field = LEGACY_FIELD[name];
+    if (except.includes(field)) continue;
+    slots[field] = legacy.prefs[field];
+    if (legacy.corrected.includes(field) && !corrected.includes(field)) corrected.push(field);
+  }
+  return { ...state, prefs, corrected };
 }
 
 function legacyPresent(storage: PreferenceStorage | null): boolean {
-  return Object.values(LEGACY_KEYS).some((key) => {
-    const value = readStored(storage, key);
+  return ALL_LEGACY_NAMES.some((name) => {
+    const value = readStored(storage, LEGACY_KEYS[name]);
     return value !== null && value.trim() !== "";
   });
 }
 
-function clearLegacy(storage: PreferenceStorage | null): void {
+function clearLegacy(storage: PreferenceStorage | null, stillOwned: LegacyName[]): void {
   if (storage === null) return;
-  for (const key of Object.values(LEGACY_KEYS)) {
+  for (const name of ALL_LEGACY_NAMES) {
+    if (stillOwned.includes(name)) continue;
     try {
-      storage.removeItem(key);
+      storage.removeItem(LEGACY_KEYS[name]);
     } catch {
       // A leftover key loses to the record on the next read, so this is not a
       // reason to report the migration as unfinished.
@@ -505,11 +556,14 @@ function commit(storage: PreferenceStorage | null, state: PreferencesState, owes
     next.persisted = writeRecord(storage, next);
     if (next.persisted && next.upgraded) next.upgraded = false;
   }
-  if (next.migrated && next.persisted) clearLegacy(storage);
+  if (next.migrated && next.persisted) clearLegacy(storage, next.legacyOwned);
   return next;
 }
 
-export function loadPreferences(storage: PreferenceStorage | null): PreferencesState {
+export function loadPreferences(
+  storage: PreferenceStorage | null,
+  legacyOwned: LegacyName[] = [],
+): PreferencesState {
   const stored = readStored(storage, PREFERENCES_KEY);
   const parsed = parsePreferences(stored);
   const base: PreferencesState = {
@@ -519,6 +573,7 @@ export function loadPreferences(storage: PreferenceStorage | null): PreferencesS
     persisted: false,
     migrated: false,
     upgraded: parsed.needsWrite,
+    legacyOwned,
     extras: parsed.extras,
   };
   if (parsed.sealed !== null) {
@@ -537,17 +592,26 @@ export function loadPreferences(storage: PreferenceStorage | null): PreferencesS
   // Nothing stored and nothing to migrate is a first run, and a first run writes
   // nothing: defaults are not a choice, and storing them turns every later change
   // of default into a value the user appears to have picked.
-  return commit(storage, base, parsed.needsWrite);
+  return commit(storage, applyLegacyOwners(storage, base), parsed.needsWrite);
 }
 
 /** Apply a change, clamping every field exactly as a stored value is clamped, so
  * a control and a hand-edited record cannot mean different things. The in-memory
  * value changes even when the write is refused or fails: the user chose it, and
- * taking it back would be a second lie on top of the first. */
+ * taking it back would be a second lie on top of the first.
+ *
+ * The patch values are `unknown` rather than the record's own field types because
+ * that is what a control hands over — a `<select>` gives a string, a number input
+ * gives text — and refusing anything the field would not accept from storage is
+ * the same decision made in the one place it is tested.
+ *
+ * A field another module still owns is re-read from that module's key before the
+ * write, since it may have moved since this session loaded it; the exception is a
+ * patch that names that field itself, which is the newer decision. */
 export function updatePreferences(
   storage: PreferenceStorage | null,
   state: PreferencesState,
-  patch: Partial<Preferences>,
+  patch: Partial<Record<keyof Preferences, unknown>>,
 ): PreferencesState {
   const merged: Preferences = { ...state.prefs };
   // The record holds booleans and a nullable marker as well as strings and numbers,
@@ -563,7 +627,12 @@ export function updatePreferences(
     if (!field.ok && !corrected.includes(key)) corrected.push(key);
   }
   const next: PreferencesState = { ...state, prefs: merged, corrected, migrated: false, upgraded: false };
-  return commit(storage, next, true);
+  // A field another module still owns is read from that module's key on the way
+  // out, because it may have moved since this session loaded: the divider drag
+  // writes its own value, and an unrelated save must not carry the older one the
+  // record happened to hold. A patch that names the field is the one thing that
+  // outranks the key, so it is left out of the read.
+  return commit(storage, applyLegacyOwners(storage, next, Object.keys(patch) as (keyof Preferences)[]), true);
 }
 
 /** Reset the values, which is an ordinary write unless the record is sealed. */
@@ -578,16 +647,26 @@ export function resetPreferences(
     persisted: false,
     migrated: false,
     upgraded: false,
+    legacyOwned: state.legacyOwned,
     extras: state.extras,
   };
-  return commit(storage, fresh, true);
+  const next = commit(storage, fresh, true);
+  // The one call that reaches a key it does not own. The person asked for every
+  // default, including the values another module still keeps on its own terms, and
+  // leaving those keys standing would put them back the moment the next start read
+  // them. It happens only once the reset itself is stored.
+  if (next.persisted) clearLegacy(storage, []);
+  return next;
 }
 
 /** The way out of a sealed record: drop the text this build cannot read, then
  * load as if it had never been there. It is an explicit action rather than a
  * fallback inside `loadPreferences` because the text it destroys is the only
  * evidence of a choice some other build was allowed to make. */
-export function discardRecord(storage: PreferenceStorage | null): PreferencesState {
+export function discardRecord(
+  storage: PreferenceStorage | null,
+  legacyOwned: LegacyName[] = [],
+): PreferencesState {
   if (storage !== null) {
     try {
       storage.removeItem(PREFERENCES_KEY);
@@ -595,7 +674,7 @@ export function discardRecord(storage: PreferenceStorage | null): PreferencesSta
       // The load below reports whether a record came back.
     }
   }
-  return loadPreferences(storage);
+  return loadPreferences(storage, legacyOwned);
 }
 
 function normalizeField(

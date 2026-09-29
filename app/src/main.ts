@@ -32,7 +32,7 @@ import { disposeAll, onDispose } from "./lifecycle";
 import { publishSnapshot, subscribeToDomain } from "./snapshotBus";
 import { createPreviewController } from "./dialogs/preview";
 import { createToastLayer } from "./dialogs/toast";
-import { initFontPx, currentFontPx, applyFontPx, FONT_DEFAULT } from "./font";
+import { startAppearance, currentFontPx, applyFontPx, FONT_DEFAULT } from "./font";
 import { installWindowHooks, restoreWindowState, setAlwaysOnTop } from "./window";
 import { createChangesView } from "./views/changes";
 import { createHistoryView } from "./views/history";
@@ -301,8 +301,8 @@ void listen<ActivityView>("activity-updated", ({ payload }) => {
 }).then((unlisten) => { onDispose(unlisten); });
 
 // --- keyboard ---
-// Zoom and theme are restored before the first paint of the shell.
-initFontPx();
+// The stored appearance is applied before the first paint of the shell.
+startAppearance();
 
 window.addEventListener("keydown", (event) => {
   if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
