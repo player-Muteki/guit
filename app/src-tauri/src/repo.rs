@@ -494,6 +494,19 @@ mod tests {
         git_raw(dir, &["init", "--bare", "--quiet", "."]);
     }
 
+    /// Make the on-disk mtime disagree with what the index recorded, which is
+    /// the state every file a tool touches is in for a moment. Setting it to the
+    /// epoch needs no sleep and no second clock: the assertion is about whether
+    /// Git speaks while refreshing, not about how old the file really is.
+    fn stamp_epoch(path: &Path) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("stamp target");
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .expect("stamp");
+    }
+
     #[test]
     fn plain_repository_is_detected() {
         let root = tempfile::tempdir().unwrap();
@@ -658,6 +671,88 @@ mod tests {
         git_raw(&repo.join("sub"), &["init", "--quiet"]);
         std::fs::write(repo.join("sub/in.txt"), b"nested\n").unwrap();
         read(&repo, "a nested repository");
+        // The shapes below each report *less* than the disk holds, on purpose.
+        // None of them may reach the incomplete flag: the refusal that protects
+        // the write lane is only safe while an ordinary repository keeps the
+        // stream empty, and these are the ordinary ways a repository declares a
+        // file out of scope. Each was measured to exit 0 with an empty stderr.
+        std::fs::write(repo.join(".gitignore"), b"[\n").unwrap();
+        read(&repo, "a malformed ignore pattern");
+        std::fs::remove_file(repo.join(".gitignore")).unwrap();
+        // An expired stat entry is the state every touched file passes through;
+        // Git refreshes it without saying so.
+        stamp_epoch(&repo.join("c.txt"));
+        read(&repo, "an index whose stat data is out of date");
+        std::fs::write(repo.join("gated.txt"), b"tracked\n").unwrap();
+        git_raw(&repo, &["add", "gated.txt"]);
+        git_raw(&repo, &["commit", "-qm", "gated"]);
+        git_raw(&repo, &["update-index", "--skip-worktree", "gated.txt"]);
+        std::fs::remove_file(repo.join("gated.txt")).unwrap();
+        read(&repo, "skip-worktree with the file gone");
+        git_raw(&repo, &["update-index", "--no-skip-worktree", "gated.txt"]);
+        std::fs::write(repo.join("gated.txt"), b"tracked\n").unwrap();
+        git_raw(&repo, &["update-index", "--assume-unchanged", "gated.txt"]);
+        std::fs::write(repo.join("gated.txt"), b"differently\n").unwrap();
+        read(&repo, "assume-unchanged with the content changed");
+        git_raw(
+            &repo,
+            &["update-index", "--no-assume-unchanged", "gated.txt"],
+        );
+        // A gitlink whose repository was never checked out: the index names a
+        // directory that does not exist, which is not a directory Git failed to
+        // open.
+        git_raw(
+            &repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,4b825dc642cb6eb9a060e54bf8d69288fbee4904,mods",
+            ],
+        );
+        read(&repo, "an uninitialized gitlink");
+        git_raw(&repo, &["update-index", "--force-remove", "mods"]);
+        git_raw(
+            &repo,
+            &[
+                "config",
+                "core.excludesFile",
+                "/nonexistent/guit-test/exclude",
+            ],
+        );
+        read(&repo, "a global ignore file that cannot be read");
+        git_raw(&repo, &["config", "--unset", "core.excludesFile"]);
+        // A repository config file Git has to read while tolerating what it
+        // finds: a line that is neither a section header nor an assignment is
+        // skipped in silence. It stays the last shape because the bytes are not
+        // restored — and because a line that Git *refuses* to parse is a
+        // different case, pinned by the test below.
+        let config = repo.join(".git/config");
+        let mut raw = std::fs::read(&config).unwrap();
+        raw.extend_from_slice(b"guit-probe-stray-line\n");
+        std::fs::write(&config, raw).unwrap();
+        read(&repo, "a repository configuration with a stray line");
+    }
+
+    /// The other side of the same file: damage Git will not parse is refused at
+    /// the door. Detection runs `rev-parse`, which fails on an unparseable
+    /// config, so the panel never gets as far as a status read that could report
+    /// nothing changed.
+    #[test]
+    fn a_config_git_refuses_to_parse_is_not_a_repository_at_all() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo, "guit test", "test@example.invalid");
+        std::fs::write(repo.join("a.txt"), b"base\n").unwrap();
+        git_raw(&repo, &["add", "."]);
+        git_raw(&repo, &["commit", "-qm", "base"]);
+        let config = repo.join(".git/config");
+        let mut raw = std::fs::read(&config).unwrap();
+        raw.extend_from_slice(b"[unterminated-section\n");
+        std::fs::write(&config, raw).unwrap();
+        let error = detect(&repo).unwrap_err();
+        assert_eq!(error.code.as_str(), "not_a_repository");
     }
 
     /// The one shape where Git's exit code lies: a directory it cannot open is
