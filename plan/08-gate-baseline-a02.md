@@ -52,6 +52,22 @@
 
 删除本记录与 `tools/bench/idle-baseline.py`;基线测量不可回退为"未占用资源",但不改任何应用状态。
 
+## 7. 基线适用性（记录一次，后续阶段不再自行解释）
+
+双 Tab 收敛提交后逐项判定，避免拿本记录去比一个已经改过的口径：
+
+| 本记录的口径 | 是否仍适用 | 依据 |
+| --- | --- | --- |
+| `cargo test` 353 单元 + 5 集成、`cargo fmt --check`、`cargo clippy --locked --all-targets` | **适用** | 该提交未触碰 `app/src-tauri/` 任何文件，后端语义与测试数量不变；C01/C02/C03 的 Rust 侧改动直接与此基线比较 |
+| `npm run build` 的 dist 体积（JS 103.28 kB / CSS 29.11 kB） | **不适用** | 视图合并与样式令牌改名改变了产物；以后一阶段自己的记录为准，体积差异不得解释为性能回归或改进 |
+| `npm run test:fixture` 123/123 | **口径已变** | 其中 `rail-model.mjs`、`state-stress.mjs` 按新的双视图模型改写（未放宽断言），计数以后续记录为准 |
+| `responsive-check.py` 的必需令牌清单 | **已随之改名** | `--rail-width`/`--rail-item-size` → `--tab-min-width`/`--tab-item-size`，门禁强度未减 |
+| `tools/bench/layout-probe.mjs`、`view-smoke.py`、`narrow-smoke.py` 的定位器 | **过期** | `layout-probe.mjs` 仍字面引用 `.rail-item` 与 `--rail-*`（本轮 grep 全仓唯一命中该选择器的文件）；`view-smoke.py` 断言“每个 activity-rail 视图各自显示内容”、`narrow-smoke.py` 断言“窄屏下 activity rail 仍可见”，这两条几何断言的对象在双 Tab 收敛后已不存在。探针迁移完成前，它们的结果不得引用为本基线的证据 |
+
+第 2 节的 idle CPU/RSS 测量取自 release 二进制的进程树口径，后端未变、WebView 宿主未变，
+因此作为“同一主机同一构建”的量级仍可引用；但其中前端 DOM 规模已随双 Tab 合并变化，
+若要把它当作 C 阶段新增常驻开销的对照，需要重跑一次同口径测量而不是复用旧数。
+
 ## 结论
 
 完成(gates 全绿;idle 基线已固定,RSS 预算缺口已记录待修订;主窗口内容级桌面证据按路线图标记未测,须在 H 前补齐)。
