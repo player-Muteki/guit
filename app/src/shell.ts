@@ -240,6 +240,10 @@ export function createShell(actions: ShellActions): Shell {
       type: "button",
       "aria-label": VIEW_TITLES[id],
       title: railHint(id, VIEW_ORDER),
+      // A custom theme is asked whether the way out of it is still on the screen, and
+      // the tabs are the part of that way that is on every screen: Settings is where a
+      // theme is turned off, so the button that reaches it has to survive the draw.
+      "data-recovery": "tab",
     }, children);
     item.addEventListener("click", () => setActiveView(id));
     tabButtons.set(id, item);

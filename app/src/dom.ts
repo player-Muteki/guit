@@ -146,6 +146,9 @@ const ICONS = {
   close: ["M3.5 3.5l9 9", "M12.5 3.5l-9 9"],
   warning: ["M8 1.5 15 14H1z", "M8 6v4", "M8 11.5v.01"],
   check: ["M2.5 8.5 6.5 12.5 13.5 3.5"],
+  // A drop of ink: the panel's own word for a colour choice is a colour, and the theme
+  // section needs a mark that is not the gear already heading the page above it.
+  droplet: ["M8 2.5 12.1 8.5a4.6 4.6 0 1 1-8.2 0z"],
 } as const;
 
 export type IconName = keyof typeof ICONS;

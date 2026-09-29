@@ -2,14 +2,15 @@
 //
 // Loading this file at all is the first check: `themeFindings.ts` carries an
 // `import type` of a shape from `themeCssModel.ts`, and Node must erase it. The
-// rest is about the two failures this layer exists to prevent — a reason with no
-// words, and a fragment with two hundred refusals.
+// rest is about the three failures this layer exists to prevent — a reason with no
+// words, a fragment with two hundred refusals, and a screen that changed under someone
+// with nothing said about why.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { reviewThemeCss } from "../src/themeCssModel.ts";
-import { FINDING_LIMIT, describeFinding, describeFindings } from "../src/themeFindings.ts";
+import { FINDING_LIMIT, THEME_RECOVERY_KEYS, describeFindings, describeFinding, describeTheme, describeThemeNotice } from "../src/themeFindings.ts";
 
 const style = (selector, ...declarations) => ({
   kind: "style",
@@ -186,4 +187,60 @@ test("the rows are shipped text", () => {
     assert.doesNotMatch(row, /\bplan\/[a-z0-9-]+\.md\b/i, row);
     assert.doesNotMatch(row, /\bdecision \d+\b/i, row);
   }
+});
+
+// The notices: one sentence per way the screen can change under a theme. These are
+// read *after* something has already gone wrong, which is when a missing or vague
+// sentence costs the person the way out.
+
+/** The codes the life cycle can decide to report, read from its own type. A code with
+ * no sentence here would render as an empty row at exactly the moment the panel has
+ * done something on the person's behalf, so the list is not repeated in this file. */
+const NOTICE_CODES = (() => {
+  const source = readFileSync(new URL("../src/themeLifecycle.ts", import.meta.url), "utf8");
+  const union = source.match(/export type ThemeNotice =([\s\S]*?);/);
+  assert.ok(union, "themeLifecycle.ts must name its notices in one union");
+  const codes = [...union[1].matchAll(/"([a-z-]+)"/g)].map(([, code]) => code);
+  assert.ok(codes.length >= 4, "the union was not read as written");
+  return codes;
+})();
+
+test("every notice the life cycle can give has a sentence", () => {
+  for (const code of NOTICE_CODES) {
+    const sentence = describeThemeNotice(code);
+    assert.notEqual(sentence, null, `"${code}" has no sentence`);
+    assert.match(sentence, /[.]$/s, `"${code}" is not a finished sentence`);
+    assert.doesNotMatch(sentence, /\bM[0-9](-\d{1,2})?\b|\bplan\/[a-z0-9-]+\.md\b|\bdecision \d+\b/i, code);
+  }
+});
+
+test("a change with nothing to say is no text at all", () => {
+  // The person's own saved theme loaded, and the notice is not for that. A reassurance
+  // nobody asked for teaches them to ignore the row that carries the others.
+  assert.equal(describeThemeNotice(null), null);
+  assert.equal(describeTheme({ notice: null, persisted: true, findings: { rows: [], omitted: 0 } }), "");
+});
+
+test("the sentence about hidden controls gives the keys that still work", () => {
+  // The one failure where the page may be unusable: whatever the row is written into,
+  // the escape has to be in it.
+  const sentence = describeThemeNotice("hidden-controls");
+  assert.ok(sentence.includes(THEME_RECOVERY_KEYS), sentence);
+  assert.match(sentence, /off/i, sentence);
+});
+
+test("a report says what it decided, what it left out, and what will survive", () => {
+  const report = describeTheme({
+    notice: "reverted",
+    persisted: false,
+    findings: { rows: ["a row"], omitted: 3 },
+  });
+  assert.ok(report.startsWith("Nothing in it could be drawn"), report);
+  assert.ok(report.includes("3 more rules were refused than these lines show."), report);
+  assert.ok(report.includes("guit could not save this, so the next start will not do it."), report);
+  assert.ok(
+    describeTheme({ notice: "confirmed", persisted: true, findings: { rows: [], omitted: 1 } })
+      .includes("1 more rule was refused"),
+    "one line held back is named in the singular",
+  );
 });

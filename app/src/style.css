@@ -584,6 +584,15 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
    preview that disagrees with the panel cannot be built. */
 .font-preview { margin: 0; padding: 0.3rem 0.5rem; font-size: var(--text-md); color: var(--text); background: var(--surface-panel); border: 1px solid var(--line); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
 .font-preview.code { font-family: var(--font-mono); }
+/* The fragment box is text a person compares against the refusal list under it, so it
+   keeps the panel's monospace and wraps instead of scrolling sideways. `resize` is the
+   one handle on its height: the review below it grows by however many rules the
+   fragment lost, and a box that cannot be shortened pushes that review off the page. */
+.theme-css { font-family: var(--font-mono); min-height: 5rem; resize: vertical; }
+/* The preview is the engine's own serialization of what the panel would hold, so it is
+   drawn as code and never as prose. */
+.theme-preview { margin: 0; padding: 0.3rem 0.5rem; font-family: var(--font-mono); font-size: var(--text-sm); color: var(--text); background: var(--surface-panel); border: 1px solid var(--line); border-radius: var(--radius-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+.theme-findings { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.15rem; font-size: var(--text-sm); color: var(--text-muted); overflow-wrap: anywhere; }
 .setting-facts { display: grid; grid-template-columns: minmax(5rem, 7rem) 1fr; gap: 0.25rem 0.6rem; margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
 .setting-facts dt { color: var(--text-muted); }
 .setting-facts dd { margin: 0; }

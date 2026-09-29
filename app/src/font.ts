@@ -11,24 +11,20 @@
 // an answer that lines the column up. Theme is a `data-theme` attribute on `<html>`;
 // "system" leaves it off so that `prefers-color-scheme` decides.
 //
-// This module is the appearance half of the record's only writer, which is why a
-// view reads the value back through `currentFontPx`, `currentTheme` and
+// This module is one of two painters of the stored record — `theme.ts` is the other —
+// which is why a view reads the value back through `currentFontPx`, `currentTheme` and
 // `currentFonts` instead of remembering what it asked for. The two can disagree: a
 // patch is clamped, storage can refuse the write, and a record from a newer build
-// seals every field for this session while still honouring the choice in memory.
+// seals every field for this session while still honouring the choice in memory. The
+// copy of the record itself belongs to neither module; `appearanceStore.ts` keeps it,
+// because a write replaces the record whole and two copies would each undo the other.
 
 import { notifyLayoutChange } from "./state";
 import { fontStackProperties } from "./fontStack";
 import { resolveMonoStack } from "./fontResolve";
-import {
-  FAMILY_MAX,
-  FONT_DEFAULT,
-  FONT_MAX,
-  FONT_MIN,
-  loadPreferences,
-  updatePreferences,
-} from "./preferencesModel";
-import type { LegacyName, PreferenceStorage, Preferences, PreferencesState, Theme } from "./preferencesModel";
+import { appearanceRecord, patchAppearance, reloadAppearanceRecord } from "./appearanceStore";
+import { FAMILY_MAX, FONT_DEFAULT, FONT_MAX, FONT_MIN } from "./preferencesModel";
+import type { Preferences, PreferencesState, Theme } from "./preferencesModel";
 
 export { FAMILY_MAX, FONT_DEFAULT, FONT_MAX, FONT_MIN };
 
@@ -42,33 +38,8 @@ export interface AppliedFonts {
   monoHonoured: boolean;
 }
 
-/** The pre-versioned keys this module does not write. The split drag and the
- * age-line interval still keep their own values, and naming them is what stops a
- * migration from deleting a key a live module is still writing. When one of those
- * owners moves onto the record it stops appearing here, and the name is deleted
- * from `LEGACY_KEYS` in the same change. */
-const OWNED_ELSEWHERE: LegacyName[] = ["split", "interval"];
-
-/** The WebView's own storage, or `null` for a window that has none. Reading the
- * property is the step that throws in a frame blocked against its origin; the
- * methods throw in private mode. Either way the session still gets every choice,
- * it just cannot keep them. */
-function panelStorage(): PreferenceStorage | null {
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
-let record: PreferencesState | null = null;
-
-/** Read once and keep. Loading is lazy so that a view asking a question before
- * the window has painted gets a real answer rather than a default that was never
- * looked up. */
 function preferences(): PreferencesState {
-  if (record === null) record = loadPreferences(panelStorage(), OWNED_ELSEWHERE);
-  return record;
+  return appearanceRecord();
 }
 
 /** Put the document into the state the record describes. */
@@ -111,7 +82,7 @@ export function currentFonts(): AppliedFonts {
 
 function change(patch: Partial<Record<keyof Preferences, unknown>>): void {
   const before = currentFonts();
-  record = updatePreferences(panelStorage(), preferences(), patch);
+  patchAppearance(patch);
   paint();
   const after = currentFonts();
   // The zoom moves a metric every list measures. A stack does too: an object ID
@@ -189,7 +160,7 @@ export function applyFamilies(patch: {
 
 /** Restore the stored appearance, once, before the shell is built. */
 export function startAppearance(): void {
-  record = loadPreferences(panelStorage(), OWNED_ELSEWHERE);
+  reloadAppearanceRecord();
   paint();
   notifyLayoutChange();
 }

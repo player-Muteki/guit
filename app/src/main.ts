@@ -33,6 +33,7 @@ import { publishSnapshot, subscribeToDomain } from "./snapshotBus";
 import { createPreviewController } from "./dialogs/preview";
 import { createToastLayer } from "./dialogs/toast";
 import { startAppearance, currentFontPx, applyFontPx, FONT_DEFAULT } from "./font";
+import { disableTheme, startTheme, verifyThemeLaunch } from "./theme";
 import { installWindowHooks, restoreWindowState, setAlwaysOnTop } from "./window";
 import { createChangesView } from "./views/changes";
 import { createHistoryView } from "./views/history";
@@ -301,8 +302,13 @@ void listen<ActivityView>("activity-updated", ({ payload }) => {
 }).then((unlisten) => { onDispose(unlisten); });
 
 // --- keyboard ---
-// The stored appearance is applied before the first paint of the shell.
+// The stored appearance is applied before the first paint of the shell. The custom
+// theme goes on the same path for the same reason: a person with a working fragment
+// should not watch the built-in look flash past it. Whatever a start had to decide on
+// the person's behalf is a sentence for the Settings row, and `null` is a start with
+// nothing to say.
 startAppearance();
+settings.noteTheme(startTheme());
 
 window.addEventListener("keydown", (event) => {
   if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
@@ -327,6 +333,13 @@ window.addEventListener("keydown", (event) => {
   } else if (key === "0") {
     event.preventDefault();
     applyFontPx(FONT_DEFAULT);
+  } else if (key === "t" && event.shiftKey) {
+    // The one recovery entry a theme cannot take away: a listener on the window is
+    // installed before any fragment is drawn and is not a node a stylesheet can hide.
+    // It is the same action as the button on the Settings page, so the row that
+    // explains the screen gets the same report either way.
+    event.preventDefault();
+    settings.noteTheme(disableTheme());
   }
 });
 
@@ -357,5 +370,11 @@ void (async () => {
   } catch (error) {
     showError(error);
   }
+  // The other half of the theme start, before this page is first drawn: the check
+  // needs a laid-out shell, which it has been since the shell was mounted, and the
+  // Settings row is filled by `render()` straight after, so a revert here is what that
+  // row ends up saying. A boot that never reaches this line leaves its marker in
+  // storage, and the next start draws no theme.
+  settings.noteTheme(verifyThemeLaunch());
   render();
 })();

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import {
   clampSplit as panelClampSplit,
@@ -255,17 +255,39 @@ test("each legacy key is still the name some source writes", () => {
 });
 
 test("the keys the panel refuses to clear are exactly the live writers", () => {
-  // `font.ts` hands `loadPreferences` the list of keys to leave alone and to read
-  // over the record. Either half drifting is a lost setting: a name left on the
-  // list after its owner moved keeps a stale key authoritative over the module
+  // `appearanceStore.ts` hands `loadPreferences` the list of keys to leave alone and
+  // to read over the record. Either half drifting is a lost setting: a name left on
+  // the list after its owner moved keeps a stale key authoritative over the module
   // that stopped looking at it, and a name dropped while its owner still writes
-  // deletes that key on the first migration, which is the failure the list exists
-  // to prevent. So the two lists are required to be the same list.
-  const source = readFileSync(new URL("../src/font.ts", import.meta.url), "utf8");
-  const listed = source.match(/OWNED_ELSEWHERE[^=]*=\s*\[([\s\S]*?)\]/);
-  assert.ok(listed, "font.ts must name the keys it does not own");
+  // deletes that key on the first migration, which is the failure the list exists to
+  // prevent. So the two lists are required to be the same list.
+  const source = readFileSync(new URL("../src/appearanceStore.ts", import.meta.url), "utf8");
+  const listed = source.match(/DEFERRED_OWNERS[^=]*=\s*\[([\s\S]*?)\]/);
+  assert.ok(listed, "appearanceStore.ts must name the keys it does not own");
   const deferred = [...listed[1].matchAll(/"([a-zA-Z]+)"/g)].map(([, name]) => name).sort();
   assert.deepEqual(deferred, Object.keys(writers).sort());
+});
+
+test("one module holds the record, and the rest ask it", () => {
+  // `updatePreferences` serialises the whole record, so a second module that keeps its
+  // own `PreferencesState` and saves it writes back whatever the first module changed
+  // since. Two copies are two authorities, and the loser's setting reappears on the
+  // next start. The fix is one owner and a function to ask it, so the calls that create
+  // a copy are counted here rather than trusted to a comment.
+  const owners = ["preferencesModel.ts", "appearanceStore.ts"];
+  const found = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) walk(path);
+      else if (entry.name.endsWith(".ts") && !owners.includes(entry.name)) {
+        const hits = readFileSync(path, "utf8").match(/\b(loadPreferences|updatePreferences)\s*\(/g);
+        if (hits !== null) found.push(`${path.slice(path.indexOf("src/"))}: ${hits.join(", ")}`);
+      }
+    }
+  };
+  walk(new URL("../src", import.meta.url).pathname);
+  assert.deepEqual(found, [], "only appearanceStore.ts may hold the record");
 });
 
 // The theme's two safety fields. They decide whether a fragment that failed last

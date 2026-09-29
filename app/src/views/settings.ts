@@ -1,4 +1,4 @@
-// Settings view: General, External tools, Environment & diagnostics and
+// Settings view: General, Custom theme, Environment & diagnostics and
 // Developer. The environment probes (git/tool/window checks, the
 // compact-window test, the diagnostics export manifest, the process probe)
 // live here so the everyday views stay focused on the Git
@@ -7,7 +7,9 @@
 // read back from the same place. The three font families are the same kind of
 // choice and come from the same module; the sample lines under the boxes are set in
 // the panel's own font properties, so they show the stacks in force rather than a
-// second description of them. The refresh interval of the age line is a
+// second description of them. A pasted fragment is a different kind of choice from
+// those: it is text the panel has to read before drawing, so it has its own section,
+// its own review and its own way back out. The refresh interval of the age line is a
 // row on this page, but the timer it changes belongs to the panel drawing that
 // line — this view asks, that panel re-arms its one interval.
 
@@ -17,6 +19,10 @@ import { button, el, icon, plural } from "../dom";
 import { createConfirmDialog, type ConfirmRequest } from "../dialogs/confirm";
 import { isAlwaysOnTop, isRestoreEnabled, setAlwaysOnTop, compactWindow, restoreWindowSize, windowGeometry } from "../window";
 import { applyFamilies, applyFontPx, applyTheme, currentFamilies, currentFontPx, currentTheme, FAMILY_MAX, FONT_DEFAULT } from "../font";
+import { applyThemeFragment, currentThemeFragment, disableTheme, previewThemeFragment } from "../theme";
+import type { ThemeReport } from "../theme";
+import { describeTheme, THEME_RECOVERY_KEYS } from "../themeFindings";
+import { CSS_MAX } from "../preferencesModel";
 import { INTERVAL_MAX, INTERVAL_MIN } from "../activityModel";
 import type { IntervalApplied } from "../activityModel";
 import type { GitProbe, ToolProbe } from "../types";
@@ -33,6 +39,11 @@ export interface SettingsView {
   descriptor: { id: "settings"; element: HTMLElement };
   render(): void;
   noteGeometry(text: string): void;
+  /** A theme report from somewhere other than this page's own button: the recovery
+   * key press, or a start that had to decide something on the person's behalf. The
+   * row is this page's, so the words arrive here rather than as a toast about a
+   * stylesheet. */
+  noteTheme(report: ThemeReport | null): void;
 }
 
 export function createSettingsView(deps: SettingsDeps): SettingsView {
@@ -123,9 +134,76 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
         el("dt", { text: "↑ / ↓ / Page keys" }), el("dd", { text: "Resize Main's split (divider focused)" }),
         el("dt", { text: "Ctrl/Cmd + Enter" }), el("dd", { text: "Commit (from the message box)" }),
         el("dt", { text: "Ctrl/Cmd + = / − / 0" }), el("dd", { text: "Interface zoom in / out / reset" }),
+        el("dt", { text: THEME_RECOVERY_KEYS }), el("dd", { text: "Turn off the custom theme" }),
         el("dt", { text: "Escape" }), el("dd", { text: "Close a dialog, menu or layer" }),
       ]),
     ]),
+  ]);
+
+  // --- custom theme ---
+  // Pasted text, reviewed before it is drawn and verified after. The box does not
+  // apply as it is typed: a person editing one colour should not watch the window
+  // repaint on every keystroke, and the draw path is the only one that can check
+  // whether the result still has a way out. What the review costs is a parse and an
+  // engine write into a detached sheet; what it gives back is the text the panel would
+  // actually hold, with everything it refuses taken out of it and named below.
+  const cssBox = el("textarea", {
+    class: "input theme-css",
+    rows: 5,
+    spellcheck: false,
+    "aria-label": "Custom theme CSS",
+    placeholder: ":root {\n  --text: #e6e6ea;\n}",
+  });
+  cssBox.maxLength = CSS_MAX;
+  const themeState = el("span", { class: "setting-value", "data-note": "theme-state" });
+  const themePreview = el("pre", { class: "theme-preview", hidden: true });
+  const themeRows = el("ul", { class: "theme-findings", hidden: true });
+  const themeNote = el("p", { class: "setting-note", role: "status", "data-note": "theme" });
+  // Text in the box that the record does not have yet. A paste that was never applied
+  // is the person's work, and this page is redrawn whenever the repository behind it
+  // changes, so rewriting the box from the record on every one of those would throw it
+  // away between two keystrokes.
+  let typed = false;
+  const showReview = (applied: string, findings: { rows: string[]; omitted: number }): void => {
+    themePreview.textContent = applied;
+    themePreview.hidden = applied === "";
+    themeRows.replaceChildren(...findings.rows.map((row) => el("li", { text: row })));
+    themeRows.hidden = findings.rows.length === 0;
+  };
+  const checkTheme = (): void => {
+    const review = previewThemeFragment(cssBox.value);
+    showReview(review.applied, review.findings);
+    themeNote.textContent =
+      review.applied === "" && cssBox.value.trim() !== ""
+        ? "Nothing in this text is something guit may draw, so applying it would leave the theme as it is."
+        : "";
+  };
+  const sayTheme = (report: ThemeReport): void => {
+    showReview(report.applied, report.findings);
+    themeNote.textContent = describeTheme(report);
+  };
+  const applyThemeButton = button("Apply theme", () => {
+    sayTheme(applyThemeFragment(cssBox.value));
+  }, { class: "btn" });
+  // The recovery control, and deliberately never disabled: a row that cannot be
+  // clicked because the panel thinks no theme is drawn is a row that cannot be clicked
+  // when the panel's own reading of the screen is what went wrong.
+  const disableThemeButton = button("Use built-in look", () => {
+    sayTheme(disableTheme());
+  }, { class: "btn" });
+  // The markup, not the caller, is what tells the draw path which controls have to
+  // survive a theme. The tab buttons carry the same mark; a fragment that takes either
+  // of them off the screen is reverted rather than reported.
+  disableThemeButton.dataset.recovery = "theme";
+  const custom = el("section", { class: "view-block" }, [
+    el("h2", { class: "block-title" }, [icon("droplet"), el("span", { text: "Custom theme" })]),
+    el("div", { class: "setting-row" }, [el("span", { class: "setting-label", text: "Custom theme" }), themeState]),
+    cssBox,
+    el("div", { class: "view-tools" }, [applyThemeButton, disableThemeButton]),
+    el("p", { class: "setting-note", text: `Only colours and typefaces, on the panel's own parts. Anything that reaches the network, moves a row or hides a control is refused and named. ${THEME_RECOVERY_KEYS} turns a theme off from anywhere.` }),
+    themePreview,
+    themeRows,
+    themeNote,
   ]);
 
   // --- environment ---
@@ -187,7 +265,7 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     probeResult,
   ]);
 
-  element.append(general, environment, developer);
+  element.append(general, custom, environment, developer);
 
   // --- diagnostics export (the manifest is the confirmation) ---
   const confirm = createConfirmDialog();
@@ -315,6 +393,14 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     fontNote.textContent = sentences.join(" ");
   };
   for (const box of [latinInput, cjkInput, monoInput]) box.addEventListener("change", applyFamilyRows);
+  // The theme box reviews when the text settles, not on every keystroke: a review is a
+  // parse plus an engine write into a detached sheet, and a person mid-value has not
+  // decided anything yet. `input` only records that the box now holds work the record
+  // does not, which is what keeps a repository event repainting this page from
+  // overwriting a paste. Applying remains a button press, because the draw is the one
+  // step that can also check that the way back out survived.
+  cssBox.addEventListener("input", () => { typed = true; });
+  cssBox.addEventListener("change", checkTheme);
   onTopToggle.addEventListener("change", async () => {
     try {
       await setAlwaysOnTop(onTopToggle.checked);
@@ -370,6 +456,23 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     // whenever the repository behind it changes, and a watcher event landing
     // mid-edit would otherwise type over the number being written.
     if (document.activeElement !== intervalInput) intervalInput.value = String(deps.currentInterval());
+    // The theme row describes the choice the record holds, which is not a claim about
+    // this screen: the stored text can be one the panel refused to draw, and the box can
+    // hold an edit that was never applied. The four states are what the record can
+    // actually witness — and "in use" means the next start will draw it, which is the
+    // only promise a flag can make.
+    const theme = currentThemeFragment();
+    const state = theme.draft === ""
+      ? "No custom theme"
+      : theme.unverified
+        ? "Held; not drawn"
+        : theme.enabled
+          ? "Saved and in use"
+          : "Saved, off";
+    if (themeState.textContent !== state) themeState.textContent = state;
+    // The stored text, unless the box holds work the record does not: a paste is the
+    // person's own, and a watcher event is not allowed to spend it.
+    if (!typed) cssBox.value = theme.draft;
     if (!probed) {
       probed = true;
       void refresh();
@@ -380,5 +483,9 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     windowResult.textContent = text;
   };
 
-  return { descriptor: { id: "settings", element }, render, noteGeometry };
+  const noteTheme = (report: ThemeReport | null): void => {
+    if (report !== null) sayTheme(report);
+  };
+
+  return { descriptor: { id: "settings", element }, render, noteGeometry, noteTheme };
 }

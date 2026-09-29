@@ -173,6 +173,26 @@ These need a human and a second machine, and are honestly outstanding:
   repository write to stderr on a successful read; if it does, this release
   reports that repository as unreadable instead of reading it partially.
 
+## The custom theme
+
+- A pasted fragment may say colours and font families, on the panel's own parts.
+  Everything else is refused, declaration by declaration, and each refusal is named.
+  Custom properties stay open on purpose, so hiding a control needs no refused
+  declaration — which is why the panel looks at the screen *after* drawing instead of
+  trusting the review to have predicted it.
+- What that look checks is whether the controls that turn a theme off still have a box.
+  A fragment that leaves the box and paints it the colour behind it, or moves it off the
+  window, is not caught as a failure. The key press is still the promise in either case:
+  it is listened for on the window, before the page exists and where no stylesheet
+  reaches.
+- The ask to start without themes is a session value, so it names one window. Closing
+  that window and opening another is an ordinary start, drawing whatever the record says
+  to draw.
+- The subset is pinned against WebKitGTK 2.52.6, the engine guit draws through. Other
+  engines have never been run (see **Platform coverage**), so a value one engine reads
+  and another refuses is a difference nobody has measured — and a fragment stored from
+  this engine is re-reviewed, not replayed, on every start.
+
 ## Objects that are not here
 
 A partial clone or a repository whose objects were pruned may be missing objects

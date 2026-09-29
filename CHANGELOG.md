@@ -40,6 +40,29 @@ is the record of what is not verified.
   from, leaving the family in force where it was and saying what happened; a code
   font this computer cannot draw with one width per character is reported too,
   because that is the panel overriding the choice rather than applying it.
+- Settings has a Custom theme section: paste a fragment of CSS and the panel draws it.
+  What may be in it is a subset — colours and font families, on the panel's own parts —
+  and a fragment that reaches the network, moves a row or hides a control is refused
+  declaration by declaration, with every refusal named rather than counted. The section
+  shows the text the panel would actually draw, and what it would leave out, before
+  anything is asked of the screen; applying text whose every declaration was refused
+  leaves the theme that is working untouched, because losing colours you can see is not
+  what pasting unreadable text asked for.
+- Getting the built-in look back does not depend on the custom one. `Ctrl/Cmd + Shift + T`
+  and the button on that page are the same action, and the key press is listened for on
+  the window, so no stylesheet can hide it or make it not work. The other two ways a
+  theme can fail are decided without asking the person: text the drawing engine has no
+  value for is refused and reported, and a fragment that drew but took the controls that
+  turn it off with it is reverted to the look that was reachable before, with its text
+  kept in the box to be edited. In both cases the theme is switched off, and the next
+  start of that window is asked to draw no theme either — so closing the window in a
+  panic does not reopen it into the same wall.
+- A custom theme is stored before it is drawn, and what was stored says whether the draw
+  was ever confirmed. A fragment that takes a window down never reports back, so the
+  only evidence the next start can act on is the marker left behind: it comes back with
+  no theme, disables the fragment and says so. A start that only asked to skip themes —
+  the key press above — draws nothing and changes nothing, so the theme is still there on
+  the start after it.
 
 ### Changed
 
