@@ -54,6 +54,7 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 | `core.excludesFile` | 生效；值中的 `~` 由 Git 展开，而 `git config --get core.excludesFile` 返回的是**未展开的原文** `~/myignores` | 解析观察目标时必须自行展开 `~`，否则会监听一个不存在的路径 |
 | 未设置 `core.excludesFile` 时的默认忽略文件 | `XDG_CONFIG_HOME` 存在时读 `$XDG_CONFIG_HOME/git/ignore`；未设置 `XDG_CONFIG_HOME` 时读 `$HOME/.config/git/ignore`（实测两者互斥，XDG 优先） | 观察目标不止来自配置：默认路径也必须纳入，否则“只改全局忽略文件”这一验收场景失效 |
 | 符号链接 | `ls-files --others` 把链接作为单条文件项列出；链接自身的 mtime 与被指向文件的 mtime 相互独立（`utime(follow_symlinks=false)` 只改链接） | 用 `symlink_metadata`（lstat 语义），不跟随到仓库外；据此，外部目标被改写不会反映在活动计时中，属于设计选择而非缺陷 |
+| sparse-checkout（cone 模式）目录外的已跟踪文件 | `--cached -z` **照样列出**它们，但磁盘上不存在，`stat` 失败；`--sparse` 标志在 Git 2.53 下对输出无差异；`status --porcelain=v2 -uall` 完全不报它们为删除（10 个文件里 6 个不在盘上，status 只输出分支头） | “已跟踪列表”一行规定的 stat 失败即跳过，天然覆盖 sparse 仓库：不需要识别 skip-worktree 位，也不需要为 sparse 另设候选语义 |
 
 ### 2.1 成本量级（同一主机、临时夹具）
 
@@ -77,6 +78,29 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 结论：一次完整“枚举 + stat”在 10k 文件量级实测 18–22 ms（其中 Git 枚举部分 <10 ms），
 足以在后台线程做初始扫描，但**绝不能挂在每个计时 tick 上**（设计 §4.2 的“静止时不反复扫描”）。
 超过输出上限的枚举按现有 runner 规则失败关闭，不解析截断列表。
+
+### 2.2 枚举输出必须选用的上限
+
+同一夹具（10001 个已跟踪文件，路径平均 13 字节）测得 `ls-files` 的字节量级：
+
+| 形式 | 10k 文件实测 | 与 `runner.rs` 现有常量的关系 |
+| --- | --- | --- |
+| `--cached -z` | 136,900 B | 超过 `DEFAULT_OUTPUT_LIMIT`（64 KB）约 2.1 倍 |
+| `--cached --stage -z` | 636,950 B | 超过默认上限约 9.7 倍，是朴素形式的 4.6 倍 |
+| `--others --exclude-standard --stage -z` | 与 stage 形式同量级 | 同上 |
+
+按平均路径长度反推，朴素 `-z` 形式在约 **4800 个文件**处就会撞上 64 KB；带 `--stage`
+（C02 用来排除 gitlink 必需）在约 **1000 个文件**处就会撞上。也就是说：沿用默认上限
+会让 guit 在一个中等大小仓库上把活动计时判为 `truncated`。这不是可以“放宽再解析”的
+问题——按现有规则截断的列表绝不解析，界面必须如实呈现不可用，而不是空集合或“没有修改”。
+
+这一失败已经有先例可循：submodule 视图读取的 `ls-files --stage` 起初共用 64 KB，
+于是约一千个文件以上的仓库就报“列表过大”（包括根本没有 submodule 的仓库），后来改为
+在模块内定义具名常量 `GITLINK_OUTPUT_LIMIT = runner::STATUS_OUTPUT_LIMIT`
+（`submodules.rs`），`docs/known-limitations.md` 记录了这次修正。活动枚举沿用同一形状：
+在自己的模块里定义一个具名上限、取 32 MB 档、注释说明它随**文件数**而非提交数增长。
+不采用“按条目数截断”，因为 `runner` 的截断按字节判定；超长 UTF-8 深路径同样按字节计。
+超过该上限时保持失败关闭，界面按 §4 的 `unavailable` 呈现。
 
 ## 3. C03：增量更新的触发来源
 
@@ -133,11 +157,13 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 
 ## 6. 未决事项
 
-- `git ls-files` 在 sparse-checkout 仓库下的候选含义（是否应排除 cone 外文件）未测。
-- 大量未跟踪项叠加深层目录时的枚举上界，需要与 `runner.rs` 现有 64 KB / 32 MB 上限对齐后再定
-  （`git ls-files --stage` 因随文件数增长已改用 32 MB 界，见 `docs/known-limitations.md`）。
+- 活动枚举的上限形状已按 submodule 视图的先例定为“模块内具名常量 + 32 MB 档”（§2.2）；
+  具体常量名与注释随实现落地后，需要在 `docs/known-limitations.md` 的 output bounds 一节
+  补一条同等强度的记录，不得只留在代码注释里。
 - Windows 的路径大小写/分隔符与符号链接语义、`~` 不展开时的默认忽略路径均无实测。
 - 休眠恢复的时钟跳变只能靠 `observedAt` 与系统时钟单调性推断，具体检测方式待定。
+- 单次 stat 覆盖 10 万级文件的真实上限未测（本轮只到 10k 量级）；若实现选择按条目数分块，
+  需要另测分块边界对 mtime 单调性的影响。
 
 ## 7. 复现方式
 
