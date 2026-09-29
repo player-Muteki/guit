@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""M7 theme check: both token sets ship, and the control drives the store.
+"""Theme check: both token sets ship, and the control drives the store.
 
 Two halves, because AT-SPI cannot read the value back out of a WebKit <select>
 on this host (the combo has a single unnamed child and never reports the

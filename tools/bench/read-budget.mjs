@@ -26,8 +26,10 @@
 // fields without the numbers must cost nothing, and a change of numbers alone
 // must cost exactly the read that owns it.
 //
-// Usage: node read-budget.mjs <dist-dir> [port]
-//   e.g. node read-budget.mjs ../../app/dist 9222
+// Usage: node read-budget.mjs [dist-dir] [port]
+//   e.g. node tools/bench/read-budget.mjs app/dist 9222
+//   (the path is read against the current directory; omitting it uses the
+//   built bundle at app/dist, found from this script's own location)
 //
 // It needs a browser and a built bundle, so it lives here rather than beside
 // the node:test unit tests: a file under tests/ is executed by
@@ -42,7 +44,7 @@ import { createServer, request } from "node:http";
 import { connect } from "node:net";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const DIST = resolve(process.argv[2] || join(here, "..", "dist"));
+const DIST = resolve(process.argv[2] || join(here, "..", "..", "app", "dist"));
 const PORT = Number(process.argv[3] || 9222);
 const CDP = `http://127.0.0.1:${PORT}`;
 

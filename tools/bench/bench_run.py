@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""One protocolised guit run for the M6-01 baseline (external harness).
+"""One protocolised guit run for the startup/idle baseline (external harness).
 
 Launches the release binary against a seeded repository with an isolated
 user-data directory, times the AT-SPI landmarks, samples the process-tree
@@ -180,15 +180,14 @@ def main():
     deadline = time.time() + 120
     while time.time() < deadline:
         text_blob = A.dump()
-        if l1 is None and re.search(r"\bChanges\b", text_blob):
+        # L1 is the shell: both page names are in the tree, so the window has
+        # its navigation and a click could land somewhere.
+        if l1 is None and re.search(r"\bMain\b", text_blob) and re.search(r"\bSettings\b", text_blob):
             l1 = time.monotonic() - t0
-        # M7 shell: L2 means the Changes view is fully populated (its own
-        # content line is on screen) and the watcher has announced itself in
-        # the status bar. In the pre-M7 single-page layout the landmark also
-        # matched the always-mounted history counter; history now lives behind
-        # its own view, so the counter is asserted separately below after
-        # switching to it. L2 numbers are therefore not the same measurement
-        # as the M6 table.
+        # L2 is the Main panel drawn: its own content line is on screen and the
+        # watcher has announced itself in the status bar. The commit graph is a
+        # separate read that can land later, so it is deliberately not part of
+        # either landmark; --history-pages below measures its paging.
         if (
             l2 is None
             and re.search(r"Monitor: ", text_blob)
@@ -212,13 +211,11 @@ def main():
         os.remove(os.path.join(args.repo, marker))
 
     if args.history_pages and l2 is not None:
-        # M7 shell: history lives behind its own view; switch to it first so
-        # its "Load older" control is in the accessibility tree.
+        # The graph shares the Main panel with the changes list, so it is
+        # already in the accessibility tree; wait for its own counter rather
+        # than for a page switch that no longer exists.
         page_times = []
-        history_tab = A.find_button(name="History")
-        if history_tab is None or not A.click(history_tab):
-            result["history_page_latencies_s"] = page_times
-        elif A.wait_for(r"\d+ commit\(s\)|No commits yet", 30) is None:
+        if A.wait_for(r"\d+ commit\(s\)|No commits yet", 30) is None:
             result["history_page_latencies_s"] = page_times
         else:
             for _ in range(args.history_pages):

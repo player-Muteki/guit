@@ -13,7 +13,7 @@ Needs: /usr/bin/python3 with gi/Atspi, an X display (:0), and the xgrab
 binary next to this script (cc -O2 -o xgrab xgrab.c -lX11).
 
 Writes PNGs to /tmp/guit-shots and prints one line per shot. A shot whose
-view never loads aborts with a message instead of capturing the wrong page.
+page never loads aborts with a message instead of capturing the wrong page.
 """
 import os
 import subprocess
@@ -65,42 +65,60 @@ def named(text, exact=False):
     return None
 
 
-def open_view(view, ready_regex):
-    item = A.find_button(name=view)
-    assert item and A.click(item), f"cannot open {view}"
-    assert A.wait_for(ready_regex, 15), f"{view} view never loaded"
+def open_page(page, ready_regex):
+    item = A.find_button(name=page)
+    assert item and A.click(item), f"cannot open {page}"
+    assert A.wait_for(ready_regex, 15), f"{page} page never loaded"
     time.sleep(0.5)
+
+
+def graph_rows():
+    """The commit rows, told apart from the file rows by their reading shape.
+
+    Both lists are on the one page now, and both are LIST_ITEMs, so the row that
+    names an author and a date is the graph's; a file row is named for its path.
+    """
+    return [n for n in A.tree(A.app_root())
+            if (A._once(lambda: n.get_role().value_name, default="") or "") == "ATSPI_ROLE_LIST_ITEM"
+            and " — " in (A._once(lambda: n.get_name(), default="") or "")]
 
 
 A.Atspi.init()
 try:
-    assert A.wait_for(r"Commit message", 60), "app did not reach Changes"
+    assert A.wait_for(r"Commit message", 60), "app did not reach the panel"
     time.sleep(1.0)
-    shot("01-changes")
+    # The one page, both regions in the frame: this shot is the evidence that the
+    # changes area and the graph are visible together, which no text assertion
+    # can make.
+    shot("01-main")
 
-    for view, fname, ready in [
-        ("History", "02-history", r"Search commits|commit "),
-        ("Branches & Tags", "03-branches", r"New branch|Filter branches"),
-        ("Stash", "04-stash", r"Stash"),
-        ("Remotes", "05-remotes", r"Add remote|Pull strategy"),
-        ("Worktrees & Submodules", "06-worktrees", r"Worktrees"),
-        ("Settings", "07-settings", r"Interface zoom|Theme"),
+    for page, fname, ready in [
+        ("Settings", "02-settings", r"Interface zoom|Theme"),
+        ("Main", "03-main", r"Commit message"),
     ]:
-        open_view(view, ready)
+        open_page(page, ready)
         shot(fname)
 
+    # The branch picker: a layer over Main. AT-SPI cannot tell a covering layer
+    # from the page under it, so the picture is the check.
+    chip = A.find_button(name="Switch branch")
+    assert chip and A.click(chip), "no branch chip to open the picker"
+    assert A.wait_for(r"Filter branches and tags", 15), "the picker never opened"
+    time.sleep(0.5)
+    shot("04-branch-picker")
+    open_page("Settings", r"Interface zoom")
+    open_page("Main", r"Commit message")
+    time.sleep(0.5)
+
     # history detail: activate the first commit row
-    open_view("History", r"Search commits|commit ")
-    rows = [n for n in A.tree(A.app_root())
-            if (A._once(lambda: n.get_role().value_name, default="") or "") == "ATSPI_ROLE_LIST_ITEM"]
+    rows = graph_rows()
     if rows:
         A._once(lambda: rows[0].do_action(0))
         time.sleep(0.8)
-    shot("08-history-selected")
+    shot("05-commit-selected")
 
     # discard preview must come from a tracked-modified row; an untracked
     # row's menu only offers Open/Diff and has no Discard
-    open_view("Changes", r"Commit message")
     more = named("More actions for mod3.py")
     if not more:
         more = next((n for n in A.tree(A.app_root())
@@ -108,26 +126,26 @@ try:
                      .startswith("More actions for ")), None)
     assert more and A.click(more), "no row menu"
     time.sleep(0.6)
-    shot("09-row-menu")
+    shot("06-row-menu")
     disc = named("Discard", exact=True)
     if disc:
         A.click(disc)
         assert A.wait_for(r"Keep changes", 8), "discard modal never opened"
         time.sleep(0.5)
-        shot("10-discard-preview")
+        shot("07-discard-preview")
         keep = named("Keep changes", exact=True)
         if keep:
             A.click(keep)
             time.sleep(0.5)
 
     # zoom extremes
-    open_view("Settings", r"Interface zoom")
+    open_page("Settings", r"Interface zoom")
     zin = named("Zoom in", exact=True) or named("+", exact=True)
     for _ in range(3):
         if zin:
             A.click(zin)
             time.sleep(0.4)
-    shot("11-settings-zoomed")
+    shot("08-settings-zoomed")
 
     # dark theme: the select must stay legible (WebKitGTK used to paint it
     # with the system theme, giving light text on a light box)
@@ -139,7 +157,7 @@ try:
         if dark:
             A.click(dark)
             time.sleep(0.8)
-            shot("12-dark-theme")
+            shot("09-dark-theme")
 finally:
     proc.terminate()
     try:

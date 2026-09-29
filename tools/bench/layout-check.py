@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Layout checks over AT-SPI geometry (M7).
+"""Layout checks over AT-SPI geometry.
 
 The functional smoke suites assert that the right controls exist and that the
 right text is announced. They are blind to layout: a view can pass all of them
@@ -26,10 +26,17 @@ absolute path lost its tail at 340px — passed this check and was found by
 looking at a screenshot. Passing here means "not painted on top of itself", not
 "well laid out".
 
+The branch picker is therefore not measured here. It covers the panel with an
+opaque layer, and the panel keeps its laid-out boxes underneath: with no z-order
+in the tree, every row of the page under the layer reads as an overlap with the
+layer's own rows. Whether a covering layer actually covers, and whether what it
+covers stays out of the way, is a question about paint order — layout-probe.mjs
+answers it in a renderer that has one.
+
 Usage: layout-check.py <release-binary> <fixture-repo> <work-dir> [width height]
 The binary must be built with the custom-protocol feature (`npm run
 bin:release`); a dev-url binary renders an error page instead of the app.
-Exits non-zero when any view or overlay state fails.
+Exits non-zero when any page or overlay state fails.
 
 A gate that cannot fail is not a gate, so verify it by breaking the layout on
 purpose: this one was developed against a build with the Settings fix removed,
@@ -49,13 +56,11 @@ OVERLAP_SLOP = 2
 # A text node smaller than this in either axis cannot be legible.
 MIN_BOX = 6
 
-VIEWS = [
-    ("Changes", r"Commit message"),
-    ("History", r"Load older|No commits yet|commit"),
-    ("Branches & Tags", r"New branch|Search"),
-    ("Stash", r"Stash changes|Save changes|Your stash"),
-    ("Remotes", r"Add remote|Fetch|Publish"),
-    ("Worktrees & Submodules", r"Add worktree|Submodules|Linked worktrees"),
+# The two pages, by the name their tab item carries. Each is measured with the
+# panel's own landmark in it, so a page that failed to lay out its regions is
+# caught before the overlay states are.
+PAGES = [
+    ("Main", r"Commit message"),
     ("Settings", r"Interface zoom|Export diagnostics"),
 ]
 
@@ -320,10 +325,10 @@ def main():
         A.Atspi.init()
         if A.wait_for(r"Commit message", 30) is None:
             # A gate that cannot say what it saw is not a gate. Show the tree.
-            print("FAIL: the app never reached the Changes view; the tree held:")
+            print("FAIL: the app never reached the panel; the tree held:")
             for line in [ln for ln in A.dump().splitlines() if ln.strip()][:40]:
                 print(f"        {line}")
-            report.fail("the app never reached the Changes view", "no commit box in the tree")
+            report.fail("the app never reached the panel", "no commit box in the tree")
             return 1
         viewport = viewport_rect()
         if viewport is None:
@@ -331,17 +336,17 @@ def main():
             return 1
         print(f"document box: x={viewport[0]} y={viewport[1]} w={viewport[2]} h={viewport[3]}")
 
-        for view, needle in VIEWS:
-            A.click(A.find_button(name=view))
+        for page, needle in PAGES:
+            A.click(A.find_button(name=page))
             A.wait_for(needle, 10)
             time.sleep(1.0)
             before = len(report.fails)
-            check_state(report, f"view {view}", viewport)
+            check_state(report, f"page {page}", viewport)
             if len(report.fails) == before:
-                print(f"ok:   view {view} lays out cleanly")
+                print(f"ok:   page {page} lays out cleanly")
 
         # Overlay states: a row action menu and the destructive dialog.
-        A.click(A.find_button(name="Changes"))
+        A.click(A.find_button(name="Main"))
         A.wait_for(r"Commit message", 10)
         time.sleep(0.8)
         rows = [n for n in A.tree(A.app_root())

@@ -239,3 +239,14 @@ ran or passed. Do not claim a CI pass, and do not claim platform coverage that
 `tools/bench/` and `tools/live/` hold the performance, accessibility and layout harnesses
 (deterministic fixtures, AT-SPI probes, contrast and geometry checks, a live screenshot
 rig). `GUIT_PERF=1` turns on phase timing to stderr; labels carry phase names only.
+
+**Each harness asserts only what its channel can see.** AT-SPI has no z-order, so the
+Python probes assert presence, reachability and focus — never absence, and never that a
+layer covers something. Whether the branch picker hides the panel is a rendering fact:
+`layout-probe.mjs` measures it with clip-aware painted rectangles for overlap and
+overflow, and a node's own layout box for "showing, carries text, too small to draw".
+That probe stubs the IPC layer, and a stub must answer the way the backend publishes —
+a fresh copy with a higher `version` per session answer. Handing the app one mutable
+object lets a mutation raise the stored snapshot's own version, `applySnapshot` drops
+the refresh as not newer, and the probe then measures its own first screen while
+reporting green.

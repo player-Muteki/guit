@@ -66,6 +66,10 @@ is the record of what is not verified.
 - The remote rows in the branch picker are a read-only listing now. They show
   the remote-tracking refs Git recorded locally — the last state your own `git`
   wrote down — and say so, instead of offering actions against the remote.
+- A tab's pending count hangs in a gutter the tab reserves for it, so it never
+  sits on top of the page's own word — not at one change, not at the `99+` the
+  count caps at. Once the window is narrow enough that the words are gone, the
+  gutter goes with them and the count sits on the corner of the glyph again.
 
 ### Removed
 

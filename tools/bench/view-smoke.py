@@ -1,8 +1,10 @@
 #!/usr/bin/python3
-"""M7 shell smoke over AT-SPI (one protocolised run).
+"""Shell smoke over AT-SPI (one protocolised run).
 
-Covers what recovery-checks.sh and diagnostics-export-check.sh do not: that
-every activity-rail view opens and shows its own content, that a row menu
+Covers what recovery-checks.sh and diagnostics-export-check.sh do not: that the
+two pages open and each shows its own content, that the one page carries the
+changes area and the commit graph at the same time, that the branch picker opens
+as a layer over that page while the tab strip stays reachable, that a row menu
 works, that the discard ticket's cancel path closes the modal, returns focus to
 the button that opened it and changes nothing on disk, that a failed external
 tool is surfaced, and that the developer probe's cancel really reaps its
@@ -17,11 +19,18 @@ Landmark rules are the one in atspi_landmark.py, plus three this script needs:
 - the file list is virtualised, so only the groups inside the rendered window
   are asserted, and the fixture is small enough to fit all of them.
 
+The same rule about absence is why nothing here asserts that a closed layer has
+left the tree: what is asserted is that it opened and that the chrome stayed
+reachable over it. Whether a hidden page keeps covering the screen is a question
+about geometry, and layout-probe.mjs answers it in the renderer, where the
+covering is measured rather than inferred.
+
 Focus *is* asserted, on both paths a confirm dialog can take: cancelling one
 whose trigger survived hands focus back to that trigger, and cancelling one
 whose trigger was rebuilt while the dialog was open hands it to the documented
-substitute. A control experiment (click a rail item: nothing stays focused)
-ruled out the earlier reading that AT-SPI's FOCUSED state is sticky here.
+substitute — the tab item of the page on screen. A control experiment (click a
+tab item: nothing stays focused) ruled out the earlier reading that AT-SPI's
+FOCUSED state is sticky here.
 
 Usage: view-smoke.py <release-binary> <fixture-repo> <work-dir> [--keep]
 Prints one line per assertion; exits non-zero when any assertion fails.
@@ -37,19 +46,19 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import atspi_landmark as A  # noqa: E402
 
-# Rail item -> a string that can only come from that view's own content.
-VIEWS = [
-    ("Changes", r"Commit message"),
-    ("History", r"Load older|No commits yet"),
-    ("Branches & Tags", r"New branch|Search"),
-    ("Stash", r"Stash changes|Save changes|Your stash"),
-    ("Remotes", r"Add remote|Fetch|Publish"),
-    ("Worktrees & Submodules", r"Add worktree|Submodules|Linked worktrees"),
+# Tab item -> a string that can only come from that page's own content.
+PAGES = [
+    ("Main", r"Commit message"),
     ("Settings", r"Interface zoom|Export diagnostics"),
 ]
 
+# The one page is the contract: staging a file and reading the graph happen in
+# one glance, so both regions name themselves while the page is on screen. The
+# graph's own heading is a landmark name, not a heading in the text.
+MAIN_REGIONS = [r"Commit message", r"Commit history"]
+
 # From fileModel.ts GROUP_LABELS. "Changes" is the work-tree group, so it is
-# matched with its count to tell it apart from the view title.
+# matched with its count to tell it apart from the tab that is now called Main.
 DIRTY_GROUPS = [r"Staged changes", r"Changes \(\d+\)", r"Untracked files"]
 
 
@@ -149,24 +158,52 @@ def main():
     report = Report()
     try:
         A.Atspi.init()
-        report.check("the Changes view renders its commit box",
+        report.check("Main renders its commit box",
                      A.wait_for(r"Commit message", 30) is not None)
         report.check("the watch mode is announced in the status bar",
                      A.wait_for(r"Monitor: ", 20) is not None)
 
-        # --- every rail view opens and shows its own content ---
-        for view, needle in VIEWS:
-            item = A.find_button(name=view)
+        # --- the two pages, each with its own content ---
+        for page, needle in PAGES:
+            item = A.find_button(name=page)
             if item is None:
-                report.check(f"view {view}: rail item present", False)
+                report.check(f"page {page}: tab item present", False)
                 continue
             A.click(item)
             time.sleep(0.8)
-            report.check(f"view {view} opens with its own content",
+            report.check(f"page {page} opens with its own content",
                          A.wait_for(needle, 8) is not None, needle)
 
-        A.click(A.find_button(name="Changes"))
+        A.click(A.find_button(name="Main"))
         time.sleep(0.8)
+
+        # --- one page, both regions, at the same time ---
+        # The panel's whole point: a user staging a file can read the graph of
+        # the same branch without leaving the page. Checked as one dump, because
+        # two separate waits would pass on a panel that shows one region and
+        # then the other.
+        blob = A.dump()
+        for pattern in MAIN_REGIONS:
+            report.check(f"the page on screen carries /{pattern}/ as well",
+                         re.search(pattern, blob) is not None)
+
+        # --- the branch picker: a layer over this page, not a third page ---
+        # It is opened from the app bar and it must not swallow the chrome: the
+        # tab strip stays reachable over it, which is what tells the layer apart
+        # from a modal dialog and from a page of its own.
+        chip = A.find_button(name="Switch branch")
+        report.check("the app bar carries the branch chip", chip is not None)
+        if chip is not None:
+            A.click(chip)
+            time.sleep(1.0)
+            report.check("the branch picker opens over the panel",
+                         A.wait_for(r"Filter branches and tags", 8) is not None)
+            A.click(A.find_button(name="Settings"))
+            time.sleep(1.0)
+            report.check("the tab strip stays reachable with the layer up",
+                         A.wait_for(r"Interface zoom", 6) is not None)
+            A.click(A.find_button(name="Main"))
+            time.sleep(1.0)
 
         # --- the change groups a dirty fixture must produce ---
         blob = A.dump()
@@ -198,8 +235,10 @@ def main():
         report.check("cancel discarded nothing", before == porcelain(args.repo))
         # Focus must not stay on the closed dialog's own button. "Discard all"
         # lives in a virtualised row that the preview's snapshot already
-        # rebuilt, so the documented substitute is the activity-rail item.
-        report.check("focus leaves the closed dialog", focused_name("ATSPI_ROLE_BUTTON") == "Changes",
+        # rebuilt, so the documented substitute is the tab item of the page on
+        # screen: the strip is chrome, it is never rebuilt, and it is a place a
+        # user can navigate from.
+        report.check("focus leaves the closed dialog", focused_name("ATSPI_ROLE_BUTTON") == "Main",
                      f"focus is on {focused_name('ATSPI_ROLE_BUTTON')!r}")
 
         # --- the same dialog when the trigger *is* still there ---

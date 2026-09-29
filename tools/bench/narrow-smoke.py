@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""M7 narrow-window smoke over AT-SPI.
+"""Narrow-window smoke over AT-SPI.
 
 Drives Settings → Developer "Test compact window", which resizes the window to
 the project's declared 340x400 minimum, and asserts the shell's primary actions
@@ -18,11 +18,14 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import atspi_landmark as A  # noqa: E402
 
-RAIL = {"Changes", "History", "Branches & Tags", "Stash", "Remotes",
-        "Worktrees & Submodules", "Settings"}
-APPBAR = {"Open repository", "Refresh status", "Sync", "Commit", "Always on top"}
-# At the minimum width the app bar drops its Commit button, because the Changes
-# footer already carries a commit box in the same place. The affordance has to
+# The two pages, by the name the tab item carries. At the minimum width the
+# strip shows its glyph only, and the name is the accessible label rather than
+# the word, so the same two names have to be present at both sizes.
+TABS = {"Main", "Settings"}
+APPBAR = {"Open repository", "Refresh status", "Close session", "Commit",
+          "Always on top", "More repository actions"}
+# At the minimum width the app bar drops its Commit button, because the changes
+# area already carries a commit box in the same place. The affordance has to
 # survive, not both copies of it, so it is checked where it lives instead.
 APPBAR_NARROW = APPBAR - {"Commit"}
 ZOOM = {"Zoom in", "Zoom out", "Reset zoom"}
@@ -64,14 +67,14 @@ def main():
     try:
         A.Atspi.init()
         if A.wait_for(r"Commit message", 30) is None:
-            report.check("the app reaches the Changes view", False, "no commit box in the tree")
-            print("FAIL: the app never reached the Changes view")
+            report.check("the app reaches the panel", False, "no commit box in the tree")
+            print("FAIL: the app never reached the panel")
             return 1
         wide = showing_names()
         report.check("the app bar's primary actions are visible when wide", APPBAR <= wide,
                      ",".join(sorted(APPBAR - wide)))
-        report.check("the whole activity rail is visible when wide", RAIL <= wide,
-                     ",".join(sorted(RAIL - wide)))
+        report.check("both pages are reachable when wide", TABS <= wide,
+                     ",".join(sorted(TABS - wide)))
 
         # --- shrink to the declared minimum, 340x400 ---
         A.click(A.find_button(name="Settings"))
@@ -79,16 +82,20 @@ def main():
         A.click(A.find_button(name="Test compact window"))
         time.sleep(2.5)
         narrow = showing_names()
-        report.check("the activity rail survives 340x400", RAIL <= narrow,
-                     f"{len(RAIL & narrow)}/{len(RAIL)} visible")
+        report.check("both pages are still reachable at 340x400", TABS <= narrow,
+                     f"{len(TABS & narrow)}/{len(TABS)} visible")
         report.check("the app bar's primary actions survive 340x400", APPBAR_NARROW <= narrow,
                      ",".join(sorted(APPBAR_NARROW - narrow)))
         report.check("the branch chip survives 340x400", "Switch branch" in narrow)
 
-        A.click(A.find_button(name="Changes"))
+        A.click(A.find_button(name="Main"))
         time.sleep(1.2)
         narrow = showing_names()
         report.check("the commit box survives 340x400", "Commit message" in narrow)
+        # The two regions are one page, and a page that only fits one of them at
+        # the minimum size is the layout failure this whole stage exists to
+        # catch: the graph is there, scrollable or capped, not gone.
+        report.check("the commit history shares the page at 340x400", "Commit history" in narrow)
         report.check("a file row's actions survive 340x400",
                      any(name.startswith("More actions for ") for name in narrow))
 
