@@ -287,6 +287,73 @@ git 锁文件的 `Access(Close(Write))` 就在同一批事件里。C01 保留事
 `session::refresh` → `publish` 路径，复位就挂在发布成功之后。不得为它新增按钮、
 新命令或新的前端调用面。
 
+#### C01 落地后的形状修正（实现记录，commit `1367f7e`，锚点为当时的 `watch.rs` 行号）
+
+上面这一节的形状决定有四条在实现时必须改写，其余按原样落地。差异写在这里，不回填正文：
+正文那几段是决定过程，这一小节是交付事实。
+
+- **通道送的是紧凑事件条目，不是“只有有事发生”。** 原文“通道只送‘有事发生’，不送路径”
+  在结构上不成立：合并集在 `run_loop` 一侧，通道不带路径时消费者没有任何可折叠的输入。
+  落地载荷为 `EventNote { path, removed }`（`watch.rs:83`）。于是上界从“积压条数 ×
+  每条路径字节数”换成“capacity × 单条 note 大小”，仍是两个显式可命名的因子：
+  `EVENT_CAP = 1024`（`watch.rs:31`）×（`PathBuf` 头 24 B + 夹具实测 35–38 B 路径）
+  ⇒ 最坏约 60 KB。原文“路径字节数不能当作一般值”这条约束仍然成立，只是它现在约束的是
+  这个乘积，而不是无界积压。
+- **键取 `PathBuf`，不取 `Vec<u8>`。** §2.4 那条“按字节解析”管的是 git 的 stdout，
+  不是集合的键：Unix 上 `PathBuf` 的相等即字节的相等，不经 `String` 往返，也不需要为了
+  原始字节在非 Unix 上引入 `OsStrExt`。决定性的一条是这个键在 C03 要直接交给 `lstat`，
+  `PathBuf` 是唯一免转换的形状。
+- **合并集是成对的两集，不是一集。** `Window { changed, removed, incomplete }`
+  （`watch.rs:103`）。原文“`Remove` 与 rename 的‘源’侧要把该路径从集合里删掉”在单集合里
+  只能表达成按路径 delete，而一条“本窗口内从未出现过的删除”就没有可删的对象，因而没有
+  地方记录这次删除——mtime 索引恰恰必须停止信任它。`absorb`（`watch.rs:119`）里的规则是：
+  删除命中 `changed` 就抵消（编辑器临时名），否则落进 `removed`；写入命中 `removed`
+  就把那次删除撤回。
+- **一条原文没写、实现补上的规则：已声明不可信的窗口停止收集。** `discarded()`
+  （`watch.rs:145`）置位后清零两集，`absorb` 首行短路。继续往里写只是给一次已经放弃细节的
+  刷新花内存。
+
+标记删除的具体规则在 `notes_from`（`watch.rs:334`）：`Remove(_)` ⇒ 全部路径；
+`Modify(Name(Both))` ⇒ 1 条（源）；`Modify(Name(From))` ⇒ 全部；其余含 `Name(To)` ⇒ 0。
+这给 C03 留下两条必须兑现的义务：`lstat` 的 `ENOENT` 要读成一次删除，被删除的目录要按**前缀**淘汰（事件只给目录那一条
+路径，不给目录下的子路径）。
+
+上一段那条溢出规则落成了三个点，且都是同一动作：`deliver`（`watch.rs:368`）只在
+`TrySendError::Full` 时置饱和标志，`Disconnected` 作为“会话结束”单独向上报（原
+`let _ =` 把两者一起吞掉，这个形状已改）；“交付后清零”落在贪心排空之后的
+`saturated.swap(false, SeqCst)`（`watch.rs:244`），置位过就 `window.discarded()`；
+poll 分支与 Watch 兜底分支交付的都是 `Window::full_rescan()`。
+
+**而那段末尾要求的“手动刷新复位”现在还是空的**，原因要说清：今天每一次刷新仍是
+全量重捕获，`incomplete` 只是 C03 的输入，界面上不存在一个可被清掉的降级状态。接线本身
+没动（同一条 `session::refresh` → `publish`，未新增按钮、命令或前端调用面），复位要在
+C03 真正消费 `Window` 之后才成立，届时它必须落在发布成功之后。
+
+重挂（§1.2 第 5 条的另一半）取 `HEARTBEAT` 1 s、只在 Watch 模式：`run_loop` 的
+`next_rearm` 分支（`watch.rs:220`）调用 `rearm`（`watch.rs:305`），对当前存在的每个
+`watch_targets` 项重发一次幂等的 `watch(..., Recursive)`，从不调用 `unwatch`，不报告失败，
+缺失的目标由 `watch_targets` 的 canonicalize 直接滤掉。挂在心跳而不是刷新之后，是因为
+监听根被删后不会产生事件，也就永远不会触发那次 `fire()`；把这条分支关掉，
+`rearming_replaces_a_deleted_watch_root` 实测 10.9 s 不恢复，正是 §1.2 那条静默。
+Poll 模式不重挂（同批次断言 `rearmed == 0`）。
+
+两个节奏夹具分工不同：`a_steady_writer_cannot_starve_the_refresh` 用注入时钟把饿死固定在
+`max_wait` 上，`a_real_editors_cadence_evicts_the_names_that_already_moved` 用真实 tmpfs
+保存节奏（debounce 远大于一次保存），所以后者那句“没有一个临时名被当作变化交付”说的是
+淘汰规则，不是内核时序。
+
+本节此前引用的 `watch.rs:151/158/214` 是**实现前**的行号，保留作过程记录；当前锚点是
+`DEBOUNCE:14`、`MAX_WAIT:20`、`POLL_INTERVAL:24`、`HEARTBEAT:26`、`EVENT_CAP:31`、
+`PATH_CAP:35`、`EventNote:83`、`Window:103`、`run_loop:164`、`watch_targets:272`、
+`rearm:305`、`notes_from:334`、`deliver:368`、`start_watcher:386`、`choose_mode:444`、
+supervisor 的 `sync_channel(EVENT_CAP):455`。本节没提但形状依赖的两条既有要求原样未动：
+`--no-optional-locks` 仍在 `repo.rs:365-370` 的顶层参数前置位，`Access(_)` 仍整类丢弃并由
+`access_events_do_not_trigger_a_refresh` 断 `notes_from(&access).is_empty()`。
+
+另记一条本阶段没改的现状：watcher 创建只在会话启动时尝试一次，**以 Poll 起步的仓库会停在
+Poll 直到会话重启**（重挂只修已存在的 watcher，不创建缺失的那个）。这是 C05 设置项与
+`docs/known-limitations.md` 的措辞边界，不是 C01 的静默修复漏了一半。
+
 ### 1.5 Watch 兜底的间隔：选定，与它的代价（实测）
 
 §1.2 第 5 条要求 Watch 模式自带一个不依赖 `Err` 的兜底刷新；间隔取哪个此前记在
