@@ -81,7 +81,7 @@ jobs:
           ## Verified / unverified platforms
 
           - **Linux** — install trial, click-through and recovery smoke verified on
-            Ubuntu 26.04 (see \`docs/known-limitations.md\` in the repository).
+            Ubuntu 26.04 with WebKitGTK / GTK 3, on that one host only.
           - **macOS / Windows** — artifacts are built by this pipeline but have
             **not** been runtime-verified; treat them as untested previews.
 

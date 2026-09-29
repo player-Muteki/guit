@@ -216,11 +216,13 @@ the code they scan is how you break them.
   The reason: one panic must not turn every later request into "a lock was poisoned",
   naming neither the state nor the failure the user already saw.
 - **Shipped text is a contract.** `app/tests/user-facing-copy.mjs` scans the READMEs,
-  CHANGELOG, `docs/`, `app/src/`, `app/src-tauri/src/` and `capabilities/` — **comments
-  included** — and fails on milestone labels (`M7`, `M6-11`), `plan/...` citations and
-  `decision N` references. The historical development plan was deleted. The current
-  `plan/` directory is internal engineering guidance; neither its paths nor task labels
-  belong in shipped text. Name behaviour, not schedule. Keep the existing gate intact.
+  CHANGELOG, any Markdown this repository ships under `docs/` (a directory that is not
+  there contributes no text), `app/src/`, `app/src-tauri/src/` and `capabilities/` —
+  **comments included** — and fails on milestone labels (`M7`, `M6-11`), `plan/...`
+  citations and `decision N` references. The historical development plan was deleted.
+  The current `plan/` directory is internal engineering guidance; neither its paths nor
+  task labels belong in shipped text. Name behaviour, not schedule. Keep the existing
+  gate intact.
 - **Every command answers to the thing it is bound to.** `app/tests/ipc-surface.mjs` reads
   the real signatures out of `main.rs` and `src-tauri/src/*.rs` and sorts the registered
   commands four ways: a repository read bound to a session and a generation (asked with a
@@ -246,9 +248,10 @@ Recorded application runtime evidence comes from one Linux host (Ubuntu 26.04,
 Git 2.53, WebKitGTK / GTK 3, Node 26). **Windows and macOS are build configuration only and have never been
 run.** CI is configured in `.github/workflows/`; no CI pass has been verified in the
 current records. An `origin` remote exists, but its presence does not prove a workflow
-ran or passed. Do not claim a CI pass, and do not claim platform coverage that
-`docs/known-limitations.md` does not. That file is the record of what is *not* verified;
-`CHANGELOG.md` is the record of what changed.
+ran or passed. Do not claim a CI pass, and do not claim platform coverage this
+paragraph does not record. What is *not* verified is written in the plan note of
+the stage that left it open and indexed by that stage's row in
+`plan/README.md`'s delivery table; `CHANGELOG.md` is the record of what changed.
 
 `tools/bench/` and `tools/live/` hold the performance, accessibility and layout harnesses
 (deterministic fixtures, AT-SPI probes, contrast and geometry checks, a live screenshot

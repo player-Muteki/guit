@@ -22,9 +22,9 @@
 
 ## 2. 与既有记录的差异
 
-- `docs/known-limitations.md` 声明的验证宿主为"Node 26";本次执行 shell 经 nvm 解析为 Node v22.22.2,与 `AGENTS.md` 环境记录(Node.js v26.3.0)也不同。全部 Node 门禁已在 v22.22.2 下实际执行并通过(见 A02),该版本差异记录为工具链事实,不改写历史证据。
+- 撤下的 `docs/known-limitations.md`（由阶段 G 的文档清理删去，此处保留当时的读取结论）声明的验证宿主为"Node 26";本次执行 shell 经 nvm 解析为 Node v22.22.2,与 `AGENTS.md` 环境记录(Node.js v26.3.0)也不同。全部 Node 门禁已在 v22.22.2 下实际执行并通过(见 A02),该版本差异记录为工具链事实,不改写历史证据。
 - 调研发现 `git worktree list` 存在残留条目 `/tmp/guit-verify`(detached `1bbf761`,prunable),来自更早的验证会话,未清理。它不影响本仓库工作区清洁判定;记录待 H 阶段环境重置时处理,本阶段不删除他方创建的临时产物。
-- `docs/known-limitations.md` 关于平台覆盖、输出上限、手动门禁未闭合等陈述与本次静态读取一致,未发现与代码相矛盾的过时陈述(origin 存在性已在 `97b61dc` 前的指导文件修正)。
+- 撤下的 `docs/known-limitations.md` 关于平台覆盖、输出上限、手动门禁未闭合等陈述与本次静态读取一致,未发现与代码相矛盾的过时陈述(origin 存在性已在 `97b61dc` 前的指导文件修正)。
 
 ## 3. origin 与 CI 状态核对
 
@@ -37,6 +37,6 @@
 | 类别 | 状态 |
 | --- | --- |
 | 本次直接测量(gates、命令清单、夹具) | 记录于 A02/A03/A04 交付物 |
-| 历史运行证据(Linux 桌面点击、包安装) | 沿用 `docs/known-limitations.md`,未重测 |
+| 历史运行证据(Linux 桌面点击、包安装) | 当时的登记文件已随 `docs/` 撤下,结论按上文与指导文件保留,未重测 |
 | Windows / macOS | 从未运行,维持"构建配置仅"结论 |
 | CI | 未核验,不宣称通过 |

@@ -15,7 +15,7 @@
 - **共享的子进程清理与 askpass 无关，所以迁走而不是删掉。** `sweep_stale_config_temps` 从 `askpass.rs` 迁到 `main.rs`，连同它的两条测试：它保护的是 `window.json` 那套原子 rename 写的残留临时文件。argv 拦截随 `--guit-askpass` 一起消失。
 - **`interactive` 参数随认证重试同批退出。** 后端签名先去掉，前端 `confirmTicket` 的 `{ nonce, interactive: false }` 同批改成 `{ nonce }`——留下前端在发送后端不再接收的字段，等于给下一位读者一个假的“这里有交互模式”的暗示。
 - **诊断导出不再谈凭据。** `Facts` 去掉 `credential_policy` / `credential_helpers` 与远端 URL 段；Settings 的导出清单（那份清单就是确认动作本身）同步改成“包含 / 不包含”两组真实集合。凭据配置从此不被读取，而不是被读了再脱敏。
-- **文案与实现同批走。** 中英文 README、`docs/credentials.md`、`docs/known-limitations.md`、`CHANGELOG.md`、`CLAUDE.md` 一起改到不再有任何一句承诺克隆/fetch/push/认证重试；`user-facing-copy.mjs` 的门保持原样，不放宽。
+- **文案与实现同批走。** 中英文 README、`docs/credentials.md`、`docs/known-limitations.md`（后两者已随 `docs/` 撤下）、`CHANGELOG.md`、`CLAUDE.md` 一起改到不再有任何一句承诺克隆/fetch/push/认证重试；`user-facing-copy.mjs` 的门保持原样，不放宽。
 
 ## 2. 为什么门禁必须双向
 
@@ -47,7 +47,7 @@ Rust 侧净变化：删除 `clone.rs`、`network.rs`、`remotes.rs`、`askpass.r
 
 ## 5. 已知缺口
 
-- `GIT_NO_LAZY_FETCH` 与 `submodule.recurse=false` 的拒绝形状**尚未在真实 partial clone 或带真子模块的仓库上观察过**；`docs/known-limitations.md` 记为未验证。
+- `GIT_NO_LAZY_FETCH` 与 `submodule.recurse=false` 的拒绝形状**尚未在真实 partial clone 或带真子模块的仓库上观察过**；这条未验证现由本目录交付状态表的 B 行承担（原先记在已撤下的验证记录里）。
 - 不认识 `GIT_NO_LAZY_FETCH` 的更旧 Git 会静默忽略它而不是报错，所以这条下界只有构建所依据的 Git 2.53 有证据。
 - `stash_list`、`list_worktrees`、`submodule_status` 等本地命令仍在注册面上，靠已经没有页面的模块里的字面量满足门禁；实现与这些模块的彻底下线属于迁移收尾，本阶段不动，以免连带删掉仍被本地路径使用的写保护。
 - 桌面探针（`tools/bench/layout-probe.mjs`、`view-smoke.py`、`narrow-smoke.py`）仍指旧结构与旧令牌，留给 B06。

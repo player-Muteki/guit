@@ -1301,9 +1301,9 @@ mod tests {
         );
     }
 
-    /// The promise in the known-limitations record is that a repository whose
-    /// inotify watches are exhausted keeps working on a five-second poll
-    /// rather than going quiet. That promise lives entirely in this branch:
+    /// The promise this test holds is that a repository whose inotify watches
+    /// are exhausted keeps working on a five-second poll rather than going
+    /// quiet. That promise lives entirely in this branch:
     /// a watcher that exists but cannot be told to watch anything must become
     /// `Poll`, and the mode the user is shown must say so.
     #[test]

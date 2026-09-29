@@ -27,8 +27,8 @@ helper 和 ssh-agent 的行为和在终端里完全一致，因为底下并没�
 - `PATH` 上有 **Git 2.23 或更新版本**。（guit 启动时会探测是否支持 `git restore`；
   构建与验证使用的是 Git 2.53。）
 - **Linux**，带 WebKitGTK 4.1 / GTK 3（包依赖会自动带入）。
-- Windows 和 macOS 的包已配置、也能构建，但这个程序**从未在这两个平台上运行过**
-  ——见 [docs/known-limitations.md](docs/known-limitations.md)。
+- Windows 和 macOS 的包已配置、也能构建，但这个程序**从未在这两个平台上运行过**，
+  因此在它们上的任何功能都按未验证对待。
 
 ## 安装（Linux）
 
@@ -93,7 +93,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./guit_0.0.1_amd64.AppImage
 一个卡住的提示。
 
 你的 `credential.helper` 配置、你的远端和你的 ssh-agent 都被原样保留——
-guit 也不读它们。见 [docs/credentials.md](docs/credentials.md)。
+guit 也不读它们。
 
 ## 出问题时
 
@@ -119,13 +119,6 @@ Git 可执行文件位置、文件监听模式、配置文件名及其字节数�
 
 ## 文档
 
-以下文档目前**仅有英文版**：
-
-- [docs/external-tools.md](docs/external-tools.md) — 如何配置 diff、merge 和
-  文件打开工具，以及它们的退出码对 guit 意味着什么。
-- [docs/credentials.md](docs/credentials.md) — guit 到底如何处理认证。
-- [docs/known-limitations.md](docs/known-limitations.md) — 哪些已验证、哪些没有，
-  以及平台矩阵。在假定某个功能在你的平台上可用之前，请先读它。
 - [CHANGELOG.md](CHANGELOG.md) — 每个版本改了什么。
 
 ## 许可证

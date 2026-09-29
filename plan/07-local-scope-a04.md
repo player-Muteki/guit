@@ -65,7 +65,7 @@
 2. **`submodule.recurse=true` 用户配置**:`switch/merge/reset` 可能被 Git 隐式加跑 submodule update 而触网。仅本地约束需要在剥离 `GIT_*` 后显式设 `submodule.recurse=false`(或等价 `-c`)并在受支持 Git 版本上验证——列入 B04/C 实施检查项。
 3. **partial clone / promisor**:本地读取缺对象时 Git 可能隐式 lazy fetch;退出实现需带阻止开关并实测(AGENTS.md 同款要求)。
 4. **`run_transfer_probe`**:`clone --no-local` 仅对本地临时源,不联外网,但走传输协议;B04 决定保留为本地传输探针或随远程面退出。
-5. **askpass 残留面**:`credential_status` 诊断读取、docs/credentials.md 整篇,随远程退出后是否保留为纯诊断说明在 H04 文档任务决定。
+5. **askpass 残留面**:`credential_status` 诊断读取,随远程退出后是否保留为纯诊断说明在 H04 文档任务决定。`docs/credentials.md` 那一篇已随 `docs/` 撤下,不再有等待它的文档动作。
 6. **`delete_remote_branch`/`force_push` 固定 `interactive:false`**(读码事实):其票据流程从未建立认证桥;退出时无需为它们保留 askpass 兼容路径。
 
 ## 7. 结论与回退

@@ -69,7 +69,7 @@ README 将产品定位为覆盖分支、标签、stash、合并/变基、远端�
 
 窗口设置在后端配置文件，字号/主题在 localStorage；扩充三类字体、CSS 与计时前需要明确迁移和失效恢复。当前配置默认 720×560、最小 340×400；不能凭 README 的“紧凑”认定已满足上下同屏设计。
 
-`docs/known-limitations.md` 只有 Linux 运行证据，Windows/macOS 是配置状态。基线指导文件称没有远端，但调研时 `git remote -v` 已显示 origin；该旧说明已修正，该事实不证明 CI 已运行。
+调研时读取的 `docs/known-limitations.md`（该文件已随 `docs/` 撤下）只有 Linux 运行证据，Windows/macOS 是配置状态；这一口径现在由各阶段自己的记录与指导文件的验证状态一节维持。基线指导文件称没有远端，但调研时 `git remote -v` 已显示 origin；该旧说明已修正，该事实不证明 CI 已运行。
 
 ## 5. 现有资产的处置
 

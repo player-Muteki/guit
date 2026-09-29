@@ -34,8 +34,7 @@ working tree.
   startup; it was built and verified against Git 2.53.)
 - **Linux** with WebKitGTK 4.1 / GTK 3, which the package dependencies pull in.
 - Windows and macOS packages are configured and buildable, but the app has
-  **never been run on either platform** — see
-  [docs/known-limitations.md](docs/known-limitations.md).
+  **never been run on either platform**, so anything there counts as untested.
 
 ## Install (Linux)
 
@@ -108,8 +107,7 @@ for every `git` guit runs, so a repository with an unreachable remote is a
 readable repository rather than a stuck prompt.
 
 Your `credential.helper` configuration, your remotes and your ssh-agent are
-left exactly as you set them — guit does not read them either. See
-[docs/credentials.md](docs/credentials.md).
+left exactly as you set them — guit does not read them either.
 
 ## When something goes wrong
 
@@ -140,13 +138,6 @@ does.
 
 ## Documentation
 
-- [docs/external-tools.md](docs/external-tools.md) — configuring diff, merge
-  and file-opening tools, and what their exit codes mean to guit.
-- [docs/credentials.md](docs/credentials.md) — exactly how guit handles
-  authentication.
-- [docs/known-limitations.md](docs/known-limitations.md) — what is verified,
-  what is not, and the platform matrix. Read this before assuming a feature
-  works on your platform.
 - [CHANGELOG.md](CHANGELOG.md) — what changed in each release.
 
 ## License

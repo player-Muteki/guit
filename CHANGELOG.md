@@ -2,8 +2,9 @@
 
 All notable changes to guit are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-SemVer. This file is the record of what changed; `docs/known-limitations.md`
-is the record of what is not verified.
+SemVer. This file is the record of what changed; what has never been verified
+is stated in the entry that introduces it, and no entry claims coverage the
+release it belongs to did not measure.
 
 ## [Unreleased]
 
@@ -302,7 +303,7 @@ is the record of what is not verified.
 ## [0.0.1] - 2026-09-27
 
 First public release. Runtime verification is limited to Linux; Windows and
-macOS have build configuration only (see `docs/known-limitations.md`).
+macOS have build configuration only.
 
 ### Changed
 
