@@ -210,6 +210,26 @@ is the record of what is not verified.
 
 ### Fixed
 
+- The app bar no longer squeezes its own icon buttons below their declared box.
+  Everything else on that row carries text that is allowed to lose a tail — the
+  wordmark, the repository path and the branch chip are each capped by a
+  percentage and ellipsised — so when the bar ran out of width it took the
+  squeeze out of the icons instead, and at the default 720x560 window a button
+  declared 1.75rem square was drawn 20x29: an action whose whole box was its
+  glyph plus two pixels, next to a chip cut to 38. The icons cannot shrink now,
+  and the chip keeps a readable name at every width rather than only the narrow
+  ones, so what gives way is the path, which still holds all of itself in its
+  tooltip. The same measurement is what says the rest of the small controls are
+  as designed rather than broken: a row action, a row menu button or a checkbox
+  sits 20 to 23 pixels in its shortest dimension, and interface zoom moves them
+  with the text — at the smallest zoom a row action is 15 tall. guit is driven
+  with a pointer and promises no touchscreen, so those figures are written down
+  instead of changed underfoot; the defect was the one case where a control was
+  drawn smaller than its own stylesheet says it is. Verified from a separate
+  worktree at the committed state: the layout probe passes at 340x400, 400x760,
+  360x900 and 1400x420, the narrow-window suite still reaches every primary
+  action and still closes the application on its own, and the controls it
+  measures are the ones that were being squeezed.
 - The commit list's head no longer pushes its own paging button off the smallest
   window. Its count, its "Mainline only" filter and its "Load older" button do not
   share a line at 340px — the button's right edge sat 21px past the viewport — and a

@@ -66,6 +66,22 @@ body {
 .appbar-commit { padding: 0.2rem 0.7rem; }
 .spacer { flex: 1 1 auto; }
 
+/* Every other item on this row carries text that is allowed to lose a tail: the
+   wordmark, the repository path and the branch chip are each capped by a
+   percentage and ellipsised. An icon button has no text to give way, so a bar
+   that runs out of width takes the squeeze out of it instead — measured at the
+   default 720x560 window, a button declared 1.75rem square was drawn 20x29, an
+   action whose whole box is its glyph plus two pixels. `flex: 0 0 auto` is said
+   for the same reason the window cluster says it: a control that loses its box
+   has lost the thing the pointer aims at, while a path that loses its tail keeps
+   the whole path in its tooltip. */
+.appbar .icon-btn { flex: 0 0 auto; }
+/* The branch chip is the other name on this row, and the narrow rules already
+   refuse to let it fall below a readable name. The same floor is what the bar
+   needs once the icons stop shrinking: at 720 the chip was being cut to 38px,
+   which shows a directory prefix and not the branch. */
+.appbar-branch { min-width: 7ch; }
+
 .icon-btn {
   display: inline-flex;
   align-items: center;
