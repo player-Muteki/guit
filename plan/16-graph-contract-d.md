@@ -115,7 +115,8 @@ pin 带来的残差要写清楚，因为它属于 D02 而不是 D01：`%D` 的�
 
 ## 2. 待决：D02–D05 动手前各需要先拿到哪一条事实
 
-- **D02**：`refs_input`（`session.rs`）= `(graph_input, upstream, ahead, behind,
+- **D02**（已实测，见 §5.1；下面保留的是动手前的读代码结论）：
+  `refs_input`（`session.rs`）= `(graph_input, upstream, ahead, behind,
   operation.kind)`，**不含 tag 集合、不含分支集合**。按 `publish` 的算法，
   在一个已有提交上新打 tag 既不动 `head_moved` 也不动 `names_moved`，
   于是 `refsGeneration` 与 `historyGeneration` 都不 bump——绑定 Refs 域的读取不会被
@@ -199,11 +200,12 @@ held lock 下的图读取），以及既有分页/合并顺序测试不变。
 
 bare 夹具的做法与 §3 预期不同，值得记一条 Git 事实：**Git 拒绝在 bare 仓库里
 `commit`**（本机 Git 2.53，`git --git-dir=….git commit --allow-empty` ⇒ rc=128
-"this operation must be run in a work tree"）。可选的替代是 `git clone --bare`
-一个本地路径，但那会把 clone 这个动作写进产品源码树，与 AGENTS.md 的仅本地范围
-相冲（测试夹具不是产品入口，但也不必为此引入一个更容易被误读的形状）。落地的做法
-是普通仓库提交完之后 `git config core.bare true`：同一份对象库、没有工作树，
-`rev-parse` 与 `log` 都照常答（实测 `--is-bare-repository` 为 true、历史两行）。
+"this operation must be run in a work tree"）。落地的做法是普通仓库提交完之后
+`git config core.bare true`：同一份对象库、没有工作树，`rev-parse` 与 `log` 都照常答
+（实测 `--is-bare-repository` 为 true、历史两行）。可选的替代是 `git clone --bare`
+一个本地路径——测试夹具里跑本地 clone 并不是新事物（`session.rs` 的
+`a_clone_shares_a_head_but_never_a_session` 就是这么建的），但它为了"这里能不能读
+bare 历史"这一个问题多带一份对象库，形状也更容易被读成产品能力，所以没有采用。
 
 门槛（本机 Linux x86_64、Git 2.53、Node 26）：`cargo test` **305/305**
 （`84eb0db` 为 300，+5）；`cargo fmt --check` clean；
@@ -241,3 +243,89 @@ perf::mark("history.parse", parse_start.elapsed());
 同一段时间（拓扑读 + 布局 + 解析）。这不是 D01 引入的（`84eb0db` 的树即如此），
 但 D03 要用 `GUIT_PERF=1` 的相位耗时来决定检查点尺寸与缓存边界，**在那之前先把这两个
 起点分开**，否则量到的是"整个后处理"，无法回答"前缀重读值不值得换成检查点"。
+
+## 5. D02 落地记录：`315e988` + `61d9d4f` + `532be32`
+
+三次提交是一条闸门的三段：先把 ref 观测放进会话（`315e988`），再把名字从页面里搬出来
+（`61d9d4f`），最后把夹具里那条会被误读的命令换掉（`532be32`）。
+
+### 5.1 §2 留给 D02 的那条预测，现在是实测
+
+§2 写的结论来自读代码：`refs_input` 不含 tag 集合也不含分支集合，所以在已有提交上打
+tag 既不动 `head_moved` 也不动 `names_moved`，两个代次都不 bump。D02 的落地否掉了它的
+后半句——`publish` 现在把 ref 观测本身比一遍：
+
+```rust
+let names_moved = head_moved
+    || refs_input(&active.view) != refs_input(&view)
+    || active.refs != snapshot.refs;
+```
+
+`session.rs::a_name_that_no_head_move_explains_still_moves_the_refs_generation` 是本机
+Git 2.53 上的实测：`tag v1`、`tag -a v2`、`update-ref refs/heads/dev HEAD`（一个没人站在
+上面的分支）、`update-ref refs/remotes/origin/main HEAD`（远端跟踪引用按本地元数据读）、
+`tag -d v1` 五步，每步 `refs_generation +1` 且 `history_generation` 不动；第六步什么都没
+动，于是 version 仍然严格上升而两个代次都不动。§4.4 的第一条残差（"标签侧仍活着"）由
+此闭合。
+
+### 5.2 代码事实
+
+| 位置 | 现在的形状 |
+| --- | --- |
+| `refs.rs` | `FIELD_COUNT = 9`，`REF_FORMAT` 增 `%(*objecttype)`；`TagRef { oid, targetType, commitOid }`；peel 只允许 tag object 携带，一条自称非 tag 却带着 peel 的记录整份拒绝；分支与远端跟踪引用非 `commit` 即拒绝 listing（Git 2.53 实测 `update-ref refs/heads/x <blob>` 本来就失败） |
+| `refs.rs::list` | 一次 `for-each-ref`，`run_with_limit` + `REF_OUTPUT_LIMIT = 8 MiB`；truncated ⇒ `refs_truncated`；退出 0 但 stderr 非空 ⇒ `refs_unavailable`——被 Git 悄悄跳过的名字比没有名字更坏 |
+| `tags.rs` | `TagDetail { targetType, commitOid, message }`，同一条 peel 规则；命名 tree/blob 的标签报告它命名了什么，不再假装是个提交 |
+| `history.rs` | `LOG_FORMAT` 去掉 `%D`，`CommitView` 没有任何名字字段；`RefLabels`/`remote_names()`/`parse_labels()` 删除——**每页第三个 Git 进程（`git remote`）与 `origin/x` 消歧逻辑一起走** |
+| `refsStore.ts` | 按 `(sessionId, generation)` 建槽、`KEEP = 2` 的有界缓存，in-flight 合并，**失败不入缓存**（所以重试与另一个视图的成功都还有效） |
+| `views/history.ts` | 订阅 Refs 域；一次拒绝画成一次拒绝：计数行补一句"names could not be read"、`Names again` 重试、详情面板同一句话，且**不发 toast**（picker 开着时同一件事会被报两遍） |
+
+名字不再进快照，是这一节里唯一偏离设计字面形状的决定。实测的重量：`for-each-ref` 的
+记录在本机 4001 条本地 ref 上是 297,856 字节，**74.4 字节/条**（还不算 serde JSON 的字段
+名，那一层更大）。快照每次 refresh 整份重发，把 listing 放进去等于每两秒把几千个名字
+重新编码一遍；设计 §5.2 要的是"标签按目标 OID 更新，不必重算不变拓扑"，而不是"名字与
+状态同生共死"。落地的形状是 Refs 域上的一次独立读 + 前端按代次有界缓存，于是同一次读
+同时喂两个视图。
+
+### 5.3 退出闸门的证据
+
+闸门两条都在本机测到（Linux x86_64、Git 2.53、无头 Edge 154）：
+
+1. **新 Tag/移动分支无需 HEAD 改变就更新。** 后端是 §5.1 那条测试；前端是
+   `read-budget.mjs` 的 `a moved branch without a head move re-reads the names and no
+   history`（`list_refs` 1、`history_page` 0）与 `the moved name repaints onto its new
+   commit and the tag stays where it was`——移动的是 `topic`（row 0 → row 2），`master`
+   留在 row 0、`v1` 留在 row 1。共享缓存的可测形式是同文件里的
+   `opening the picker over a listing already read asks for nothing`（0 次）与
+   `two views on one refs generation share one listing read`（1 次）。
+2. **本地远端跟踪引用不需联网。** listing 只读 `refs/heads|tags|remotes` 三个本地命名
+   空间；`532be32` 把 ahead/behind/gone 三条形状的夹具从 `git fetch` 换成手写
+   `update-ref`（"远端"那个提交在本仓库里造出来，再挂到跟踪引用上，分支从它旁边另起），
+   于是被引用的对象一直在本地对象库里。probe 的 `NEVER_READ` 列在这轮全为 0。
+
+门槛（同一棵树）：`cargo test` **311 passed / 0 failed**（D01 记录为 305）；
+`cargo fmt --check` 与 `cargo clippy --locked --all-targets` clean；`tsc --noEmit` 0 错；
+`npm run build` 44 modules、`dist` 114.52 kB JS / 30.78 kB CSS；
+`read-budget.mjs` **36 条 check、fails=0**；`color-contrast.py` 与 `responsive-check.py`
+fails=0。`npm run test:fixture` 在这一轮开头是 **335 pass / 1 fail**，失败的不是 D02 的
+文本而是 `tests/user-facing-copy.mjs` 自己：它对仓库根的 `docs/` 做 `readdirSync`，而那
+个目录已被 `e2aab6f`（阶段 G 的文档清理）删净，于是门禁在 ENOENT 上倒下。这里把它改成
+"目录在就扫、不在就没有文本可扫"——规则管的是文本，不是某一个路径永远活着——之后
+**336 pass / 0 fail**。留下两条不属于 D02 的事实：`AGENTS.md` 与 `plan/README.md`、
+`plan/01`、`plan/03`、`plan/05`、`plan/09` 仍把 `docs/known-limitations.md` 当作"没被验证
+的东西记在哪"的登记处，那个文件现在不存在了；D02 的未验证残差因此只写在 §5.4 与本节里。
+
+### 5.4 残差
+
+- **一次提交必然多一个 Git 进程。** `head_moved` 也 bump `refs_generation`，所以一次提交
+  是两次读（`a head move that advances both counters costs one read each`）。这不是 bug，
+  但它意味着 A02 那张 idle/提交耗时表在**形状**上过期了：一次刷新现在多跑一条
+  `for-each-ref`。那组数字本轮没有重跑。
+- **Refs 读的迟到没有被驱动过。** `read-budget.mjs` 的 `__HOLD__` 只 park `history_page`；
+  一个跨过会话关闭才回来的 listing 靠 `bind_read` 与视图里两次 context 比对被丢掉，代码在
+  跑，探针没测。
+- **8 MiB 是一条会整体失败的上界。** 超过约十一万条 ref 的仓库，整份 listing 拒绝
+  （`refs_truncated`），表现是所有行没有标签 + 那一句话 + 重试；没有在真实大 ref 库上量过。
+- **标签比行晚一个往返。** 以前 `%D` 与正文同批到达，现在名字要等第二次读；这是新出现的
+  可见时序，不是回归，但它在慢盘上会被看见。
+- **`model.rs:386` 的夹具仍用 `git fetch`。** 与 `532be32` 消掉的形状相同；它不是 D02 的
+  文件，本轮没动。

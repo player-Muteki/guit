@@ -185,6 +185,14 @@ is the record of what is not verified.
   sits on top of the page's own word — not at one change, not at the `99+` the
   count caps at. Once the window is narrow enough that the words are gone, the
   gutter goes with them and the count sits on the corner of the glyph again.
+- The names beside a commit come from the ref listing rather than from the
+  history itself. A branch that moved, or a tag created beside the current
+  branch, relabels the row it now names without re-reading the history, and the
+  graph and the branch picker answer for one listing rather than one each. A tag
+  that names a tree or a blob is shown naming that, instead of being drawn as a
+  commit. When Git refuses the listing, the list says the names could not be read
+  and offers the read again — an unlabelled column is not presented as a
+  repository with no branches.
 
 ### Removed
 

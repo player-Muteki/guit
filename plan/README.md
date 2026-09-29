@@ -69,8 +69,9 @@ flowchart LR
 | 阶段 C：有界监听、mtime 索引与增量更新 | 已实施（见 [阶段 C 契约依据](09-activity-contract.md) §1–§3；连续写入的真人旅程与 idle 口径的分辨率限制同文记录） |
 | 阶段 C：计时显示与设置接入 | 已实施（同上 §4.11–§4.12；`docs/known-limitations.md` 的“The last-modification line”一节列出未验证部分，间隔那一行只在无头 Edge 驱动构建产物上点过） |
 | 阶段 D：图表与引用契约依据 | 已编写（见 [阶段 D 契约依据](16-graph-contract-d.md)） |
-| 阶段 D：D01 历史读取的身份与双读一致 | 已实施（同文 §4，提交 `861a1ca`；`%D` 标签侧仍随 refs 浮动，UI 呈现未在真实 WebView 驱动过） |
-| 阶段 D：D02–D05 | 待实施 |
+| 阶段 D：D01 历史读取的身份与双读一致 | 已实施（同文 §4，提交 `861a1ca`；页内的 `%D` 标签随 D02 撤走，标签移动已在无头 Edge 驱动构建产物上测到，但 `history_head_unresolved` 那条拒绝在真实 WebView 里仍没被看见过） |
+| 阶段 D：D02 结构化引用与独立刷新 | 已实施（同文 §5，提交 `315e988`/`61d9d4f`/`532be32`；名字不再进页面读取，一次 listing 读按代次同时喂两个视图。Refs 读的迟到、超过约十一万条 ref 的仓库都没有被测过） |
+| 阶段 D：D03–D05 | 待实施 |
 | 阶段 G：W01 版本化外观记录 | 已实施（`app/src/preferencesModel.ts` 与 `appearanceStore.ts`，读不懂的记录拒绝改写；规则由 `app/tests/preferences-model.mjs`、`app/tests/preferences-store.mjs` 钉住。真实窗口里第二次启动把同一份记录读回来没有跑过，跨比例因子与第二块显示器的钳位仍是手动门（`tools/bench/recovery-checks.sh` 尾部，另见 `docs/known-limitations.md` 的“Manual gates still open”） |
 | 阶段 G：W02 三类字体与回退 | 已实施（三个名字一行一条，样本行用面板自己的两个字体属性绘制；等宽是否真对齐问过引擎，见 `tools/bench/font-engine-probe.ts` 与 `app/tests/font-stack.mjs`。该问题只朝 WebKitGTK 问过，其他引擎从未运行） |
 | 阶段 G：W03 自定义 CSS 主题 | 已实施（子集逐条审阅、预览、应用、`Ctrl/Cmd+Shift+T` 与页面按钮同一条出路、崩溃后用留下的标记恢复；未验证部分见 `docs/known-limitations.md` 的“The custom theme”一节 — 事后那一眼只看控件有没有盒子，子集也只对该引擎固定） |
