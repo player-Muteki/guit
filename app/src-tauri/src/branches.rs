@@ -468,6 +468,32 @@ mod tests {
         );
     }
 
+    /// One page of history, asked the way the command layer asks it: with the
+    /// context the live session published rather than an invented one, and with
+    /// a graph cache. A test here reads a page and no more, so the cache is the
+    /// fresh one a first page gets — the route that reads the whole prefix, and
+    /// the only route a single page can take.
+    fn read_page(
+        dir: &Path,
+        sessions: &session::SessionState,
+    ) -> Result<history::HistoryPage, ProbeError> {
+        let view = sessions
+            .current_view()
+            .expect("these tests open a session before reading history");
+        history::page(
+            dir,
+            session::ReadContext {
+                session_id: view.session_id,
+                generation: Some(view.history_generation),
+            },
+            0,
+            None,
+            history::PAGE_SIZE,
+            false,
+            &history::GraphCache::default(),
+        )
+    }
+
     fn head(dir: &Path) -> String {
         let output = std::process::Command::new("git")
             .arg("-c")
@@ -767,7 +793,7 @@ mod tests {
         assert_eq!(preview.candidates, vec!["main".to_owned()]);
 
         // History follows the detached HEAD, not any branch.
-        let page = history::page(dir, 0, None, history::PAGE_SIZE, false).unwrap();
+        let page = read_page(dir, &sessions).unwrap();
         assert_eq!(page.commits.len(), 2);
         assert_eq!(page.commits[0].oid, head(dir));
 
@@ -820,7 +846,7 @@ mod tests {
         // this on head_state; deeper in, a page has to name the commit it is
         // about before asking Git anything, and an unborn HEAD names none — so
         // the refusal is the pin failing, never a history that looks empty.
-        let error = history::page(dir, 0, None, history::PAGE_SIZE, false).unwrap_err();
+        let error = read_page(dir, &sessions).unwrap_err();
         assert_eq!(error.code.as_str(), "history_head_unresolved");
 
         // A commit made in an external terminal must flip the snapshot and
@@ -833,7 +859,7 @@ mod tests {
             .expect("session still open");
         assert!(after.version > version);
         assert_eq!(after.branch.clone().unwrap().head_state, HeadState::Branch);
-        let page = history::page(dir, 0, None, history::PAGE_SIZE, false).unwrap();
+        let page = read_page(dir, &sessions).unwrap();
         assert_eq!(page.commits.len(), 1);
         let listing = refs::list(dir).unwrap();
         assert!(listing.branches.iter().any(|b| b.name == "main" && b.head));
@@ -882,7 +908,7 @@ mod tests {
         assert_ne!(gone.oid, main.oid);
         assert!(gone.head && !main.head);
         assert!(!listing.branches.iter().any(|b| b.name == "feature"));
-        let page = history::page(dir, 0, None, history::PAGE_SIZE, false).unwrap();
+        let page = read_page(dir, &sessions).unwrap();
         assert_eq!(page.commits.len(), 1);
         assert_eq!(page.commits[0].oid, gone.oid);
     }

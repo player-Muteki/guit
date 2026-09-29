@@ -128,6 +128,10 @@ fn close_repository(
     // Pending discard/clean tickets belong to the closed snapshot; drop them
     // so a reopen cannot reuse a nonce that referred to the previous session.
     app.state::<write::WriteState>().clear_previews();
+    // Same for the graph's remembered page boundary: it is a claim about the
+    // history the closed session read, and no later session can match it, but
+    // it holds object ids until the process ends.
+    app.state::<history::GraphCache>().clear();
     // Close first: any in-flight watcher refresh then sees no session and the
     // supervisor exits on its own without emitting a stale snapshot.
     watch::stop(&app);
@@ -571,17 +575,20 @@ async fn history_page(
                 },
             ));
         }
-        // A page is two Git reads, so it is one history only if both name the
-        // same commit. When the caller named none, the commit is the one this
+        // A page is drawn from its own rows plus the lanes the page above left
+        // open. When the caller named no commit, the commit is the one this
         // session was published with — the same value `historyGeneration` counts
-        // moving — rather than a `HEAD` resolved afresh in each of the two reads.
+        // moving — rather than a `HEAD` resolved afresh in each read.
         let target = oid.or_else(|| sessions.pinned_head());
+        let cache = app.state::<history::GraphCache>();
         history::page(
             directory,
+            answered,
             start,
             target.as_deref(),
             history::PAGE_SIZE,
             first_parent.unwrap_or(false),
+            &cache,
         )
         .map(|page| session::SessionRead::new(answered, page))
     })
@@ -1225,6 +1232,7 @@ fn main() {
         .manage(watch::WatchState::default())
         .manage(write::WriteState::default())
         .manage(extools::ToolState::default())
+        .manage(history::GraphCache::default())
         .setup(|app| {
             // Reclaim what a kill -9 left behind — abandoned atomic-write
             // siblings of the config files. The count is reported but

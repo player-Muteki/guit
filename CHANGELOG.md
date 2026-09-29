@@ -161,6 +161,21 @@ is the record of what is not verified.
 - Hovering a graph node now also lists the loaded ref tips that contain the
   commit, which the row itself cannot say, instead of repeating the row's
   author and subject.
+- Paging a long history reads Git once per page instead of twice. The lanes that
+  run off the bottom of a page used to be settled by reading the whole history
+  above that page again, in a second process, on every click; the panel now
+  carries the open lanes from the page it just drew and takes the parents out of
+  the records that page was read for. A boundary is continued only when it
+  belongs to this session, this history generation, this pinned commit and this
+  view, and only when the row at the top of the next page is one those lanes are
+  waiting for — anything else re-reads the prefix, which answers the same
+  question more slowly. On a 6,337-commit repository in a release build, of 127
+  pages exactly one pays that second read (16.3 ms) and 126 measure 0.1 ms,
+  against 20.3 ms per page measured the same way before, and the launch log
+  counts one Git process per page. What it costs to remember is bounded by the
+  lane cap rather than by the depth or width of a repository, and a history too
+  wide for the gutter hands that fact down as it hands the lanes down, so every
+  page below a fold folds the same way.
 - Redrew the app icon as Git branches interlacing like guitar strings, with
   commit nodes on the strings and a shared merge node. Regenerated the desktop
   icon assets from the SVG source, with rounded diamond commit nodes, a
