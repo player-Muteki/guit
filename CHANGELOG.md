@@ -210,6 +210,15 @@ is the record of what is not verified.
 
 ### Fixed
 
+- The commit list's head no longer pushes its own paging button off the smallest
+  window. Its count, its "Mainline only" filter and its "Load older" button do not
+  share a line at 340px — the button's right edge sat 21px past the viewport — and a
+  row that is not allowed to break does not lose a word, it loses the box. The head
+  may break where it must now, which costs the list one row of height in exactly the
+  widths that need it and moves nothing at a width where the three already fit. That
+  this was still here is the harness's story rather than the stylesheet's: the layout
+  probe had only ever been run at the default window, so the minimum size was not a
+  shape anyone had looked at until it was measured as one.
 - A part of the working tree Git could not open is no longer reported as a part
   that changed nothing. `git status` exits `0` when a directory is unreadable,
   leaves it out of its listing and puts the complaint on stderr, which nothing
