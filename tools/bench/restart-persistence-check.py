@@ -22,7 +22,19 @@ they were covered.
 The two sessions are compared to each other and never to a number. Extents are
 logical pixels and the sizes the app asks for are not the same unit, so the
 width a window comes up with is only ever checked against the width the previous
-window had when it closed.
+window had when it closed. The node read is the window's frame, because the web
+document's own box is its scrollable content rather than the window it is drawn
+in — measured on one 720-wide window, the frame and the webview's scroll pane
+both read 720 while the document read 736.
+
+The launch then runs twice more from a geometry file this build cannot read — one
+of garbage bytes, one of a record whose schema version is newer than the code.
+Both have a unit test that refuses them inside a temporary directory; what only a
+window can answer is that the refusal is survivable: the panel still comes up, at
+the size the build ships rather than a size read out of unreadable bytes, with the
+appearance record the person actually chose still in force. The newer-version run
+also checks its own bytes afterwards, because the seal has to hold against the
+save the window makes 400ms after start and not merely against a read.
 
 Usage: restart-persistence-check.py <release-binary> <fixture-repo> <work-dir> [--keep]
 Prints one line per assertion; exits non-zero when any assertion fails.
@@ -46,6 +58,15 @@ import atspi_landmark as A  # noqa: E402
 # 16px was never on screen to begin with.
 ZOOM_DEFAULT_PX = 16
 ZOOM_DEFAULT = f"{ZOOM_DEFAULT_PX}px"
+
+# Two geometry files the shipped build must refuse, and refuse in a way the panel
+# survives. The second is deliberately a size no window has in this run: read as
+# geometry it would show up in the measured width, which is how a refusal that
+# silently fell back to parsing is caught.
+BAD_GEOMETRY = "guit wrote this and then the disk went wrong\n"
+FUTURE_GEOMETRY = json.dumps(
+    {"schemaVersion": 2, "width": 500, "height": 500, "x": 0, "y": 0, "alwaysOnTop": False}
+) + "\n"
 
 
 class Report:
@@ -140,11 +161,21 @@ def await_record(work, wanted, deadline_s=6.0):
         time.sleep(0.5)
 
 
-def document_width():
-    """The webview document's own screen width, polled through a relayout."""
+def window_width():
+    """The window's own screen width, polled through a relayout.
+
+    The frame and not the document: `ATSPI_ROLE_DOCUMENT_WEB` reports the
+    *scrollable content* box, which is a fact about the page rather than the
+    window. Measured on one 720-wide window, the frame read 720, the webview's
+    scroll pane 720 and the document 736 — a size claim taken from that last
+    number is a claim about whatever the page happens to need, and it moved by
+    16 px on its own when the interface size went up.
+    """
     for _ in range(20):
         for node in A.tree(A.app_root()):
-            if (A._once(lambda: node.get_role().value_name, default="") or "") != "ATSPI_ROLE_DOCUMENT_WEB":
+            if (A._once(lambda: node.get_role().value_name, default="") or "") != "ATSPI_ROLE_FRAME":
+                continue
+            if (A._once(lambda: node.get_name(), default="") or "") != "guit":
                 continue
             extent = A._once(lambda: node.get_component().get_extents(A.Atspi.CoordType.SCREEN), default=None)
             if extent is not None and extent.width > 0:
@@ -179,6 +210,65 @@ def pick_theme(label, report):
     report.check(f"option \u201c{label}\u201d can be picked", item is not None and A.click(item))
 
 
+def geometry_path(work):
+    return os.path.join(work, ".config/dev.guit.desktop/window.json")
+
+
+def seed_geometry(work, text):
+    """Put bytes where the next launch will look for its geometry.
+
+    The harness seeds this file the way it seeds `session.json`: it is a config
+    file the panel owns and rewrites, so writing one is not forging a format the
+    app keeps internally.
+    """
+    with open(geometry_path(work), "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def read_geometry(work):
+    try:
+        with open(geometry_path(work), encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def bad_geometry_run(binary, work, report, label, seed, wanted_size, default_width):
+    """One launch that starts from a geometry file this build cannot use.
+
+    Returns whatever the file holds once the window is gone, so the caller can
+    say whether the refusal also held against the save the window makes on its
+    own schedule.
+    """
+    seed_geometry(work, seed)
+    process, handle = launch(binary, work, f"{label}.log")
+    try:
+        reached = A.wait_for(r"Commit message", 30) is not None
+        report.check(f"a refused {label} geometry file still leaves a panel on screen", reached)
+        if reached:
+            # Measured before anything else is clicked: this is the width the build
+            # ships with, and a file that got parsed anyway would show its own here.
+            width = window_width()
+            report.check(f"the {label} window comes up at the shipped size, not the refused one",
+                         width == default_width, f"measured={width!r} shipped={default_width!r}")
+            settings_page()
+            text = A.dump()
+            report.check(f"the {label} session is a working panel, not a half-drawn shell",
+                         A.find_button(name="Settings") is not None
+                         and A.find_button(name="Close guit") is not None)
+            report.check(f"the {label} session draws the size the record holds",
+                         wanted_size is not None and f"{wanted_size}px" in text and ZOOM_DEFAULT not in text,
+                         f"wanted={wanted_size!r} default={ZOOM_DEFAULT} present={ZOOM_DEFAULT in text}")
+            record, keys = read_record(work)
+            report.check(f"a refused {label} geometry file does not cost the appearance record",
+                         (record or {}).get("theme") == "dark"
+                         and (record or {}).get("fontPx") == wanted_size,
+                         f"record={record!r} keys={keys}")
+    finally:
+        terminate(process, handle)
+    return read_geometry(work)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary")
@@ -193,10 +283,20 @@ def main():
 
     process, handle = launch(args.binary, work, "session-1.log")
     closed_width = None
+    default_width = None
     wanted_size = None
     try:
         A.Atspi.init()
         report.check("the first session reaches the panel", A.wait_for(r"Commit message", 30) is not None)
+        # The shipped size, taken before this run touches any window control, so it is
+        # the size the build ships with rather than one this run asked for. The
+        # refused-geometry launches below are compared to this rather than to a literal,
+        # because a document extent and the sizes the app asks for are not the same unit
+        # on every desktop.
+        time.sleep(1.0)
+        default_width = window_width()
+        report.check("the first session comes up at a measurable size", default_width is not None,
+                     f"shipped={default_width!r}")
         settings_page()
         zoom = A.find_button(name="Zoom in")
         report.check("the zoom buttons are reachable", zoom is not None)
@@ -212,7 +312,7 @@ def main():
             if compact is not None:
                 A.click(compact)
                 time.sleep(1.5)
-                closed_width = document_width()
+                closed_width = window_width()
 
         # Written down before anything closes: if the second session comes up at the
         # default, this line says whether the value ever reached storage at all.
@@ -252,7 +352,7 @@ def main():
     process, handle = launch(args.binary, work, "session-2.log")
     try:
         report.check("the second session reaches the panel", A.wait_for(r"Commit message", 30) is not None)
-        reopened_width = document_width()
+        reopened_width = window_width()
         report.check("the second window comes back the size the close wrote down",
                      closed_width is not None and reopened_width == closed_width,
                      f"closed={closed_width!r} reopened={reopened_width!r}")
@@ -277,8 +377,24 @@ def main():
                      "guit.theme" not in keys and "guit.fontPx" not in keys, f"keys={keys}")
     finally:
         terminate(process, handle)
-        if not args.keep:
-            subprocess.run(["rm", "-rf", work], check=False)
+
+    # --- the same HOME, started from a geometry file it cannot read ---
+    unreadable = bad_geometry_run(args.binary, work, report, "unreadable", BAD_GEOMETRY,
+                                  wanted_size, default_width)
+    report.check("a geometry file the build cannot read is not kept as a promise",
+                 unreadable is not None and unreadable != BAD_GEOMETRY,
+                 f"holds={None if unreadable is None else unreadable.strip()!r}")
+
+    future = bad_geometry_run(args.binary, work, report, "newer-version", FUTURE_GEOMETRY,
+                              wanted_size, default_width)
+    # The refusal has to outlive the window's own save, or a newer file is read-only
+    # for as long as nobody resizes.
+    report.check("a geometry file written by a newer version survives the session",
+                 future == FUTURE_GEOMETRY,
+                 f"holds={None if future is None else future.strip()!r}")
+
+    if not args.keep:
+        subprocess.run(["rm", "-rf", work], check=False)
 
     print(f"\nfails={len(report.fails)}: {report.fails}")
     return 1 if report.fails else 0
