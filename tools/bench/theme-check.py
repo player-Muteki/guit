@@ -10,10 +10,18 @@ selected option):
 - runtime: each option can be picked over AT-SPI, and the value that lands in
   the webview's localStorage is the one that was picked.
 
+The runtime half reads the one versioned record the panel keeps (`guit.preferences`),
+not a key per choice: the scheme, the size and the rest of the appearance all live in
+that JSON now, and a write replaces the record whole. So the pick is checked against
+the field, and the size that a button set *before* the picks is read back after every
+one of them — a whole-record write that lost it would be the failure this page is
+designed to avoid, and it would look like a theme switch that works.
+
 Usage: theme-check.py <release-binary> <fixture-repo> <work-dir> [built-css]
 """
 
 import glob
+import json
 import os
 import re
 import shutil
@@ -88,8 +96,8 @@ def runtime_check(report, binary, repo, work):
     log = open(os.path.join(home, "app.log"), "w", encoding="utf-8")
     proc = subprocess.Popen([binary], env=env, stdout=log, stderr=log, start_new_session=True)
 
-    def stored_theme():
-        """The theme override currently in the webview's localStorage.
+    def stored_record():
+        """The appearance record currently in the webview's localStorage.
 
         The database is a SQLite file whose write-ahead log holds the newest
         values, so the three files are copied into a scratch directory and only
@@ -115,34 +123,54 @@ def runtime_check(report, binary, repo, work):
             return None, {}
         finally:
             connection.close()
-        return rows.get("guit.theme"), rows
+        raw = rows.get("guit.preferences")
+        if raw is None:
+            return None, rows
+        try:
+            return json.loads(raw), rows
+        except ValueError:
+            # Text the panel wrote that this reader cannot parse is reported as a
+            # missing record, because the checks below would otherwise be comparing
+            # the pick against `None` and calling that a pass.
+            return None, rows
 
-    def read_store(wanted, attempts=4):
-        """Read the store until it matches, or give up and report what it held.
+    def read_record(wanted, attempts=4):
+        """Read the record until it matches, or give up and report what it held.
 
         The webview flushes localStorage on its own schedule, so a read taken
         the instant after a pick can still see the previous value.
         """
-        actual, rows = stored_theme()
+        record, rows = stored_record()
         for attempt in range(attempts):
-            if wanted(actual, rows):
-                return actual, rows, attempt
+            if wanted(record):
+                return record, rows, attempt
             time.sleep(0.5)
-            actual, rows = stored_theme()
-        return actual, rows, attempts - 1
+            record, rows = stored_record()
+        return record, rows, attempts - 1
 
     try:
         A.Atspi.init()
         A.wait_for(r"Commit message", 30)
         A.click(A.find_button(name="Settings"))
         time.sleep(1.0)
+        # A size the theme switches must leave alone. It is set through the page's
+        # own zoom button rather than assumed at 16 so that a whole-record write
+        # reverting it is a difference this run can see.
+        zoom_button = A.find_button(name="Zoom in")
+        report.check("the zoom button is reachable", zoom_button is not None)
+        if zoom_button is not None:
+            A.click(zoom_button)
+        size, _rows, _attempt = read_record(lambda record: (record or {}).get("fontPx") != 16)
+        kept = (size or {}).get("fontPx")
+        report.check("zooming the interface persists a size in the record", kept is not None and kept != 16,
+                     f"stored={kept!r}")
         combo = None
         for node in A.tree(A.app_root()):
             if (A._once(lambda: node.get_name(), default="") or "") == "Theme" and (
                     A._once(lambda: node.get_role().value_name, default="") or "") == "ATSPI_ROLE_COMBO_BOX":
                 combo = node
         report.check("the Theme select is reachable", combo is not None)
-        for label, expected in (("Light", "light"), ("Dark", "dark"), ("Follow system", None)):
+        for label, expected in (("Light", "light"), ("Dark", "dark"), ("Follow system", "system")):
             if combo is None:
                 break
             A.click(combo)
@@ -156,19 +184,15 @@ def runtime_check(report, binary, repo, work):
             report.check(f"option \u201c{label}\u201d is offered", item is not None)
             report.check(f"option \u201c{label}\u201d can be picked", item is not None and A.click(item))
             time.sleep(0.8)
-            wanted = (lambda value, _rows: value is None) if expected is None else (
-                lambda value, _rows: value == expected)
-            actual, rows, attempt = read_store(wanted)
-            if expected is None:
-                # "Follow system" is the absence of an override, not a stored value.
-                report.check("picking \u201cFollow system\u201d clears the override", actual is None,
-                             f"stored={actual!r}")
-            else:
-                report.check(f"picking \u201c{label}\u201d persists {expected}", actual == expected,
-                             f"stored={actual!r}")
+            actual, rows, attempt = read_record(
+                lambda record: (record or {}).get("theme") == expected)
+            stored = (actual or {}).get("theme")
+            report.check(f"picking \u201c{label}\u201d persists {expected}", stored == expected,
+                         f"stored={stored!r} keys={sorted(rows)} after {attempt + 1} read(s)")
             report.check(f"the interface zoom preference survives the {label} switch",
-                         rows.get("guit.fontPx") == "16",
-                         f"stored={rows.get('guit.fontPx')!r} rows={sorted(rows)} after {attempt + 1} read(s)")
+                         (actual or {}).get("fontPx") == kept,
+                         f"stored={(actual or {}).get('fontPx')!r} expected={kept!r} "
+                         f"after {attempt + 1} read(s)")
     finally:
         try:
             os.killpg(os.getpgid(proc.pid), 15)
