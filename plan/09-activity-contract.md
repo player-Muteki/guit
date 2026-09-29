@@ -1035,21 +1035,35 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
 
 但它是**只看得见前端**的探针，三处盲区要写在这里，免得 C 把它的绿灯引用成别的含义：
 
-1. **事件通道被桩成空操作。** `window.__TAURI__` 的 `listen` 返回一个空函数的
-   Promise，`...|listen` 那次 invoke 只回一个 id。所以 §4.8 定下来给活动用的
-   emit→listen 那条面在这里**不产生任何计数**，活动监听泄漏它抓不到。
-   这一条不是我的推测：B03 的记录把同一件事写在自己的已知缺口里
-   （`unlisten` 不会到达 Rust，探针只能证明注册数不增长）。因此 C04 的
-   `onDispose(unlisten)` 由**代码位置 + `tests/lifecycle.mjs` 那族断言**保证，
-   而"真实关闭旅程"这笔账归桌面阶段，C04 不得引用这个探针声称它已过。
+1. **事件通道的注册可见、释放不可见，而且原因不是那个桩。** 探针把
+   `window.__TAURI__` 的 `listen` 桩成返回空函数的 Promise（read-budget.mjs:224），
+   但**这个桩没有被调用**：`@tauri-apps/api@2.11.1` 的 `event.js` 与 `core.js` 里
+   `window.__TAURI__` 只出现在文档注释中，两处都无读取；打包进来的 `listen()` 走的是
+   `invoke('plugin:event|listen', …)`（event.js:76），也就是探针自己的
+   `__TAURI_INTERNALS__.invoke`。所以**每次注册都会落进 `__CALLS__`**
+   （read-budget.mjs:212 先计数，才轮到第 213–216 行那个 `cmd.endsWith("|listen")`
+   分支——分支正是为了让它成功而存在的：回一个 id，并按 handler id 建一个空回调），
+   键名就是 `plugin:event|listen`。
+   断不到它，只是因为 `total()` 按名单取数，而名单里没有它。
+   释放那侧才是真断点：`_unlisten` 在 invoke 之前无条件读
+   `window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener`（event.js:43，第 44 行才是
+   `plugin:event|unlisten`），而探针从未定义这个全局，于是 `unlisten()` 直接 reject，
+   `plugin:event|unlisten` **一次也不会出现**。
+   它也不会被生命周期那侧的兜捕获接住：`unlisten` 是 async 函数，
+   `onDispose(unlisten)` 拿到的是一个 rejected Promise，`disposeAll` 捕获的是同步抛出，
+   所以这条失败既不中止其它出口，也不在任何计数上留痕。
+   结论要按形状说：**探针当前的绿灯与"所有监听都没释放"完全相容**；
+   而释放并非不可观测——补上那一个全局，注册与释放就成了 `__CALLS__` 里现成的一对，
+   不需要新造计数机制（见本节末的选定）。
 2. **`setInterval` 没有被包装。** 它只替换 `setTimeout`/`clearTimeout` 来数待触发定时器，
    而清点过两次（那一版工作树与 `d60f177` 之后各一次）：前端**一处 `setInterval` 都没有**，
    只有三个短命的一次性
    `setTimeout`（窗口设置保存、`dom.ts` 的一个、历史行闪烁）。也就是说
    C04 的那个周期定时器是**这一列里的第一个住户**：即使它每一次切页都漏一个，
-   探针的 `pending timers` 仍会报 `0→0`。所以 C04 不得把"探针绿了"当作自己没有泄漏
-   的证据，活动定时器与活动监听的计数要 C04 自己给（同形状的断言写在 `app/tests/`，
-   或按 §4.6 第 3 条在创建处 `onDispose(() => clearInterval(id))` 并让登记数可查）。
+   探针的 `pending timers` 仍会报 `0→0`。而且不能图省事把它折进 `pending`：
+   那个集合是在回调**触发时**删 id 的一次性语义，周期回调永远在触发，
+   于是漏掉的 interval 也会数出 `0`——恰好把要防的形状变成绿灯。
+   所以 C04 不得把"探针绿了"当作自己没有泄漏的证据，两个计数按本节末的选定补进探针。
 3. **后端的 git 子进程不在它视野里。** `watch.rs` 的刷新与兜底 tick 在 Rust 里自己
    spawn，前端一次请求都不发。"idle 期间不常驻执行 Git"这条承诺不能引用它结案
    （见 [A02 基线记录](08-gate-baseline-a02.md) 第 7.1 节同一行）；后端侧若要一个
@@ -1059,6 +1073,41 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
 不包含它，得单独跑。还有一处容易误读：`NEVER_READ` 只断言"没人读"，不断言"命令不存在"。
 退出清单把 `pull_default`/`list_remotes` 从注册表移除后，桩里那张 table 仍留着它们，
 这条断言会继续绿；真正被移除动作触发的是 `ipc-surface.mjs`。
+
+**选定（本轮，供 C04 的实现说明直接引用）：补探针，不加 `app/tests/` 夹具。**
+四条要做的改动，以及它们为什么只能是这四条：
+
+1. 桩里补一个全局 `window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} }`。
+   它唯一的用途是让 `_unlisten` 走到第 44 行，从而把释放送进 `__CALLS__`；
+   没有它，事件监听的释放**在探针里原理上不可观测**，与加不加断言无关。
+2. `INSTRUMENT` 里包装 `setInterval`/`clearInterval`，独立成一列（暂名 `intervals`），
+   只在 `clearInterval` 时递减，**绝不复用 `pending`**（理由见上面第 2 条）。
+   `counts()` 那一行取数的表达式与十二次往返那条 `fields` 名单同步加这一列。
+3. 断言的形式：一对**差值**而不是两个绝对值——
+   `total(tally, ["plugin:event|listen"])` 减去 `total(tally, ["plugin:event|unlisten"])`
+   在十二次切页往返前后相等；周期定时器那一列沿用现有的"回到原处"写法。
+   现有 `total()` 按名单取数，这两条都不需要新的取数机制。
+4. 这条断言的证据只到"计数回到原处"为止。补上那一个全局之后，
+   `plugin:event|unlisten` 会到达计数桩（桩的 table 里没有它，于是走最后的
+   `Promise.resolve(null)`），所以它证明的是"释放被调用过、次数对得上"，
+   **不是**"后端的事件注册表变小了"——这个探针里根本没有 Rust 一侧。
+   这笔账仍归桌面阶段的关闭旅程（本文与 B03 记录在这点上结论不变，
+   变的是"为什么证不了"——不是探针绕过了释放，而是探针让释放报错了）。
+
+不写成 `app/tests/` 纯计数夹具的理由有三条，都可核查：
+`test:fixture` 没有浏览器也没有 DOM（探针自己的文件头就写了这句，
+这也是它住在 `tools/bench/` 的原因），而注册发生在 `main.ts` 里，
+它 import 不了；`lifecycle.mjs` 与 `state-stress.mjs` 已经把**机制**钉死了
+（出口顺序、抛出的一人不牵连他人、200 轮订阅/退订不累积），再加一条夹具只是
+第三次断言同一机制，仍然看不见用户；而静态扫源码"每个 `listen(` 后面要跟一个
+`onDispose(`)"式的夹具会把 §4.6 那条正确写法（先 `await`、再 `onDispose(unlisten)`）
+判成违规——它跨两行。
+一个必要的诚实说明：探针不在 `test:fixture` 里，**每次提交的全绿不包含它**，
+所以选定它意味着 C04 的这条证据是一次单独的 `read-budget` 运行（fails=0，
+且名单里多出上述两列），不是提交前的自动绿灯。
+另外，`spent()` 在驱动之后固定 `sleep(600)`，因此一个 600 ms 以内的 interval
+确实会以"读了多少次"的形式暴露自己；不要把断言建在这上面——它依赖真实时长，
+而间隔默认是秒级，计数那条是确定性的。
 
 ## 5. C01 环路原型实测（一次性 /tmp crate，非交付代码）
 
@@ -1152,12 +1201,15 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
   （13-local-scope-b04.md）第 4 节）。
   B03 已经落地（`d60f177`），本节引用的那些出口名都在盘上复核过，
   因此这一节现在可以作为 HEAD 的属性引用；它当初读自工作树这一点不再构成限制。
-- §4.9 的第三条盲区留下一个未做的选择：C04 的周期定时器与事件监听要能被数出来，
-  要么给 `tools/bench/read-budget.mjs` 补上 `setInterval` 计数与事件释放的观察，
-  要么把断言写成 `app/tests/` 里的纯计数夹具（同 `domainSubscriptions()` 那一族形状）。
-  前者需要浏览器与构建产物、且不进 `npm run test:fixture`，后者每次提交都跑；
-  本文只固定“必须有一条能失败的断言”，选定哪种要在 C04 的实现说明里写明。
-  真正的 `unlisten` 到达后端这一条两者都证不了，归桌面阶段的关闭旅程。
+- §4.9 的第三条盲区已选定：**补 `tools/bench/read-budget.mjs`，不加 `app/tests/` 夹具**，
+  四条改动与三条理由见 §4.9 末那块“选定”。当时记下的代价仍然成立并要随实现一起写明：
+  它需要浏览器与构建产物、不进 `npm run test:fixture`，因此 C04 的这条证据是一次单独的
+  `read-budget` 运行，而不是每次提交的自动绿灯。
+  这一轮复核还纠正了它的理由本身：释放不可见不是因为探针把 `listen` 桩成空操作
+  （那个桩根本没被打包代码调用），而是因为缺 `__TAURI_EVENT_PLUGIN_INTERNALS__`
+  让 `_unlisten` 在到达 invoke 之前就 reject。差别是行动性的——补一个全局，
+  注册/释放就是 `__CALLS__` 里现成的一对，不需要新造机制。
+  “真实 `unlisten` 到达后端”这一条仍然归桌面阶段的关闭旅程，两者都不结案。
 - C04 加一行会动到区域下限，而**目前没有可复跑的几何门禁**：B01 与 B02 的记录都写明
   `tools/bench/layout-probe.mjs` 仍引用 `.rail-item` 与 `--rail-*`，其结果不得被引用为
   阶段证据；B02 的“两半同屏、提交框可见”是用一次性 CDP 探针在 15 组窗口×比例上量的。
@@ -1245,11 +1297,17 @@ mtime 索引的三项成本用一次性 Rust 原型测得（临时目录下 `car
 它测的是普通目录而不是忽略。写下这两条是为了让重跑的人不再把它们当作本文任何数值的出处。
 
 §4.9 那三条盲区不需要新夹具，一次读文件加两条 grep 就能复核：
-`grep -n 'setInterval' tools/bench/read-budget.mjs` **无命中**（它只替换
-`setTimeout`/`clearTimeout`），`grep -rn 'setInterval' app/src` 同样**无命中**
+`grep -c 'setInterval' tools/bench/read-budget.mjs` = **0**（它只替换
+`setTimeout`/`clearTimeout`），`grep -rn 'setInterval' app/src` 同样为 **0**
 （前端当时一处周期定时器都没有，所以 C04 会是那一列的第一个住户）；
-事件被桩成空操作则写在同一个文件的 `__TAURI__` 那一行与 `invoke` 里
-对 `|listen` 后缀的分支上，直接读得到。
+本轮改过的第一条盲区要多三条读数，都是同一方法：
+`grep -n 'plugin:event' app/node_modules/@tauri-apps/api/event.js` 给出
+`:44 unlisten`、`:76 listen` 两个 invoke 名，
+`grep -n '__TAURI_EVENT_PLUGIN_INTERNALS__' …/event.js` **只有 43 行一处**
+（在 `_unlisten` 内部、第 44 行之前，且无存在性判断），
+`grep -n 'window.__TAURI__' …/event.js …/core.js` 滤掉注释行后**无命中**——
+这一条是"那个 `__TAURI__` 桩没有被调用"的全部依据，也是一次读文件就能复核的断言，
+不要改成按 `window.__TAURI__` 去数注册（那条路永远不会红）。
 
 §3.2 用三段一次性 Python 探针测得（夹具在 `tempfile.mkdtemp` 下、脚本退出即 `rmtree`，
 不是交付代码）：九形状比对、外部忽略源六次读数、目录项 mtime 一节。
