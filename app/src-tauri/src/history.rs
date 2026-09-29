@@ -399,9 +399,16 @@ fn parse_topology(bytes: &[u8]) -> Result<Vec<Node>, ProbeError> {
 }
 
 /// Reads the topology of the first `count` commits in display order, the
-/// slice the graph is laid out over. Deliberately a separate, cheap call:
-/// it carries no message bytes, so the prefix a deep page needs stays small
-/// enough that the graph can never be the thing that trips the capture bound.
+/// slice the graph is laid out over.
+///
+/// Not a cheap call, and the reason is `--topo-order`: Git orders every
+/// reachable commit before it emits the first row, so `-n` bounds the output
+/// and never the work. The read therefore costs the same at every depth, and
+/// what sets its price is the size of the repository — except in a repository
+/// that has a commit-graph file, where Git has generation numbers to order
+/// with instead of the walk. It carries 83 bytes a node and no message bytes,
+/// so on a page deep enough it, not the page read, is what trips the capture
+/// bound.
 ///
 /// `target` is required and is the commit the page's other read was asked for:
 /// a revspec here would be resolved a second time, in a second process, and the
@@ -528,6 +535,7 @@ pub fn page(
     first_parent: bool,
 ) -> Result<HistoryPage, ProbeError> {
     let rev = pinned_rev(directory, target)?;
+    let body_start = Instant::now();
     let mut command = repo::user_git_command(directory);
     command.args([
         "log",
@@ -567,20 +575,27 @@ pub fn page(
         let first_line = detail.lines().next().unwrap_or("").to_owned();
         return Err(ProbeError::new("history_page_failed", first_line));
     }
-    let parse_start = Instant::now();
+    // Four phases, four marks. The two reads are two Git processes, and each of
+    // them orders the repository's whole reachable history before it answers;
+    // the layout and the parse cost thousandths of that. Reported as one number,
+    // a page would name neither of the reads that paid for it.
+    perf::mark("history.body", body_start.elapsed());
     // The graph is laid out first so `parse` can hand every commit the row
     // for its own index, and compare the commit itself against the topology it
     // came from, refusing the page if the two reads disagree on either.
-    let graph_start = parse_start;
+    let graph_start = Instant::now();
     let nodes = topology(
         directory,
         start.saturating_add(limit).saturating_add(1),
         &rev,
         first_parent,
     )?;
-    let rows = assign_lanes_with(&nodes, MAX_LANES, !first_parent);
-    let mut commits = parse(&output.stdout, &nodes, &rows, start as usize)?;
     perf::mark("history.graph", graph_start.elapsed());
+    let layout_start = Instant::now();
+    let rows = assign_lanes_with(&nodes, MAX_LANES, !first_parent);
+    perf::mark("history.layout", layout_start.elapsed());
+    let parse_start = Instant::now();
+    let mut commits = parse(&output.stdout, &nodes, &rows, start as usize)?;
     perf::mark("history.parse", parse_start.elapsed());
     let has_more = commits.len() as u64 > limit;
     if has_more {
