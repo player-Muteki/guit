@@ -1206,6 +1206,52 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
 确实会以"读了多少次"的形式暴露自己；不要把断言建在这上面——它依赖真实时长，
 而间隔默认是秒级，计数那条是确定性的。
 
+### 4.10 B05 的标识形态：读自并行工作树，**尚未落地**
+
+本节全部读自未提交的工作树，不是 HEAD 的事实；因此按符号引用，不按行号引用
+（行号在两次读之间就会漂）。它答掉了 §6 里挂着的那条“域键是否升级为会话身份”。
+
+工作树里看到的形状：`SnapshotView` 增加 `sessionId` / `historyGeneration` /
+`refsGeneration` 三个后端铸造的数；新增 `ReadContext { sessionId, generation: Option<u64> }`
+与 `SessionRead<T> { context, value }`，会话范围的读把**被问时的上下文原样回显**；
+`snapshotBus.ts` 给出 `readContextFor` / `sessionContext` / `contextMatches` 三个纯函数；
+后端 `bind_read` 在 `session_id` 或 `generation` 对不上时拒绝那次读的答案。
+身份的产生点只有一处，在 `publish` 里：`capture_inner` 填的是 `session_id: 0` 占位，
+真正的号由 `publish` 按“重新打开就 +1、世代归零；刷新则沿用 id、按 `head_moved` /
+`names_moved` 各自 +1”赋上去，并行开发者为此写的测试名就是
+`every_open_starts_a_new_session_even_for_the_same_path`。
+
+对 C 的三条约束，都由这个形状直接得出：
+
+1. **活动载荷不发明身份，消费这个身份。** 设计 §4.1 的 `ActivityView` 本就带
+   `sessionId`，于是 §4.6 末那句“活动通道只消费 B05 给的会话身份”有了具体的字段可指。
+   一条要分清的东西：`ReadContext.generation` 与 §4.1 里 `ActivityView.generation`
+   **不是同一个计数**——前者是“这个域被刷新了几次”（快照字段），后者是“活动索引换了几代”
+   （不进快照）。活动不是按某域上下文问出去的一次读，而是推，所以若复用 `ReadContext`
+   的形状，它的 `generation` 必须是 `null`（正是 `sessionContext` 那一档：绑定会话、
+   不被刷新作废）。把活动的代次塞进 `ReadContext.generation` 会让两个不同步的数共用一个键，
+   是这条契约里最容易写错的一处。
+2. **emit 必须排在 publish 之后，且用 publish 返回的那一份。** `session_id` 在 capture
+   阶段是 0，到 publish 才定下来。C01 的刷新环路如果在 publish 之前把活动值推出去，
+   它推的是 0——一个任何真实会话都不认领的 id，前端只会按“旧会话”丢掉，
+   面板表现为永不更新而不是报错。也不许在 publish 之后再回 `SessionState` 读一次 id：
+   那一次读可能已经属于下一个会话，等于把 A 的 mtime 标到 B 上。验收写成一句可断言的话：
+   切仓库后活动事件里的 `sessionId` 与同批快照里的 `sessionId` 相等。
+3. **C02 那条配对夹具另起文件。** `app/tests/ipc-surface.mjs` 正在被重写（新增按真实
+   函数签名读绑定规则的解析器，并带一条“解析到的签名数必须 > 40 否则是解析器坏了”的
+   自我校验）。而 §4.8 那句“事件面没有任何门禁”在 **HEAD 与工作树里同时成立**——
+   两侧对该文件的 `emit` / `listen` 匹配数都是 0。所以 C02 要加的“emit 名与 listen 名
+   双向配对”夹具按同一套文本口径写，但落在自己的测试文件里，不往一个正在重写的文件追加。
+
+§4.9 的选定在这里需要一并复核，结论不变但依据要更新：工作树里的探针**没有**加
+`setInterval` / `clearInterval` 列（`timers` 仍是只由 `setTimeout` 填充、fire 时删除的
+`pending` 集合，因此对 interval 恒报 0），也没有补 `__TAURI_EVENT_PLUGIN_INTERNALS__`，
+那个没有任何模块读取的 `window.__TAURI__` 桩仍在原地。所以 C04 仍要自己补那两列，
+只是定位要按符号而不是按行号。
+
+落地后必须回到本节复核一次：若真正实现里没有这三样中的任何一样（快照里的身份字段、
+读侧的上下文守卫、按签名解析的门禁），本节相应结论作废并退回 §6，而不是假设它会发生。
+
 ## 5. C01 环路原型实测（一次性 /tmp crate，非交付代码）
 
 在改动 `watch.rs` 之前，先用 notify 8.2.0 + 真实 inotify 事件验证“quiet 或最大等待取先到者”
@@ -1295,7 +1341,10 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
 - §4.6 最初依据**当时尚未提交**的并行改动，因此它当时定形的是接法而不是事实。
   那两件事之一已经答复：B03 的记录写明 `publishSnapshot(null)` 是“会话结束”在总线里的
   唯一翻译点，前端唯一的出处是 `state.ts` 的 `applySnapshot(null)`，两处都收敛到同一个动作。
-  仍待 B05 落地后复核的是域键是否升级为那个会话身份，以及活动通道是否订阅同一处。
+  域键是否升级为那个会话身份，工作树里的 B05 已经答复，形状与它对 C 的三条约束写在
+  **§4.10**：答案是否定的——身份是后端在 `publish` 铸造的 `sessionId`，域键是各自
+  独立递增的世代，两者不同步也不互相替代。活动通道是否订阅同一处仍需在该改动落地后
+  在 HEAD 上复核（§4.10 末）。
   B04 的记录对这一点给了一句可执行的口径：`refsKey` 里那几个远端字段来自本地跟踪引用的
   元数据，读它们不联网，因此换会话身份时应当改**键的来源**而不是删字段（[B04 记录]
   （13-local-scope-b04.md）第 4 节）。
@@ -1505,3 +1554,13 @@ status 用 `repo::status_output` 的逐字参数（含 `--porcelain=v2 --branch 
 `0 条目`这个结论要求这两样都在场，否则读者会以为只是没改动。
 探针结束时对所有夹具目录 `chmod 0755` 再 `rmtree`：留着 `000` 的目录会让清理静默失败，
 下一轮复跑就建立在同名残留上。
+
+§4.10 不是一次测量，而是四次只读检查，因此它自己写了怎么复核（前提仍是那个工作树，
+落地后要按 §4.10 末重做一遍）：`git status --porcelain` 确认 `session.rs`、`types.ts`、
+`snapshotBus.ts`、`ipc-surface.mjs` 四个名字仍是 ` M` 而未提交——这是本节标题里
+“尚未落地”四个字的唯一依据，它随时会失效；`git diff -- app/src/types.ts` 读身份字段的
+注释（“Minted by the backend, never derived from what Git reported”那段是形状的出处）；
+`git diff -- app/src-tauri/src/session.rs | grep -n "session_id\|generation\|bind_read"`
+读铸造点与拒绝点；最后一句 `grep -c "emit\|listen"` 同时跑在
+`git show HEAD:app/tests/ipc-surface.mjs` 与工作树版本上，两个都是 0——§4.8 与 §4.10
+第 3 条共用这一条读数，它不随探针改动而变。
