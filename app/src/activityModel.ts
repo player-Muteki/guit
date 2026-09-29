@@ -34,6 +34,53 @@ export function readStoredInterval(raw: string | null): number {
   return Number.isInteger(parsed) ? clampInterval(parsed) : INTERVAL_DEFAULT;
 }
 
+// What the panel will run on after a request to change that value, and how the
+// row should say so. The two shapes of bad input go opposite ways:
+//
+// A field that was cleared, or filled with something that is not a number, is
+// refused and the value already in force is kept. Overwriting a chosen interval
+// with the default would be the panel changing a setting nobody asked it to
+// change — and an empty text field is not far from no field at all.
+//
+// A *number* outside the range is corrected to the bound instead. It is a legible
+// choice about wanting it faster or slower, and the bound is the fastest or
+// slowest this display can be trusted with; `corrected` is what lets the row say
+// which number is actually in force rather than leaving the field to lie.
+export interface IntervalChoice {
+  /** The period to run on, whether or not it is the one that was asked for. */
+  seconds: number;
+  /** The request was not a number, so nothing changes. */
+  refused: boolean;
+  /** The request was a number outside the range, and `seconds` is its bound. */
+  corrected: boolean;
+  /** `seconds` differs from what is in force, so a timer has to be re-armed. */
+  changed: boolean;
+}
+
+const refusedInterval = (current: number): IntervalChoice => ({
+  seconds: current,
+  refused: true,
+  corrected: false,
+  changed: false,
+});
+
+// The same, after the panel tried to keep it. `persisted === false` means the
+// period is in force for this session and storage did not take it, so the next
+// start will not know about it — a fact the row has to say rather than imply.
+// A refused request owes storage nothing, so it reports as persisted.
+export interface IntervalApplied extends IntervalChoice {
+  persisted: boolean;
+}
+
+export function chooseInterval(raw: string | number, current: number): IntervalChoice {
+  const asNumber = typeof raw === "number" ? raw : Number(raw.trim());
+  // `Number("")` is `0`, which would read as "one second" from an emptied field.
+  if (typeof raw === "string" && raw.trim() === "") return refusedInterval(current);
+  if (!Number.isFinite(asNumber)) return refusedInterval(current);
+  const seconds = clampInterval(asNumber);
+  return { seconds, refused: false, corrected: seconds !== asNumber, changed: seconds !== current };
+}
+
 // --- the age bands ---
 //
 // Exported because they are the boundary the text changes at: a test asserts one

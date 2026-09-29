@@ -21,8 +21,10 @@ import {
 } from "../fileModel";
 import {
   advancesWithClock,
+  chooseInterval,
   describeActivity,
   readStoredInterval,
+  type IntervalApplied,
 } from "../activityModel";
 import { button, el, icon, openMenu, plural } from "../dom";
 import { currentFontPx } from "../font";
@@ -61,6 +63,10 @@ export interface ChangesView {
   element: HTMLElement;
   render(): void;
   renderActivity(): void;
+  /** The period the age line is currently being recomputed on. */
+  currentInterval(): number;
+  /** Re-arm that one timer on a new period, and remember it. */
+  applyInterval(requested: string | number): IntervalApplied;
 }
 
 // How often the age text is re-derived from the number the backend sent. The
@@ -507,13 +513,15 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     renderFileRows();
   });
 
-  // The panel's only recurring timer. It recomputes one line of text from a
-  // number the backend already sent, so it never reads Git, never re-renders the
-  // list and never touches the graph.
+  // The panel's only recurring timer, and the only place its period is decided.
+  // It recomputes one line of text from a number the backend already sent, so it
+  // never reads Git, never re-renders the list and never touches the graph.
   //
   // Registered beside the thing it lets go of: the panel outlives every repository
   // it shows, and a timer left running after the window closes would be a promise
-  // about a window that no longer exists.
+  // about a window that no longer exists. A *changed* period is the same case one
+  // step earlier — the old timer is cleared in the statement that arms the new one,
+  // because turning a knob twice must not leave two timers recounting one sentence.
   let stored: string | null;
   try {
     stored = localStorage.getItem(ACTIVITY_INTERVAL_KEY);
@@ -521,7 +529,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     // Storage may be unavailable in private mode; the age line still counts.
     stored = null;
   }
-  const intervalSeconds = readStoredInterval(stored);
+  let intervalSeconds = readStoredInterval(stored);
   // A state whose wording contains no time is skipped rather than recomputed: the
   // tick has nothing new to say about it, and saying it anyway would be a repaint
   // with no reason. A push always repaints the line, because that is what changes
@@ -529,8 +537,35 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   const ageLineNeedsTheClock = (): void => {
     if (advancesWithClock(currentActivity())) renderActivity();
   };
-  const activityTick = setInterval(ageLineNeedsTheClock, intervalSeconds * 1000);
+  let activityTick = setInterval(ageLineNeedsTheClock, intervalSeconds * 1000);
   onDispose(() => clearInterval(activityTick));
 
-  return { element, render, renderActivity };
+  // The whole effect of the Settings row. Two things are deliberately absent here:
+  // a Git read, and a repaint of anything but this line. The backend keeps
+  // measuring the working tree on its own schedule, so sixty seconds of text
+  // interval never means sixty seconds of staleness, and one second never buys
+  // one read per second. `persisted` is false only when something is owed to
+  // storage that storage did not take; a refused request owes nothing.
+  const applyInterval = (requested: string | number): IntervalApplied => {
+    const choice = chooseInterval(requested, intervalSeconds);
+    if (choice.refused) return { ...choice, persisted: true };
+    let persisted = true;
+    try {
+      localStorage.setItem(ACTIVITY_INTERVAL_KEY, String(choice.seconds));
+    } catch {
+      // The period still applies for this session; it just will not be there next
+      // start, and the row says so instead of implying it was kept.
+      persisted = false;
+    }
+    if (!choice.changed) return { ...choice, persisted };
+    clearInterval(activityTick);
+    intervalSeconds = choice.seconds;
+    activityTick = setInterval(ageLineNeedsTheClock, intervalSeconds * 1000);
+    // The line in front of the person is the thing the period changed, so it is
+    // redrawn now rather than at the end of a wait they did not choose.
+    renderActivity();
+    return { ...choice, persisted };
+  };
+
+  return { element, render, renderActivity, currentInterval: () => intervalSeconds, applyInterval };
 }

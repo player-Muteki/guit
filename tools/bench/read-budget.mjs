@@ -17,6 +17,8 @@
 //   round trip  switching pages repeatedly leaves the listeners, watchers,
 //             timers and DOM node count where it found them, and leaves the
 //             balance of event registrations against event releases where it was
+//   interval    using the refresh-period row re-arms the one repeating timer rather
+//             than adding a second, and costs no read at all
 //   close     ending the session reads nothing and stops showing what the
 //             repository that is no longer open had on screen
 //
@@ -209,9 +211,11 @@ const INSTRUMENT = `(() => {
   const setIntervalFn = window.setInterval;
   const clearIntervalFn = window.clearInterval;
   const registered = new Set();
+  const delays = [];
   let live = 0;
   window.setInterval = function (fn, delay, ...rest) {
     live += 1;
+    delays.push(delay);
     const id = setIntervalFn.call(window, function () {
       if (typeof fn === "function") return fn.apply(window, rest);
       return undefined;
@@ -224,6 +228,11 @@ const INSTRUMENT = `(() => {
     return clearIntervalFn.call(window, id);
   };
   Object.defineProperty(window.__COUNTS__, "intervals", { get: () => live });
+  // The periods every repeating timer in this page was armed with, in order. The
+  // live count says how many timers exist; this says whether a settings change
+  // *moved* the one that exists or merely added another beside it — the failure a
+  // count of 1 cannot see is a panel that stopped honouring the chosen period.
+  Object.defineProperty(window.__COUNTS__, "intervalDelays", { get: () => delays.slice() });
 })();`;
 
 const STUB = `(() => {
@@ -581,6 +590,44 @@ async function main() {
   const afterRounds = await spent(`window.__MOVE__("graph", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(2).padStart(40, "0")}" }) })`);
   check("a moved head still costs one graph read after twelve round trips",
     total(afterRounds, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 1, JSON.stringify(afterRounds));
+
+  // --- the interval row ---
+  //
+  // Four requests, in the order a person would make them: a new period, one the
+  // range has to clamp, one that is not a number at all, and a fraction. Then the
+  // value is put back where it started, because the run that follows this one boots
+  // in the same profile. What this is looking for is a panel that re-arms its single
+  // repeating timer instead of accumulating one per keystroke — and a settings row
+  // that reaches for Git, which is the mistake this whole channel exists to make
+  // visible: the period decides how often a sentence is rewritten, nothing more.
+  const delaysBefore = (await evaluate("window.__COUNTS__.intervalDelays.length"));
+  const intervalRows = await spent(`(() => {
+    document.querySelector('.appbar [aria-label="Settings"]').click();
+    const box = document.querySelector('[aria-label="Last-modified text refresh, in seconds"]');
+    const set = (value) => { box.value = value; box.dispatchEvent(new Event("change")); };
+    set("9");
+    set("200");
+    set("");
+    set("2.4");
+    set("5");
+    document.querySelector('.appbar [aria-label="Main"]').click();
+  })()`);
+  await sleep(200);
+  const armed = await evaluate("JSON.stringify(window.__COUNTS__.intervalDelays.slice(" + delaysBefore + "))");
+  check("four uses of the interval row re-arm the one timer, at the period asked for",
+    armed === "[9000,60000,2000,5000]", `${armed} (a refused request adds none)`);
+  const afterInterval = await counts();
+  check("the interval row leaves the panel with one repeating timer",
+    afterInterval.intervals === 1, `${afterInterval.intervals} live intervals`);
+  check("changing the interval reads nothing",
+    total(intervalRows, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0, JSON.stringify(intervalRows));
+  // The field shows the number in force, and storage holds it: the first is what
+  // stops a clamped request from leaving a lie in the box, the second is what makes
+  // the key a live name rather than one a later build migrates out of nothing.
+  check("the interval row ends showing what the panel is running on", await evaluate(`(() => {
+    const box = document.querySelector('[aria-label="Last-modified text refresh, in seconds"]');
+    return box.value === localStorage.getItem("guit.activityInterval") && box.value === "5";
+  })()`));
 
   // Ending the session is the one snapshot transition that is not a read, and
   // the graph has to answer it: a list of commits from a repository that is no

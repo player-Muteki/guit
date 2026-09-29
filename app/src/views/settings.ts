@@ -4,18 +4,26 @@
 // live here so the everyday views stay focused on the Git
 // workflow. Theme follows the
 // system by default; the selector is stored in localStorage and applied as
-// a `data-theme` attribute on <html>.
+// a `data-theme` attribute on <html>. The refresh interval of the age line is a
+// row on this page, but the timer it changes belongs to the panel drawing that
+// line — this view asks, that panel re-arms its one interval.
 
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { button, el, icon } from "../dom";
+import { button, el, icon, plural } from "../dom";
 import { createConfirmDialog, type ConfirmRequest } from "../dialogs/confirm";
 import { isAlwaysOnTop, isRestoreEnabled, setAlwaysOnTop, compactWindow, restoreWindowSize, windowGeometry } from "../window";
 import { currentFontPx, applyFontPx, FONT_DEFAULT } from "../font";
+import { INTERVAL_MAX, INTERVAL_MIN } from "../activityModel";
+import type { IntervalApplied } from "../activityModel";
 import type { GitProbe, ToolProbe } from "../types";
 
 export interface SettingsDeps {
   onError(error: unknown): void;
+  /** The age line's refresh period, which belongs to the panel that holds its
+   * timer rather than to this page. */
+  currentInterval(): number;
+  applyInterval(requested: string | number): IntervalApplied;
 }
 
 export interface SettingsView {
@@ -41,6 +49,19 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
   const zoomLabel = el("span", { class: "setting-value", role: "status" });
   const onTopToggle = el("input", { type: "checkbox", id: "settings-on-top" });
   const onTopLabel = el("label", { class: "checkbox", for: "settings-on-top" }, [onTopToggle, el("span", { text: "Always on top" })]);
+  // The refresh period of the one sentence that ages on its own. The timer it
+  // changes is not this page's: it belongs to the panel drawing the line, which is
+  // what keeps the panel down to a single repeating timer however often this row
+  // is used.
+  const intervalInput = el("input", {
+    class: "input",
+    type: "number",
+    "aria-label": "Last-modified text refresh, in seconds",
+  });
+  intervalInput.min = String(INTERVAL_MIN);
+  intervalInput.max = String(INTERVAL_MAX);
+  intervalInput.step = "1";
+  const intervalNote = el("p", { class: "setting-note", role: "status" });
   const general = el("section", { class: "view-block" }, [
     el("h2", { class: "block-title" }, [icon("settings"), el("span", { text: "General" })]),
     el("div", { class: "setting-row" }, [el("span", { class: "setting-label", text: "Theme" }), themeSelect]),
@@ -53,6 +74,11 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
         button("Reset", () => applyFontPx(FONT_DEFAULT), { class: "btn tiny", ariaLabel: "Reset zoom" }),
       ]),
     ]),
+    el("div", { class: "setting-row" }, [
+      el("span", { class: "setting-label", text: "Last-modified text" }),
+      el("div", { class: "zoom-controls" }, [intervalInput, el("span", { class: "setting-value", text: "seconds" })]),
+    ]),
+    intervalNote,
     el("div", { class: "setting-row" }, [onTopLabel]),
     el("div", { class: "setting-row" }, [
       el("span", { class: "setting-label", text: "Shortcuts" }),
@@ -236,12 +262,45 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     }
   });
 
+  // The field ends up showing the number the panel actually runs on. A value the
+  // range will not take is written back to its bound instead of being left in the
+  // box, because a row reading 200 while the line updates every 60 seconds is a row
+  // that has started lying, and only one of those two numbers can be true.
+  intervalInput.addEventListener("change", () => {
+    const applied = deps.applyInterval(intervalInput.value);
+    intervalInput.value = String(applied.seconds);
+    if (applied.refused) {
+      intervalNote.textContent = `Enter a number of seconds between ${INTERVAL_MIN} and ${INTERVAL_MAX}; the interval stays at ${applied.seconds}.`;
+      return;
+    }
+    // Which bound was hit is worth saying, and the two readings of "the number you
+    // typed is not usable" are not the same complaint: one is a range, the other is
+    // that half a second has no meaning to a display.
+    const bound = applied.seconds === INTERVAL_MIN
+      ? "quickest"
+      : applied.seconds === INTERVAL_MAX ? "slowest" : null;
+    const stated = plural(applied.seconds, "second");
+    if (applied.corrected) {
+      intervalNote.textContent = bound === null
+        ? `${stated} — the interval counts whole seconds.`
+        : `${stated} is the ${bound} this line can be set to.`;
+    } else if (!applied.persisted) {
+      intervalNote.textContent = `${stated} for this session — guit could not save it.`;
+    } else {
+      intervalNote.textContent = "";
+    }
+  });
+
   const render = (): void => {
     onTopToggle.checked = isAlwaysOnTop();
     restoreButton.disabled = !isRestoreEnabled();
     const zoom = `${currentFontPx()}px`;
     if (zoomLabel.textContent !== zoom) zoomLabel.textContent = zoom;
     themeSelect.value = document.documentElement.getAttribute("data-theme") ?? "system";
+    // The in-force interval, unless the caret is in the box: this view is redrawn
+    // whenever the repository behind it changes, and a watcher event landing
+    // mid-edit would otherwise type over the number being written.
+    if (document.activeElement !== intervalInput) intervalInput.value = String(deps.currentInterval());
     if (!probed) {
       probed = true;
       void refresh();

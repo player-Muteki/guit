@@ -27,6 +27,7 @@ const {
   AGE_MINUTE_MS,
   AGE_MONTH_MS,
   AGE_YEAR_MS,
+  chooseInterval,
   clampInterval,
   describeActivity,
   INTERVAL_DEFAULT,
@@ -220,3 +221,48 @@ test("a stored interval is clamped before it is used, or dropped", () => {
   assert.equal(readStoredInterval("600"), INTERVAL_MAX);
   assert.equal(readStoredInterval("12"), 12);
 });
+
+// --- what a request from the Settings row becomes ---
+//
+// The two kinds of unusable input get opposite answers on purpose. A field holding
+// no number at all — emptied mid-edit, or filled with text — is refused and the
+// interval in force stays: the person has not chosen anything yet, and writing the
+// default over a value they set would be the panel answering a question nobody asked.
+// A *number* outside the bounds has chosen a direction, so it lands on the bound
+// that expresses it, and `corrected` is what lets the row say which number is now
+// running rather than leaving the field to disagree with the timer.
+test("a request that is not a number keeps the interval that is running", () => {
+  for (const raw of ["", "   ", "fast", "1e", "5s", "12abc", Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    const choice = chooseInterval(raw, 12);
+    assert.equal(choice.refused, true, `${JSON.stringify(raw)} is not a request to change anything`);
+    assert.equal(choice.seconds, 12, "the running value survived");
+    assert.equal(choice.changed, false);
+    assert.equal(choice.corrected, false);
+  }
+});
+
+test("a number outside the bounds lands on the bound and says so", () => {
+  const slow = chooseInterval("200", 12);
+  assert.deepEqual(slow, { seconds: INTERVAL_MAX, refused: false, corrected: true, changed: true });
+  const fast = chooseInterval("-3", 12);
+  assert.deepEqual(fast, { seconds: INTERVAL_MIN, refused: false, corrected: true, changed: true });
+  // Half a second is a number the display cannot run on, and rounding it is not
+  // the same complaint as refusing it: the intent — sooner or later — is readable.
+  assert.equal(chooseInterval("5.4", 12).seconds, 5);
+  assert.equal(chooseInterval("5.6", 12).seconds, 6);
+  assert.equal(chooseInterval("5.6", 12).corrected, true);
+});
+
+test("only a different number asks for a new timer", () => {
+  // The caller re-arms one interval, so a request that changes nothing must say it
+  // changed nothing — re-arming on every keystroke would make the age line's
+  // period depend on how often the row was touched.
+  const same = chooseInterval("12", 12);
+  assert.deepEqual(same, { seconds: 12, refused: false, corrected: false, changed: false });
+  const defaultFromItself = chooseInterval(String(INTERVAL_DEFAULT), INTERVAL_DEFAULT);
+  assert.equal(defaultFromItself.changed, false);
+  const toDefault = chooseInterval(String(INTERVAL_DEFAULT), 20);
+  assert.equal(toDefault.changed, true, "going back to the default is still a change");
+  assert.equal(toDefault.corrected, false);
+});
+

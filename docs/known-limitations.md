@@ -112,14 +112,23 @@ These need a human and a second machine, and are honestly outstanding:
   entry, not as its contents, so a build directory you ignore can be rewritten a
   thousand times while the line stays where it was. That is Git's own definition
   of the working tree, not a gap in the timer.
-- The age is recomputed by the panel's own five-second timer from the value the
-  backend last pushed, so what it shows is always up to one interval behind the
-  clock, and between two pushes the named file can be older than the tree. A
-  tick never reads Git: the line moving is not evidence that anything was
-  re-checked, and a quiet repository costs nothing to keep on screen.
-- Five seconds is fixed in this release. There is no Settings row for it yet, and
-  it is unrelated to the watcher's own debounce and fallback poll interval, which
-  decide when a *measurement* arrives, not when the text is repainted.
+- The age is recomputed by the panel's own timer from the value the backend last
+  pushed, so what it shows is always up to one interval behind the clock, and
+  between two pushes the named file can be older than the tree. A tick never
+  reads Git: the line moving is not evidence that anything was re-checked, and a
+  quiet repository costs nothing to keep on screen.
+- The interval is a **display** setting only, between 1 and 60 seconds (default
+  5), in Settings → General. It is unrelated to the watcher's own debounce and
+  fallback poll interval, which decide when a *measurement* arrives, not when the
+  text is repainted: sixty seconds here never leaves the file list sixty seconds
+  stale, and one second never costs a Git read per second. Setting it is not a
+  way to make guit watch more closely, and a value outside the range is corrected
+  to the bound rather than trusted.
+- The interval is stored in the panel's own local preferences, so it is per
+  window on this machine and it is not part of the diagnostic export. If storage
+  refuses the write — private mode, a full quota — the value still applies for
+  the session, the row says it could not save it, and the next start returns to
+  whatever storage holds.
 - There is no "scanning" state on the wire. Between a session opening and the
   first measurement for it — and after a failed refresh clears one — the line
   reads `Last modification unknown` rather than keeping the previous

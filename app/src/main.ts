@@ -154,7 +154,14 @@ const history = createHistoryView({
     setStatus(`New tag will point at ${oid.slice(0, 10)} — enter a name and press Create tag.`);
   },
 });
-const settings = createSettingsView({ onError: showError });
+// The interval row is the one setting this page does not keep: the timer it
+// changes lives with the age line, so asking the changes view is what keeps the
+// panel to a single repeating timer no matter how often the row is used.
+const settings = createSettingsView({
+  onError: showError,
+  currentInterval: () => changes.currentInterval(),
+  applyInterval: (requested) => changes.applyInterval(requested),
+});
 
 // --- shell ---
 shell = createShell({

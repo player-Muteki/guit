@@ -21,6 +21,15 @@ is the record of what is not verified.
 - That line advances on a timer of its own, every five seconds. It is the only
   thing the timer repaints: a tick reads no Git, re-renders no list and moves
   no graph, and it stops with the window.
+- How often that sentence is rewritten is now a row in Settings → General,
+  between one second and sixty. Changing it re-arms the one timer the panel
+  already has — it never starts a second one — and takes effect immediately,
+  including on the words currently on screen. A number outside that range is
+  corrected to its bound and said so; a field holding no number at all is
+  refused, leaving the interval already running untouched. This changes only
+  how often the display talks: file changes are still detected as they happen,
+  so sixty seconds of text never means sixty seconds of staleness, and one
+  second never costs a Git read per second.
 
 ### Changed
 
