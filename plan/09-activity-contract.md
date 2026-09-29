@@ -1242,6 +1242,41 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
    自我校验）。而 §4.8 那句“事件面没有任何门禁”在 **HEAD 与工作树里同时成立**——
    两侧对该文件的 `emit` / `listen` 匹配数都是 0。所以 C02 要加的“emit 名与 listen 名
    双向配对”夹具按同一套文本口径写，但落在自己的测试文件里，不往一个正在重写的文件追加。
+4. **第 2 条那个顺序约束在今天的代码里已经有一个现成落点，不必新造。** 这一段是
+   HEAD 的事实（`watch.rs` 不在并行改动里，可核对）：刷新环路的 `fire` 闭包里
+   `session::refresh(...)` 交出 `Result<Option<SnapshotView>, ProbeError>`
+   （`watch.rs:239`），`Ok(Some(snapshot))` 那一支已经拿着**刚发布的那一份 view**
+   去 `emitter.emit("repo-refreshed", snapshot)`（`watch.rs:245-246`），
+   并且同支里已经有第二个 emit（`watch-status`，仅在 `refresh_failed` 由真转假时补一条
+   “恢复了”，`watch.rs:247-256`）。于是活动的 emit 就接在 `repo-refreshed` 之后、
+   用同一个 `snapshot` 里的会话号——**结构上就不可能**读到一个属于下一个会话的 id，
+   第 2 条要防的那两件事（发出 0、发晚了一步）都不成立。
+   `Ok(None)` 那一支是 `false`（会话已不在），它不发任何事件，这条契约跟着它一起静默即可。
+5. **`Err` 那一支必须把 `unavailable` 推出去，而不是静默。** 同一闭包的 `Err` 分支今天只
+   `eprintln!` 加一条 `watch-status`（`failed: true`），并且**返回 `true`**——环路继续活，
+   只是这一轮没出快照（`watch.rs:260-271`）。快照那一侧是对的
+   （上一份快照不会被一份坏快照替换），但活动值不一样：静默意味着面板继续显示**上一次成功
+   扫描**算出来的年龄，而这个数字在刷新失败期间只会越变越大，看起来像“这个仓库三天没动过”。
+   这正是 §2.5 那条“读失败绝不是干净仓库”在活动面上的形状，所以 `Err` 时的正确输出是一次
+   `state: unavailable` 的 emit，不带年龄。这条与第 2 条同源：它要求载荷有 `state` 字段，
+   §4.5 的分流已经准备了那一档。
+6. **“名”与“站点”不是一回事，配对夹具只能按名数。** HEAD 上后端一共 5 个 emit 调用点
+   （`grep -rn "\.emit(" app/src-tauri/src/`），**全部**在 `watch.rs`，只用到 2 个名字：
+   `repo-refreshed` 1 处（`watch.rs:246`），`watch-status` 4 处——`fire` 闭包里 2 处
+   （`250` 恢复、`264` 失败）、闭包外 2 处（`supervisor()` 在进环路之前报一次初始 mode，
+   `221`；`stop()` 报 `mode: "none"`，`305`）。前端 2 个 `listen`，与 2 个名一一对应。
+   所以 roadmap 里那句“两侧各 2”与 §4.8 那条计数讨论说的都是**名字数**，写成夹具常量就会
+   在 C02 加一个名之后被误读成门禁坏了。
+7. `stop()` 那一处暴露了第 4 条的适用范围：它是**环路外**的清理，那里没有刚发布的 view，
+   因此拿不到会话号。活动面要有对应的一档——一次无身份的清除，而不是一个带 id 的载荷。
+   理由与 §4.6 那条同源：`publishSnapshot(null)` 是“会话结束”的唯一翻译点，它的形状就是
+   “不是读、而是清”，所以清除不携带身份、前端无条件接受；反过来，任何**带 id** 的活动载荷
+   仍按第 1 条比对。这两类共用一个通道时，必须有一个能区分它们的字段，
+   而那正是 §4.5“先按 `state` 分流”里 `unavailable`/清除档要扮演的角色。
+
+顺带一处前瞻：C02 加了对“名”与“站点”之后（第 6 条那两个词的区别就是为它写的），
+两侧都变成 3。配对夹具断言的是“成对”，不是某个数，所以它不会因这条新增而变红——
+但任何把 2 抄成常量的写法都会。
 
 §4.9 的选定在这里需要一并复核，结论不变但依据要更新：工作树里的探针**没有**加
 `setInterval` / `clearInterval` 列（`timers` 仍是只由 `setTimeout` 填充、fire 时删除的
@@ -1563,4 +1598,9 @@ status 用 `repo::status_output` 的逐字参数（含 `--porcelain=v2 --branch 
 `git diff -- app/src-tauri/src/session.rs | grep -n "session_id\|generation\|bind_read"`
 读铸造点与拒绝点；最后一句 `grep -c "emit\|listen"` 同时跑在
 `git show HEAD:app/tests/ipc-surface.mjs` 与工作树版本上，两个都是 0——§4.8 与 §4.10
-第 3 条共用这一条读数，它不随探针改动而变。
+第 3 条共用这一条读数，它不随探针改动而变。§4.10 第 4、5 两条是 HEAD 的事实，
+复核只需 `grep -n "session::refresh\|repo-refreshed\|watch-status\|Ok(None)\|Err(error)" app/src-tauri/src/watch.rs`
+（当前给出 239 / 246 / 250 与 264 / 259 / 260；同一条 grep 还会给 221 与 305，
+即 §4.10 第 6、7 条那两个环路外的 `watch-status` 站点），并且 `git diff -- app/src-tauri/src/watch.rs`
+必须为空——这两条读的是 HEAD，一旦有人动了 `watch.rs`（C01 自己就会动），
+行号就要按新文件重报，而“emit 接在 `repo-refreshed` 之后用同一个 view”这条结构约束不变。
