@@ -72,11 +72,11 @@ flowchart LR
 | 阶段 D：D01 历史读取的身份与双读一致 | 已实施（同文 §4，提交 `861a1ca`；页内的 `%D` 标签随 D02 撤走，标签移动已在无头 Edge 驱动构建产物上测到，但 `history_head_unresolved` 那条拒绝在真实 WebView 里仍没被看见过） |
 | 阶段 D：D02 结构化引用与独立刷新 | 已实施（同文 §5，提交 `315e988`/`61d9d4f`/`532be32`；名字不再进页面读取，一次 listing 读按代次同时喂两个视图。Refs 读的迟到、超过约十一万条 ref 的仓库都没有被测过） |
 | 阶段 D：D03–D05 | 待实施 |
-| 阶段 G：W01 版本化外观记录 | 已实施（`app/src/preferencesModel.ts` 与 `appearanceStore.ts`，读不懂的记录拒绝改写；规则由 `app/tests/preferences-model.mjs`、`app/tests/preferences-store.mjs` 钉住。真实窗口里第二次启动把同一份记录读回来没有跑过，跨比例因子与第二块显示器的钳位仍是手动门（`tools/bench/recovery-checks.sh` 尾部，另见 `docs/known-limitations.md` 的“Manual gates still open”） |
+| 阶段 G：W01 版本化外观记录 | 已实施（`app/src/preferencesModel.ts` 与 `appearanceStore.ts`，读不懂的记录拒绝改写；规则由 `app/tests/preferences-model.mjs`、`app/tests/preferences-store.mjs` 钉住。真实窗口里第二次启动把同一份记录读回来没有跑过，跨比例因子与第二块显示器的钳位仍是手动门（`tools/bench/recovery-checks.sh` 尾部 manual 3，本宿主只有一块显示器，因此没有运行时证据） |
 | 阶段 G：W02 三类字体与回退 | 已实施（三个名字一行一条，样本行用面板自己的两个字体属性绘制；等宽是否真对齐问过引擎，见 `tools/bench/font-engine-probe.ts` 与 `app/tests/font-stack.mjs`。该问题只朝 WebKitGTK 问过，其他引擎从未运行） |
-| 阶段 G：W03 自定义 CSS 主题 | 已实施（子集逐条审阅、预览、应用、`Ctrl/Cmd+Shift+T` 与页面按钮同一条出路、崩溃后用留下的标记恢复；未验证部分见 `docs/known-limitations.md` 的“The custom theme”一节 — 事后那一眼只看控件有没有盒子，子集也只对该引擎固定） |
-| 阶段 G：W04 四个窗口动作与关闭收尾 | 已实施（app bar 右上角成组的置顶/最小化/最大化或还原/关闭，按钮显示桌面的回答而不是请求；关闭先写几何再销毁，且**不**回收在飞的 Git 子进程 — 这是决定，理由与未跑的持有路径同文“The window controls”一节。空闲关闭与几何往返已在真实窗口里按过） |
-| 阶段 G：W05 小窗口、多 DPI、键盘、主题与触屏命中复核及设置分组清理 | 待实施 |
+| 阶段 G：W03 自定义 CSS 主题 | 已实施（子集逐条审阅、预览、应用、`Ctrl/Cmd+Shift+T` 与页面按钮同一条出路、崩溃后用留下的标记恢复；未验证部分是事后那一眼只看控件有没有盒子（`app/tests/theme-apply.mjs` 与 `tools/bench/theme-check.py` 的口径），子集也只对 WebKitGTK 这一个引擎固定（`tools/bench/webkit-engine-probe.py`） |
+| 阶段 G：W04 四个窗口动作与关闭收尾 | 已实施（app bar 右上角成组的置顶/最小化/最大化或还原/关闭，按钮显示桌面的回答而不是请求；关闭先写几何再销毁，且**不**回收在飞的 Git 子进程 — 这是决定，理由记在 `CHANGELOG.md`，未跑的持有路径记在本行：关闭时确有 Git 子进程在飞的那条旅程从未在真实窗口里走过（`app/tests/window-controls.mjs` 钉的是形状，不是那次关闭）。空闲关闭与几何往返已在真实窗口里按过） |
+| 阶段 G：W05 小窗口、多 DPI、键盘、主题与触屏命中复核及设置分组清理 | 部分实施。已闭合：340×400 必要操作仍可达（`tools/bench/layout-check.py` 在该尺寸 fails=0，`tools/bench/narrow-smoke.py` 同）；窄窗口两处挤压修好——分页行允许换行、app bar 图标按钮不再被同行挤扁（`app/src/style.css`，提交 `72a126e`）；设置页按“一个选择改动什么”重排，外观与面板在前、诊断与开发者在后（`app/src/views/settings.ts`，提交 `1539be9`），`tools/bench/view-smoke.py` 以各块标题的屏幕 y 顺序断言这条，默认 720×560 首屏因此留住外观与主题输入框（输入框底 952、首屏止 962）。命中盒只量不承诺：产品以指针驱动、文档没有触屏承诺，故 340 宽处图标按钮实测 20px、每行控件 20–23px、最小一档缩放下 15px 记为设计事实而非缺陷，没有加像素下限去和 rem 推出的行网格对打。未闭合：多 DPI 与第二块显示器的钳位在这台单显示器宿主上从未运行（`tools/bench/recovery-checks.sh` 尾部 manual 3）；键盘复核只有焦点归还与窄窗口可达这两条有断言，整页 Tab 顺序没有逐格记录 |
 | 新功能及架构迁移 | 待实施 |
 | 新主面板的性能、桌面运行、跨平台及发布证据 | 待实施后采集 |
 
