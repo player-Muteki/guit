@@ -4,8 +4,10 @@
 Drives Settings → Developer "Test compact window", which resizes the window to
 the project's declared 340x400 minimum, and asserts the shell's primary actions
 are still reachable at that size, then that the restore gives the window its own
-box back. Overflow is layout-check.py's job; this suite is about reachability at
-the minimum size and about the resize round-trip.
+box back. The window cluster — pin, minimise, maximise or restore, close — is
+asked for on both pages at both sizes, since the promise is that every page this
+panel shows has them. Overflow is layout-check.py's job; this suite is about
+reachability at the minimum size and about the resize round-trip.
 
 The last thing it does is press the app bar's own close, because that is the one
 route the window ever leaves by and nothing else here exercises it: the app must
@@ -50,6 +52,11 @@ TABS = {"Main", "Settings"}
 APPBAR = {"Open repository", "Refresh status", "Close session", "Commit",
           "Always on top", "More repository actions",
           "Minimise", "Maximise window", "Close guit"}
+# The four the outline promises at the corner of every window this panel can be
+# shrunk to. Asked for on both pages rather than once per run: the app bar belongs
+# to the shell instead of to a page, and that is only a fact about the source until
+# something presses the tab and asks again.
+WINDOW_CLUSTER = {"Always on top", "Minimise", "Maximise window", "Close guit"}
 # At the minimum width the app bar drops its Commit button, because the changes
 # area already carries a commit box in the same place. The affordance has to
 # survive, not both copies of it, so it is checked where it lives instead.
@@ -178,10 +185,19 @@ def main():
         report.check("both pages are reachable when wide", TABS <= wide,
                      ",".join(sorted(TABS - wide)))
 
+        A.click(A.find_button(name="Main"))
+        time.sleep(1.0)
+        main_wide = showing_names()
+        report.check("Main carries the window cluster when wide", WINDOW_CLUSTER <= main_wide,
+                     ",".join(sorted(WINDOW_CLUSTER - main_wide)))
+
         # --- shrink to the declared minimum, 340x400 ---
         wide_rect = document_rect()
         A.click(A.find_button(name="Settings"))
         time.sleep(1.0)
+        settings_wide = showing_names()
+        report.check("Settings carries the same window cluster", WINDOW_CLUSTER <= settings_wide,
+                     ",".join(sorted(WINDOW_CLUSTER - settings_wide)))
         A.click(A.find_button(name="Test compact window"))
         time.sleep(2.5)
         compact_rect = document_rect()
@@ -202,6 +218,8 @@ def main():
         A.click(A.find_button(name="Main"))
         time.sleep(1.2)
         narrow = showing_names()
+        report.check("Main carries the window cluster at 340x400", WINDOW_CLUSTER <= narrow,
+                     ",".join(sorted(WINDOW_CLUSTER - narrow)))
         report.check("the commit box survives 340x400", "Commit message" in narrow)
         # The two regions are one page, and a page that only fits one of them at
         # the minimum size is the layout failure this whole stage exists to
