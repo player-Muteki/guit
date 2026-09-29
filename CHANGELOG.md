@@ -102,6 +102,22 @@ is the record of what is not verified.
 
 ### Changed
 
+- Settings is grouped by what a choice changes. The page opened with a block
+  called General that held the theme, the interface zoom, the three font names,
+  the age line's refresh period, always-on-top and a nine-row list of keys, so
+  the custom theme box — an appearance choice like the ones above it — started
+  below all of that: measured at the default 720x560 window, its heading sat at
+  1024px into the page, past a first screen that ends at 962. General is now
+  Appearance (a colour, a size, three faces), the theme box follows it directly,
+  and the rows that are about how the panel behaves rather than how it looks
+  became a Panel block of their own. The same measurement puts the appearance
+  heading at 799 with the box ending at 952, and every environment probe below
+  both of them: what a person came to set is what the page shows them first.
+  Because that is a layout fact rather than a source fact, the desktop harness
+  asserts it from the y each block's own heading reports, and it asserts the
+  order rather than the scroll position — the page is taller than the window by
+  design, and a check that depended on where the page happened to be scrolled
+  would be a check of nothing.
 - The code font is measured before it is used. A family name the computer does
   not have is not skipped by the drawing engine — it substitutes some other face
   and hands back a value that still reads as the name asked for — so the panel's

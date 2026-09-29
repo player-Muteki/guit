@@ -3,7 +3,8 @@
 
 Covers what recovery-checks.sh and diagnostics-export-check.sh do not: that the
 two pages open and each shows its own content, that the one page carries the
-changes area and the commit graph at the same time, that the branch picker opens
+changes area and the commit graph at the same time, that the Settings page puts
+its appearance blocks ahead of the environment ones, that the branch picker opens
 as a layer over that page while the tab strip stays reachable, that a row menu
 works, that the discard ticket's cancel path closes the modal, returns focus to
 the button that opened it and changes nothing on disk, that a failed external
@@ -255,6 +256,26 @@ def main():
         report.check("focus returns to the button that opened the dialog",
                      focused_name("ATSPI_ROLE_BUTTON") == "Export diagnostics…",
                      f"focus is on {focused_name('ATSPI_ROLE_BUTTON')!r}")
+
+        # --- how the Settings page is grouped ---
+        # The page is one scroll of blocks, so the grouping is a geometry fact and
+        # is read from the y each block's own heading reports — never from the
+        # source order, which the page is free to append in whatever order it
+        # builds. What is asserted is that the diagnostics block sits *after* the
+        # two appearance blocks rather than among them: a person who came to change
+        # a colour or a face should not have passed the environment probes to get
+        # there. SHOWING is not used here, because it is a scroll-position fact and
+        # this page is taller than the window by design; the click on the export
+        # button above is allowed to have moved the page.
+        blocks = ["Appearance", "Custom theme", "Panel", "Environment & diagnostics", "Developer"]
+        tops = []
+        for label in blocks:
+            node = find(label, "ATSPI_ROLE_HEADING")
+            tops.append(None if node is None else
+                        A._once(lambda: node.get_component().get_extents(A.Atspi.CoordType.SCREEN).y, default=None))
+        report.check("the Settings blocks are ordered appearance first, diagnostics last",
+                     all(value is not None for value in tops) and tops == sorted(tops),
+                     ", ".join(f"{label}={value}" for label, value in zip(blocks, tops)))
 
         # --- the cancellable process probe ---
         # `git hash-object --stdin` is given no input and its stdin is held

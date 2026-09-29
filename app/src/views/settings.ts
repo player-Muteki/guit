@@ -1,5 +1,8 @@
-// Settings view: General, Custom theme, Environment & diagnostics and
-// Developer. The environment probes (git/tool/window checks, the
+// Settings view: Appearance, Custom theme, Panel, Environment & diagnostics and
+// Developer. The blocks are cut by what a choice changes — how the panel looks, what
+// text it draws over, how it behaves, what the machine it runs on answers — and the
+// diagnostics block is last on the page, so the settings a person came to set are the
+// ones the first screen holds. The environment probes (git/tool/window checks, the
 // compact-window test, the diagnostics export manifest, the process probe)
 // live here so the everyday views stay focused on the Git
 // workflow. Theme follows the system by default; the selector is one of the
@@ -92,8 +95,8 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
   intervalInput.max = String(INTERVAL_MAX);
   intervalInput.step = "1";
   const intervalNote = el("p", { class: "setting-note", role: "status" });
-  const general = el("section", { class: "view-block" }, [
-    el("h2", { class: "block-title" }, [icon("settings"), el("span", { text: "General" })]),
+  const appearance = el("section", { class: "view-block" }, [
+    el("h2", { class: "block-title" }, [icon("settings"), el("span", { text: "Appearance" })]),
     el("div", { class: "setting-row" }, [el("span", { class: "setting-label", text: "Theme" }), themeSelect]),
     el("div", { class: "setting-row" }, [
       el("span", { class: "setting-label", text: "Interface zoom" }),
@@ -119,6 +122,16 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     ]),
     codePreview,
     fontNote,
+  ]);
+
+  // --- panel ---
+  // How the panel behaves rather than how it looks: how often the one sentence that
+  // ages on its own is re-asked, whether the window stays above the others, and the
+  // keys that do those things without a click. They were in the same block as the
+  // colours and the faces, which put a nine-row key list between the font rows and
+  // the theme box that reads them.
+  const panel = el("section", { class: "view-block" }, [
+    el("h2", { class: "block-title" }, [icon("main"), el("span", { text: "Panel" })]),
     el("div", { class: "setting-row" }, [
       el("span", { class: "setting-label", text: "Last-modified text" }),
       el("div", { class: "zoom-controls" }, [intervalInput, el("span", { class: "setting-value", text: "seconds" })]),
@@ -265,7 +278,7 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
     probeResult,
   ]);
 
-  element.append(general, custom, environment, developer);
+  element.append(appearance, custom, panel, environment, developer);
 
   // --- diagnostics export (the manifest is the confirmation) ---
   const confirm = createConfirmDialog();
