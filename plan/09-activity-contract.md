@@ -40,6 +40,29 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 会引发无限刷新（`repo.rs:353-357`，并有测试 `status_output_never_acquires_the_index_lock`）。
 新增的元数据读取同样不得取索引锁，也不得自己成为事件源。
 
+### 1.1 保留路径与种类的真实用途（防止按域失效被做成一张矩阵）
+
+快照的容量比“七域客户端”的表象小得多。`SnapshotView` 只有
+`repo / branch / files / operation` 四项（`session.rs:175-186`），
+`capture_inner` 的全部内容是**一次 `git status` 加一次 `inflight::detect` 文件读**
+（`session.rs:200-223`）；分支列表、tag、stash、worktree、history 页都是独立的按需命令
+（`main.rs:1659-1675`：`history_page`、`list_refs`、`stash_list`），不在快照里，
+也不由 watcher 触发。
+
+因此“事件携带种类与路径”不是为了在后端若干 Git 读之间做选择——后端只有一个捕获单元，
+任何非 Access 事件都等价于“重新捕获”。路径的真实用途只有三处，C01/C03 的改动范围
+按这三处定，不多做：
+
+1. 判定该事件是否与已捕获状态无关，从而**抑制**无谓刷新（目前唯一的抑制是丢 Access）。
+2. 给 C03 的 mtime 索引做**免 Git 读**的增量更新：工作树内的路径直接按项改表，
+   不需要 `ls-files`，也不需要 `git status`。
+3. 判定**枚举规则来源**是否变化（`.gitignore`、`.git/info/exclude`、`git config` 里的
+   `core.excludesFile`），这类事件才需要付一次全量重枚举。
+
+第 2、3 两类是互斥的分流：把 `.gitignore` 的事件当作“改一个文件项”处理会让候选集合
+停留在旧忽略规则下，反之把每次保存都升级为全量重枚举，就等于把 §2.2 的 18–22 ms
+挂在每个按键上。实现必须显式区分这两类并有各自的测试。
+
 ## 2. C02：候选枚举实测契约
 
 候选集合 = Git 认定的“已跟踪文件” + “未被忽略的未跟踪文件”，再按现存文件取最大 mtime。
