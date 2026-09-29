@@ -156,37 +156,67 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
   C01 的“需要重新核对/降级原因”要扩展这个事件体，前端 `watchStatus()` 同步跟进；
   文案属于 shipped text，不得出现阶段编号。
 - 间隔 `x`：默认 5、整数 1–60，只控制文本重算；非法值拒绝并保留原值，
-  且同一时刻只允许一个计时器（C05）。
+  且同一时刻只允许一个计时器（C05）。持久化位置与它为什么不属于后端见 §4.1。
 
-### 4.1 持久化的现状与必须避开的迁移事故
+### 4.1 设置值只控制文本重算，因此它属于前端
 
-计时值要驱动后端环路，因此它不能存前端：
+设计把 `x` 定死了语义：**默认 5、范围 1–60 整数秒，只控制文字重算，不控制 Git
+freshness；调整后只维护一个计时器**（设计 §4.2 末段）。这条决定了持久化位置，
+也决定了 C05 的改动范围：
 
-| 事实 | 代码位置 | 对 C05 的约束 |
-| --- | --- | --- |
-| 接口缩放与主题存 `localStorage` | `src/font.ts:18,26`、`src/views/settings.ts:239-242` | 后端读不到，计时值不得走这条路 |
-| 后端已有一份版本化设置 | `main.rs:148-186`：`WindowSettings { schema_version, … }` → `app_config_dir/window.json` | 已有原子写（`NamedTempFile` + `write_all` + `sync_all` + `persist`），新设置沿用同一写法，不再造第三种落盘形状 |
-| 读取时 `schema_version != settings_version()` 直接返回 `settings_invalid` | `main.rs:230-238` | **升级版本号会让老用户已存的窗口几何整体作废**：现有新增字段一律用 `#[serde(default)]` 且把 `settings_version()` 保持为 1，计时字段照此办理 |
-| 写盘 helper 与 `WindowSettings` 类型耦合 | `write_window_settings(path, &settings)`（`main.rs:184`） | 泛化成按类型写 JSON 的 helper，或明确另建一份；不要为省事把计时字段塞进 `window.json` |
+- 不新增后端命令、不进 `window.json`、不进任何 Rust 设置文件。它和接口缩放、主题
+  是同一类偏好，`localStorage` 是**正确位置**而不是妥协：已有先例
+  `src/font.ts:18,26` 与 `src/views/settings.ts:239-242`，同样是“非法值拒绝并保留原值”
+  的形状（`font.ts` 里已有 clamp）。
+- “只维护一个计时器”约束的是前端：不得为文件区、图表区、活动文本各起一个
+  `setInterval`。持有这个 interval 的模块必须在实现说明里点名，并且它的
+  `dispose`（同 B03）必须清掉它——否则切换 Tab 或关闭仓库后计时器仍在推进文本，
+  这正是 B03 存在的原因，C04/C05 是它的第一个真实用户。
+- C01 的 `DEBOUNCE`、最大等待、`POLL_INTERVAL` 保持后端常量，**不接受这个设置值**。
+  两个旋钮的不对称关系必须写进实现说明，避免后来者“顺手”把它们接成同一个：
+  用户设 60 秒不得让面板的 Git 数据陈旧到 60 秒，设 1 秒也不得变成每秒一次 Git 读。
 
-不放进 `window.json` 的理由是失败牵连：该文件的校验把“窗口尺寸非法”和“版本不匹配”
-判成同一种错误，一个只描述窗口的文件名也解释不了为什么计时值非法会让窗口几何一起
-被丢弃。因此 C05 用同目录下另一个具名文件，沿用 `session.rs` 里
-`RECENT_SCHEMA_VERSION` 的“模块内常量 + 不匹配即拒绝”形状（`session.rs:382-420`）。
+顺带记录一处本次不涉及、但下一个真正需要后端持久化的设置一定会踩的迁移陷阱：
+`main.rs:230-238` 在读 `window.json` 时把 `schema_version != settings_version()`
+判成 `settings_invalid`，也就是说**升版本号会让老用户已存的窗口几何整体作废**；
+现有新增字段一律用 `#[serde(default)]` 而把 `settings_version()` 保持为 1
+（`main.rs:148-166`）。写盘 helper 与 `WindowSettings` 类型耦合
+（`write_window_settings`，`main.rs:184`），要复用就得先泛化成按类型写 JSON 的 helper；
+另外该文件的校验把“窗口尺寸非法”和“版本不匹配”判成同一种错误，
+一个只描述窗口的文件名也解释不了别的偏好，因此届时应当另建具名文件，
+沿用 `session.rs:382-420` 里 `RECENT_SCHEMA_VERSION` 的“模块内常量 + 不匹配即拒绝”形状。
 
-### 4.2 运行时生效路径（不要假设改一个 Duration 就即时生效）
+### 4.2 若某个值真要接到后端环路，生效路径只有两条
 
-`run_loop` 在进入循环**之前**就算好了 `tick` 与 `next_poll`
-（`watch.rs:74-75`），而 `supervisor` 把 `DEBOUNCE / POLL_INTERVAL / HEARTBEAT`
-三个常量硬编码传进去（`watch.rs:230-236`）。因此设置改动只有一条诚实的生效方式：
-经由已有的 `watch::restart`（`watch.rs:278`）重建 supervisor，或让环路每轮重读共享值——
-两者都要在实现说明里写明是哪一个。若选择重建，需要一并说明正在进行的有界刷新
-如何与新旧两个环路交接（`WatchState` 只保证旧线程在一个心跳内自退，不保证有序）。
+`run_loop` 在进入循环**之前**就算好了 `tick` 与 `next_poll`（`watch.rs:74-75`），
+而 `supervisor` 把 `DEBOUNCE / POLL_INTERVAL / HEARTBEAT` 三个常量硬编码传进去
+（`watch.rs:230-236`）。所以“传一个新 Duration 进去就即时生效”是不成立的：
+只有经由已有的 `watch::restart`（`watch.rs:278`）重建 supervisor，或让环路每轮重读
+共享值。选择重建还要说明正在进行的有界刷新如何与新旧两个环路交接
+（`WatchState` 只保证旧线程在一个心跳内自退，不保证有序）。
+按 §4.1，C05 不走这条路；这一段是为了让下一次有人想走时不必重新发现。
 
-还有一个跨任务的等式必须固定：设计给 C01 的“最长等待”兜底与用户可设的计时间隔
-不能是两个互不知情的旋钮。若 `MAX_WAIT` 独立于设置值，用户把间隔调到 1 秒后，
-静止仓库仍按另一个常量兜底刷新，验收场景“改小间隔后刷新更频繁”就会失败。
-实现时把 `MAX_WAIT` 直接取为该设置值（或写出明确关系式），并在测试里同时驱动两端。
+### 4.3 活动状态不得挂进快照
+
+`SnapshotView` 是 `publish` 的唯一载荷，而 `publish` 需要一个完整的 `Capture`
+（`PathTable` + 视图，`session.rs:237-261`）。把活动状态塞进快照会强制两件事之一：
+每次索引变化都配一次 Git 捕获（与 §1.1 的“免 Git 读增量更新”直接矛盾），
+或者造一次没有捕获的发布（破坏“快照即一次捕获”的既有不变量，并让 `version`
+与文件寻址之间的关系变得可疑）。因此活动状态走**独立事件通道**，载荷直接取设计里
+已经定形的 `ActivityView`（设计 §4.1：`sessionId`、`generation`、
+`latestModifiedAt`、`observedAt`、`state`、可选显示名与错误原因，
+`state` 至少区分 scanning/ready/empty/partial/stale/unavailable），
+前端按 `sessionId + generation` 丢弃迟到的旧代次；计时组件不得仅凭
+`latestModifiedAt` 为 null 猜原因。
+
+接线点现状：全局 `listen` 只有两条——`repo-refreshed` 与 `watch-status`
+（`main.ts:295-296`），后者已经带自己的状态形状。C04 是第三条，
+必须落在 B03 的按域订阅上；如果实现时图省事写成又一个全局 `render`，
+“静止时计时 tick 不重绘文件列表与图表”这条就自动失效，且现有测试不会报错。
+
+反过来，纯“多久以前”的文本推进不需要后端参与：`observedAt` 一到，
+前端按设置值重算文本即可。区分这两类是 C04 的核心：
+**索引变了才发事件，时钟推进只改文本。**
 
 ## 5. C01 环路原型实测（一次性 /tmp crate，非交付代码）
 
