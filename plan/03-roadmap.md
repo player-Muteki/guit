@@ -37,7 +37,7 @@ D 的后端夹具、G 的窗口 spike 可以在 C 期间按依赖穿插。任何
 | B01 | `state.ts`/`shell.ts`/`main.ts`：main/settings；欢迎内容作为 main 的空状态；更新 railModel/快捷键 | 任意状态只存在两个顶级 Tab，Settings 无仓库可用 |
 | B02 | 提取 `views/changes.ts` 和 `views/history.ts` 为同屏组件，新增 mainPanel 组合；CSS 分隔/滚动/焦点 | 真实文件列表和历史同时可见；不以 mock 数据交付；草稿、选择不随刷新丢失 |
 | B03 | 建立组件 dispose 和按域订阅；旧视图停止初始化/自动查询 | 不再一轮 snapshot 读取全部高级列表；Tab 往返不增加 timer/listener 数量 |
-| B04 | 清理 welcome 克隆、shell 同步、remotes 页面、强推/发布/认证重试、submodule 下载入口；核对 `main.rs` invoke 注册与事件路由；阻止 partial clone 隐式取对象 | 核心功能离线可用；直接调用已退出的 IPC 也不可用；本地 refs 可读，缺对象不联网 |
+| B04 | 清理 welcome 克隆、shell 同步、remotes 页面、强推/发布/认证重试、submodule 下载入口；核对 `main.rs` invoke 注册与事件路由；阻止 partial clone 隐式取对象。每一对“UI 入口 + 命令注册”必须在**同一次改动**里两侧一起走：`ipc-surface.mjs` 剥掉注释后按带引号字面量匹配，分两步删时中间那一步必然报孤儿命令（一个实测样本见 [A02 门禁基线](08-gate-baseline-a02.md) 第 7.2 节） | 核心功能离线可用；直接调用已退出的 IPC 也不可用；本地 refs 可读，缺对象不联网 |
 | B05 | 建立 sessionId/请求代次；定义数据域接口；更新 `types.ts`、session/main 命令和 IPC 测试 | 两个具有相同 HEAD 的仓库切换后旧请求不污染新会话 |
 | B06 | 更新布局和无障碍探针；迁移 Ctrl/Cmd+1/2、焦点返回目标 | 340×400/420×640 下主要操作可达；原先 focusRail 的调用有有效新目标 |
 
