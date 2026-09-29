@@ -28,6 +28,21 @@ is the record of what is not verified.
   gradients into the nodes, and a softly shaded cream surface.
 - Softened the icon's diamond shoulders and branch curves, tightened the
   crossing gap, and lengthened the color transitions between nodes and strings.
+- The panel has two pages — Main and Settings — in a tab strip at the right of
+  the app bar, and the changes area and the current branch's graph share one
+  page instead of being two of the seven views an activity rail switched
+  between. The repository entry is Main's empty state, and the branch picker is
+  a layer over Main rather than a page of its own. `Ctrl/Cmd+1` and `+2` reach
+  the two pages; the old `+3`…`+7` view switches are gone.
+- Stash, worktree and submodule management and remote management no longer have
+  a page. Their commands stay registered while their entry points are retired in
+  the open, so nothing is reachable by accident.
+
+### Fixed
+
+- The hand-drawn icons are drawn as strokes again. The stylesheet targeted an
+  icon inside an icon, which never matched the single `svg.icon` each glyph is,
+  so every icon fell back to a filled black shape.
 
 ## [0.0.1] - 2026-09-27
 

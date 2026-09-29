@@ -25,7 +25,7 @@ export interface StashDeps {
 }
 
 export interface StashView {
-  descriptor: { id: "stash"; element: HTMLElement };
+  element: HTMLElement;
   sync(): void;
   render(): void;
 }
@@ -151,5 +151,5 @@ export function createStashView(deps: StashDeps): StashView {
     }
   });
 
-  return { descriptor: { id: "stash", element }, sync, render };
+  return { element, sync, render };
 }

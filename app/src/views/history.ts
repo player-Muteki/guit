@@ -54,7 +54,7 @@ export interface HistoryDeps {
 }
 
 export interface HistoryView {
-  descriptor: { id: "history"; element: HTMLElement };
+  element: HTMLElement;
   sync(): void;
   render(): void;
 }
@@ -748,5 +748,5 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     if (commits.length > 0) renderRows();
   };
 
-  return { descriptor: { id: "history", element }, sync, render };
+  return { element, sync, render };
 }

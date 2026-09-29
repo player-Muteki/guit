@@ -46,7 +46,7 @@ export interface ChangesDeps {
 }
 
 export interface ChangesView {
-  descriptor: { id: "changes"; element: HTMLElement };
+  element: HTMLElement;
   sync(): void;
   render(): void;
 }
@@ -457,5 +457,5 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     renderFileRows();
   });
 
-  return { descriptor: { id: "changes", element }, sync, render };
+  return { element, sync, render };
 }

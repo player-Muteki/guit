@@ -394,10 +394,11 @@
    breakpoint, so a rule never has to know which breakpoint it is in. */
 
 :root {
-  /* Chrome heights. The activity rail is the tallest fixed element, and it
-     holds seven items plus a badge, so it is the first thing to give. */
-  --rail-width: 2.5rem;
-  --rail-item-size: 2.1rem;
+  /* Chrome heights. The tab strip lives inside the app bar, so its item is
+     the tallest thing the bar has to fit; a short window shrinks it before it
+     shrinks the bar. */
+  --tab-min-width: 4rem;
+  --tab-item-size: 2.1rem;
   --appbar-height: 2.5rem;
   --statusbar-height: 1.5rem;
   --gutter: 0.75rem;      /* horizontal view padding */
@@ -433,8 +434,8 @@
     --statusbar-height: 1.25rem;
     --gutter: 0.5rem;
     --gutter-tight: 0.25rem;
-    --rail-width: 2.25rem;
-    --rail-item-size: 1.85rem;
+    --tab-min-width: 3.25rem;
+    --tab-item-size: 1.6rem;
     --detail-cap: 22vh;
     --list-cap: 34vh;
   }

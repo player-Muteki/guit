@@ -38,7 +38,7 @@ export interface RemotesDeps {
 }
 
 export interface RemotesView {
-  descriptor: { id: "remotes"; element: HTMLElement };
+  element: HTMLElement;
   sync(): void;
   render(): void;
   run(action: SyncAction): void;
@@ -394,5 +394,5 @@ export function createRemotesView(deps: RemotesDeps): RemotesView {
   authRetryButton.addEventListener("click", () => consumeCredentialRetry()?.());
   forcePushButton.addEventListener("click", () => void deps.preview.request("forcePush", {}, null));
 
-  return { descriptor: { id: "remotes", element }, sync, render, run };
+  return { element, sync, render, run };
 }

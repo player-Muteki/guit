@@ -39,7 +39,7 @@ export interface BranchesDeps {
 }
 
 export interface BranchesView {
-  descriptor: { id: "branches"; element: HTMLElement };
+  element: HTMLElement;
   sync(): void;
   render(): void;
   /** Reveals the separate force-delete confirmation after `git branch -d` refused. */
@@ -450,7 +450,7 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
   });
 
   return {
-    descriptor: { id: "branches", element },
+    element,
     sync,
     render,
     offerForceDelete: offerBranchForceDelete,

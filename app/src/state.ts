@@ -14,24 +14,12 @@ import type {
   Toast,
 } from "./types";
 
-export type ViewId =
-  | "changes"
-  | "history"
-  | "branches"
-  | "stash"
-  | "remotes"
-  | "worktrees"
-  | "settings";
+// The panel has exactly two top-level destinations. Everything else that
+// looks like a page — the repository entry, the branch overlay, a confirm
+// dialog — is a state inside one of these two, never a third tab.
+export type ViewId = "main" | "settings";
 
-export const VIEW_ORDER: readonly ViewId[] = [
-  "changes",
-  "history",
-  "branches",
-  "stash",
-  "remotes",
-  "worktrees",
-  "settings",
-];
+export const VIEW_ORDER: readonly ViewId[] = ["main", "settings"];
 
 export type PendingPreview =
   | {
@@ -150,7 +138,7 @@ let snapshot: SnapshotView | null = null;
 let write = false;
 let tool = false;
 let preview: PendingPreview | null = null;
-let view: ViewId = "changes";
+let view: ViewId = "main";
 let watchMode: "none" | "poll" | "events" = "none";
 let watchFailed = false;
 let status: StatusLine = { kind: "idle", message: "" };

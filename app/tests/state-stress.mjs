@@ -53,7 +53,7 @@ function resetState() {
   setWriteRunning(false);
   setToolRunning(false);
   setPendingPreview(null);
-  setActiveView("changes");
+  setActiveView("main");
   setWatchMode("none");
   setStatus("", "idle");
   setForcePushReady(false);
@@ -69,14 +69,14 @@ test("the fresh state matches a cold start", () => {
   assert.equal(isWriteRunning(), false);
   assert.equal(isToolRunning(), false);
   assert.equal(pendingPreview(), null);
-  assert.equal(activeView(), "changes");
+  assert.equal(activeView(), "main");
   assert.equal(watchStatus(), "none");
   assert.deepEqual(statusLine(), { kind: "idle", message: "" });
   assert.deepEqual(toastStack(), []);
   assert.equal(hasCredentialRetry(), false);
   assert.equal(isForcePushReady(), false);
-  assert.equal(VIEW_ORDER.length, 7);
-  assert.equal(new Set(VIEW_ORDER).size, 7, "view ids are unique");
+  assert.equal(VIEW_ORDER.length, 2);
+  assert.equal(new Set(VIEW_ORDER).size, 2, "view ids are unique");
 });
 
 test("a snapshot only moves forward", () => {
@@ -136,7 +136,7 @@ test("every setter that repaints the window is guarded against no-op writes", ()
   setToolRunning(false);
   setWatchMode("none");
   setStatus("", "idle");
-  setActiveView("changes");
+  setActiveView("main");
   setPendingPreview(null);
   setForcePushReady(false);
   assert.deepEqual(kinds, [], "no-ops must not notify");

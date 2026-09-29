@@ -40,6 +40,7 @@ import { createRemotesView } from "./views/remotes";
 import { createWorktreesView } from "./views/worktrees";
 import { createSettingsView } from "./views/settings";
 import { createWelcomeView } from "./views/welcome";
+import { createMainPanel } from "./views/mainPanel";
 
 const app = document.querySelector<HTMLElement>("#app");
 if (!app) throw new Error("Application root is missing");
@@ -60,7 +61,7 @@ const showError = (error: unknown): void => {
 // closure only runs once a dialog closes, long after `createShell` returns.
 let shell: Shell;
 
-const preview = createPreviewController(showError, () => shell.focusRail());
+const preview = createPreviewController(showError, () => shell.focusTabs());
 const askpass = createAskpassDialog(showError);
 const toasts = createToastLayer();
 document.body.append(askpass.element, toasts.element);
@@ -143,13 +144,15 @@ const history = createHistoryView({
   onError: showError,
   onBranchFromCommit(oid) {
     branchStartOid = oid;
-    setActiveView("branches");
+    setActiveView("main");
+    shell.openOverlay();
     branches.focusCreateField();
     setStatus(`New branch will start at ${oid.slice(0, 10)} — enter a name and press Create branch.`);
   },
   onTagFromCommit(oid) {
     tagStartOid = oid;
-    setActiveView("branches");
+    setActiveView("main");
+    shell.openOverlay();
     branches.focusCreateField();
     setStatus(`New tag will point at ${oid.slice(0, 10)} — enter a name and press Create tag.`);
   },
@@ -165,7 +168,7 @@ shell = createShell({
   refresh: () => void refreshSession(false),
   closeRepository: () => void closeRepository(),
   clone: () => {
-    setActiveView("changes");
+    setActiveView("main");
     setStatus("Use the welcome view to clone a repository.");
   },
   commit: () => shell.focusCommit(),
@@ -177,16 +180,19 @@ shell = createShell({
   sync: (action) => remotes.run(action),
 });
 
+// The main panel and the branch overlay are the only two places a repository
+// view goes: the files and the graph share one page, the picker covers it.
+// The modules left below are still read on a snapshot, but they no longer
+// have a page of their own.
 shell.registerView({ id: "welcome", element: welcome.element });
-for (const view of [changes, history, branches, stash, remotes, worktrees]) {
-  shell.registerView(view.descriptor);
-}
+shell.registerView(createMainPanel(changes.element, history.element));
 shell.registerView(settings.descriptor);
+shell.registerOverlay(branches.element);
 
 app.replaceChildren(
   el("div", { class: "shell" }, [
     shell.appbar,
-    el("div", { class: "shell-body" }, [shell.rail, shell.stage]),
+    el("div", { class: "shell-body" }, [shell.stage]),
     shell.statusbar,
   ]),
 );
@@ -305,12 +311,11 @@ window.addEventListener("keydown", (event) => {
   } else if (key === "o") {
     event.preventDefault();
     void pickRepository();
-  } else if (key >= "1" && key <= "7") {
+  } else if (key === "1" || key === "2") {
     event.preventDefault();
-    const next = VIEW_ORDER[Number(key) - 1];
-    // Only Settings is meaningful before a repository is open; the rail
-    // greys the rest out, so the shortcut must not jump past that.
-    if (next === "settings" || isSessionActive()) setActiveView(next);
+    // Both pages answer the shortcut from a cold start: Main is the empty
+    // state with nothing to open, Settings never needed a repository.
+    setActiveView(VIEW_ORDER[Number(key) - 1]);
   } else if (key === "=" || key === "+") {
     event.preventDefault();
     applyFontPx(currentFontPx() + 1);

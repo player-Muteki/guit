@@ -132,6 +132,7 @@ export function icon(name: keyof typeof ICONS, size = 16): SVGSVGElement {
 // Diff -- carries the word.
 const ICONS = {
   changes: ["M2 4h5v5H2z", "M9 4h5v5H9z", "M2 11h5v3H2z", "M9 11h5v3H9z"],
+  main: ["M2 3h12v4.5H2z", "M2 9.5h12v4H2z"],
   history: ["M8 3a5 5 0 1 1-4.6 3", "M3 3v3h3", "M8 5.5V8l2 1.5"],
   branches: ["M4 3v10", "M4 6h4a2 2 0 0 1 2 2v0", "M12 3v3a2 2 0 0 1-2 2H4", "M4 13a1.5 1.5 0 1 0 0 .01"],
   stash: ["M2 4h12v3H2z", "M3 7v6h10V7", "M6 9.5h4"],

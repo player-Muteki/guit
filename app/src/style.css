@@ -83,7 +83,11 @@ body {
 .icon-btn:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
 .icon-btn:disabled { opacity: 0.4; cursor: default; }
 .icon-btn.active { color: var(--accent); background: var(--accent-soft); }
-.icon .icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+/* The glyph paths are outlines, so they are drawn as strokes: an unset `fill`
+   defaults to black and turns every 16px icon into a solid blob. The selector
+   has to name the element `icon()` actually builds -- one `svg.icon`, not an
+   icon inside an icon -- or the rule matches nothing and the blobs come back. */
+svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
 /* --- buttons --- */
 .btn {
@@ -159,47 +163,52 @@ body {
 /* --- shell body --- */
 .shell-body { display: flex; flex: 1 1 auto; min-height: 0; }
 
-.rail {
+/* --- tabs --- */
+/* The two pages sit at the right end of the app bar, so everything under the
+   app bar belongs to whichever one is selected. A tab keeps its label while
+   the window has room for a word and falls back to its icon when it does not;
+   the accessible name is on the button either way. */
+.tabs {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 0.15rem;
-  width: var(--rail-width);
-  padding-top: 0.35rem;
-  background: var(--surface-rail);
-  border-right: 1px solid var(--line);
+  gap: 0.1rem;
+  padding: 0.1rem;
   flex: 0 0 auto;
+  background: var(--surface-rail);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
 }
-.rail-item {
+.tab-item {
   position: relative;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--rail-item-size);
-  height: var(--rail-item-size);
+  gap: 0.3rem;
+  min-width: var(--tab-min-width);
+  height: var(--tab-item-size);
+  padding-inline: 0.45rem;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-faint);
+  font: inherit;
+  font-size: var(--text-sm);
   cursor: pointer;
   transition: color var(--transition), background var(--transition);
 }
-.rail-item:hover { color: var(--text); }
-.rail-item.selected { color: var(--accent); background: var(--surface-active); }
-.rail-item.selected::before {
-  content: "";
-  position: absolute;
-  left: -0.5rem;
-  top: 0.3rem;
-  bottom: 0.3rem;
-  width: 2px;
-  background: var(--accent);
-  border-radius: 0 2px 2px 0;
+.tab-item:hover { color: var(--text); }
+.tab-item.selected { color: var(--accent); background: var(--surface-active); }
+.tab-label { white-space: nowrap; }
+@media (max-width: 560px) {
+  /* Icon-only tabs: the accessible name is still on the button, and the two
+     pages are told apart by their glyph and the selected colour. */
+  .tab-label { display: none; }
+  .tab-item { min-width: 0; }
 }
-.rail-badge {
+.tab-badge {
   position: absolute;
-  right: -0.2rem;
-  bottom: -0.1rem;
+  top: -0.15rem;
+  right: -0.15rem;
   min-width: 0.9rem;
   padding: 0 0.2rem;
   border-radius: 999px;
@@ -209,9 +218,32 @@ body {
   line-height: 0.9rem;
   text-align: center;
 }
-.rail-badge[hidden] { display: none; }
+.tab-badge[hidden] { display: none; }
 
 .stage { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; position: relative; }
+
+/* --- main panel --- */
+/* The changes area and the history of the current branch share one page and
+   are visible together, so neither region is a page of its own. They split the
+   page by height rather than by content, and each keeps its own scroller. */
+.main-panel > .view-body { flex: 1 1 0; min-height: 0; }
+
+/* --- overlay --- */
+/* The branch picker covers the panel instead of becoming a third page. It is
+   not a modal: the tab strip and the status bar stay reachable while it is
+   up, and Escape walks back out through it. */
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-app);
+  border-top: 1px solid var(--line);
+}
+.overlay[hidden] { display: none; }
+.overlay:focus { outline: none; }
+.overlay > .view-body { flex: 1 1 auto; }
 
 /* --- views --- */
 .view { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; background: var(--surface-app); }
@@ -688,7 +720,7 @@ body {
    worst case: 480px of viewport is only 20rem. Everything that claims a fixed
    pixel share of the width has to give some of it back there. */
 @media (max-width: 480px) {
-  .rail-item { width: 1.85rem; height: 1.85rem; }
+  .tab-item { padding-inline: 0.3rem; }
   .appbar .icon-btn { width: 1.5rem; height: 1.5rem; }
   .file-status { min-width: 2.25ch; }
   .file-name, .ref-name { min-width: 6ch; }

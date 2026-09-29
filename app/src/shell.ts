@@ -1,8 +1,8 @@
 // The application shell: app bar (repo, branch chip, sync menu, commit,
-// pin), the activity rail that switches views, and the status bar (running
-// operation, watch mode, interface zoom). The shell owns no Git semantics —
-// every action is injected by `main.ts` so the views stay the only place
-// that talks to the backend.
+// pin), the two-page tab strip, the overlay the branch picker borrows, and
+// the status bar (running operation, watch mode, interface zoom). The shell
+// owns no Git semantics — every action is injected by `main.ts` so the views
+// stay the only place that talks to the backend.
 
 import { el, icon } from "./dom";
 import {
@@ -48,18 +48,25 @@ export interface ShellActions {
 
 export interface Shell {
   readonly appbar: HTMLElement;
-  readonly rail: HTMLElement;
   readonly statusbar: HTMLElement;
   readonly stage: HTMLElement;
   registerView(descriptor: ViewDescriptor | { id: "welcome"; element: HTMLElement }): void;
+  /**
+   * Puts the one page-sized overlay's content into the shell. The branch
+   * picker is a temporary layer inside Main rather than a third tab, so the
+   * shell hosts it and decides when it is on screen; it never reads it.
+   */
+  registerOverlay(content: HTMLElement): void;
+  openOverlay(): void;
+  closeOverlay(): void;
   focusCommit(): void;
   /**
-   * Focuses the activity-rail item for the view on screen. This is where the
-   * confirm dialog sends focus when the button that opened it was rebuilt
-   * while the dialog was up: the rail is chrome, so it is never replaced, and
-   * it is a place the user can navigate from.
+   * Focuses the tab item for the page on screen. This is where the confirm
+   * dialog sends focus when the button that opened it was rebuilt while the
+   * dialog was up: the tab strip is chrome, so it is never replaced, and it
+   * is a place the user can navigate from.
    */
-  focusRail(): void;
+  focusTabs(): void;
   /** Repaints only the status bar. See `main.ts`: a streamed progress line
    * must not cost a render of every view. */
   renderStatus(): void;
@@ -200,7 +207,11 @@ export function createShell(actions: ShellActions): Shell {
     if (!(event.target as HTMLElement).closest(".appbar")) closeMenus();
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeMenus();
+    if (event.key !== "Escape") return;
+    // Escape walks down the stack: an app-bar menu first, then the overlay,
+    // and a modal dialog is never reached here because it cancels itself.
+    closeMenus();
+    closeOverlay();
   });
 
   moreButton.addEventListener("click", (event) => {
@@ -218,7 +229,10 @@ export function createShell(actions: ShellActions): Shell {
   closeButton.addEventListener("click", () => actions.closeRepository());
   commitButton.addEventListener("click", () => actions.commit());
   pinButton.addEventListener("click", () => actions.setOnTop(!isAlwaysOnTop()));
-  branchChip.addEventListener("click", () => setActiveView("branches"));
+  branchChip.addEventListener("click", () => {
+    setActiveView("main");
+    openOverlay();
+  });
 
   // --- sync menu (fetch / pull / push / publish) ---
   const syncMenu = el("div", { class: "menu", role: "menu", hidden: true });
@@ -253,25 +267,50 @@ export function createShell(actions: ShellActions): Shell {
   }
   appbar.append(syncMenu, pullMenu);
 
-  // --- rail ---
-  // Every item is built by the same loop, so no view can end up with a hint
-  // its siblings do not have (the first item had lost its shortcut marker).
-  const rail = el("nav", { class: "rail", "aria-label": "Views" });
-  const railButtons = new Map<ViewId, HTMLButtonElement>();
-  const badge = el("span", { class: "rail-badge", hidden: true });
+  // --- tabs ---
+  // Exactly two pages, both reachable from a cold start: Main is the panel
+  // (and the repository entry while no repository is open), Settings is the
+  // application. A tab is a button carrying `aria-current="page"`, which is
+  // how a screen reader and the harness both tell which page is on screen.
+  //
+  // The hint is static, so it is written once here rather than recomputed on
+  // every render: a live repository repaints many times a minute and the tab
+  // strip never changes with it.
+  const tabs = el("nav", { class: "tabs", "aria-label": "Pages" });
+  const tabButtons = new Map<ViewId, HTMLButtonElement>();
+  const badge = el("span", { class: "tab-badge", hidden: true });
   for (const id of VIEW_ORDER) {
-    const children: Array<HTMLElement | SVGSVGElement> = [icon(VIEW_ICONS[id])];
-    if (id === "changes") children.push(badge);
+    const children: Array<HTMLElement | SVGSVGElement> = [
+      icon(VIEW_ICONS[id]),
+      el("span", { class: "tab-label", text: VIEW_TITLES[id] }),
+    ];
+    if (id === "main") children.push(badge);
     const item = el("button", {
-      class: "rail-item",
+      class: "tab-item",
       type: "button",
       "aria-label": VIEW_TITLES[id],
-      title: railHint(id, VIEW_ORDER, isSessionActive()),
+      title: railHint(id, VIEW_ORDER),
     }, children);
     item.addEventListener("click", () => setActiveView(id));
-    railButtons.set(id, item);
-    rail.append(item);
+    tabButtons.set(id, item);
+    tabs.append(item);
   }
+  appbar.append(tabs);
+
+  // --- overlay ---
+  // The one layer that covers the stage: the branch picker opens here. It is
+  // not a page, so it has no tab, and it is not a dialog, because the user
+  // can still reach the tab strip while it is up.
+  const overlay = el("div", { class: "overlay", tabIndex: -1, hidden: true });
+  const closeOverlay = (): void => {
+    if (overlay.hidden) return;
+    overlay.hidden = true;
+    focusTabs();
+  };
+  const openOverlay = (): void => {
+    overlay.hidden = false;
+    overlay.focus();
+  };
 
   // --- status bar ---
   const statusText = el("span", { class: "status-text", role: "status" });
@@ -300,11 +339,11 @@ export function createShell(actions: ShellActions): Shell {
   });
 
   // --- view containers ---
-  // "welcome" is a pseudo-view: it has no rail slot and stands in for every
-  // repository-scoped view while no repository is open. `settings` is the one
-  // real view that does not need a repository (theme, zoom, external tools,
-  // environment and diagnostics are all application-level), so it stays
-  // reachable in the empty state.
+  // "welcome" is a pseudo-view: it has no tab and is the empty state of Main,
+  // never a page of its own. `settings` is the one real view that does not
+  // need a repository (theme, zoom, external tools, environment and
+  // diagnostics are all application-level), so it stays reachable in the
+  // empty state.
   const stage = el("div", { class: "stage" });
   const views = new Map<ViewId, ViewDescriptor>();
   let welcomeElement: HTMLElement | null = null;
@@ -347,21 +386,20 @@ export function createShell(actions: ShellActions): Shell {
     badge.hidden = pending === 0;
     badge.textContent = pending > 99 ? "99+" : String(pending);
 
-    for (const [id, item] of railButtons) {
+    for (const [id, item] of tabButtons) {
       const selected = id === active;
       item.classList.toggle("selected", selected);
       item.setAttribute("aria-current", selected ? "page" : "false");
-      // A greyed rail item is the honest signal that its view has nothing to
-      // show yet; Settings is exempt because it is application-level. The
-      // hint is recomputed from the model either way, so it never sticks to
-      // an item after a repository is opened.
-      if (id !== "settings") item.disabled = !session;
-      item.title = railHint(id, VIEW_ORDER, session);
     }
     for (const [id, view] of views) {
-      view.element.hidden = id !== active || (id !== "settings" && !session);
+      // The main panel is the one page with nothing to show before a
+      // repository is open, and the welcome state shows in its place.
+      view.element.hidden = id !== active || (id === "main" && !session);
     }
-    if (welcomeElement !== null) welcomeElement.hidden = session || active === "settings";
+    if (welcomeElement !== null) welcomeElement.hidden = session || active !== "main";
+    // Leaving Main leaves the layer that belongs to Main behind: a picker for
+    // a page that is not on screen must not cover Settings.
+    if (active !== "main") overlay.hidden = true;
 
     renderStatus();
   };
@@ -377,37 +415,51 @@ export function createShell(actions: ShellActions): Shell {
       return;
     }
     const title = VIEW_TITLES[descriptor.id];
-    const head = el("header", { class: "view-head" }, [
-      el("h1", { class: "view-title", text: title }),
-      el("p", { class: "view-subtitle", text: VIEW_HINTS[descriptor.id] }),
-    ]);
     descriptor.element.classList.add("view");
     descriptor.element.setAttribute("aria-label", title);
-    descriptor.element.prepend(head);
+    // Only Settings wears a page heading. The main panel fills its page with
+    // two regions that each name themselves, and repeating the tab's word
+    // above them costs a row the narrow window does not have.
+    if (descriptor.id === "settings") {
+      descriptor.element.prepend(
+        el("header", { class: "view-head" }, [
+          el("h1", { class: "view-title", text: title }),
+          el("p", { class: "view-subtitle", text: VIEW_HINTS[descriptor.id] }),
+        ]),
+      );
+    }
     stage.append(descriptor.element);
     views.set(descriptor.id, descriptor);
   };
 
+  const registerOverlay = (content: HTMLElement): void => {
+    content.hidden = false;
+    overlay.append(content);
+    stage.append(overlay);
+  };
+
   const focusCommit = (): void => {
-    setActiveView("changes");
-    const box = views.get("changes")?.element.querySelector<HTMLTextAreaElement>("#commit-message");
+    setActiveView("main");
+    const box = views.get("main")?.element.querySelector<HTMLTextAreaElement>("#commit-message");
     box?.focus();
   };
 
-  const focusRail = (): void => {
+  const focusTabs = (): void => {
     const current = activeView();
-    const item = railButtons.get(current) ?? railButtons.get("changes");
+    const item = tabButtons.get(current) ?? tabButtons.get("main");
     item?.focus();
   };
 
   return {
     appbar,
-    rail,
     statusbar,
     stage,
     registerView,
+    registerOverlay,
+    openOverlay,
+    closeOverlay,
     focusCommit,
-    focusRail,
+    focusTabs,
     renderStatus,
     render,
     dispose() { closeMenus(); },

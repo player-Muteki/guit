@@ -40,7 +40,7 @@ export interface WorktreesDeps {
 }
 
 export interface WorktreesView {
-  descriptor: { id: "worktrees"; element: HTMLElement };
+  element: HTMLElement;
   sync(): void;
   render(): void;
 }
@@ -284,5 +284,5 @@ export function createWorktreesView(deps: WorktreesDeps): WorktreesView {
   });
   updateAllButton.addEventListener("click", () => void runSubmoduleUpdate(null));
 
-  return { descriptor: { id: "worktrees", element }, sync, render };
+  return { element, sync, render };
 }

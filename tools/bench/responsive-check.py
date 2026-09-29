@@ -77,7 +77,7 @@ def main():
     # 2. The tokens those shares now run through actually exist, in both the
     #    base block and the short-window overrides.
     for token in ("--detail-cap", "--list-cap", "--gutter", "--gutter-tight",
-                  "--block-gap", "--rail-width", "--rail-item-size", "--splitter-size"):
+                  "--block-gap", "--tab-min-width", "--tab-item-size", "--splitter-size"):
         report.check(f"{token} is declared", token in token_css)
     for token in ("--detail-cap", "--list-cap", "--appbar-height", "--statusbar-height"):
         report.check(f"{token} is restated for a short window", token_css.count(token) >= 2,
@@ -99,8 +99,8 @@ def main():
                  combined[0] if combined else "e.g. min-width 1200px and max-height 460px")
 
     # 4. Fixed chrome is tokenised rather than typed in, so zoom moves it.
-    fixed = re.findall(r"(?:\.appbar|\.statusbar|\.rail-item|\.splitter)\s*\{[^}]*?height:\s*([\d.]+)px", stripped)
-    report.check("no fixed px height on the app bar, status bar, rail item or splitter",
+    fixed = re.findall(r"(?:\.appbar|\.statusbar|\.tab-item|\.splitter)\s*\{[^}]*?height:\s*([\d.]+)px", stripped)
+    report.check("no fixed px height on the app bar, status bar, tab item or splitter",
                  not fixed, " ".join(fixed))
 
     # 5. A px min-width on a text-bearing element is a floor the window cannot

@@ -112,7 +112,7 @@ export function createWelcomeView(deps: WelcomeDeps): { element: HTMLElement; re
       if (result.success) {
         cloneStatus.textContent = `${result.message} Opening ${result.target}…`;
         await deps.openRepository(result.target);
-        setActiveView("changes");
+        setActiveView("main");
       } else {
         cloneStatus.textContent = result.suggestion ? `${result.message} ${result.suggestion}` : result.message;
         if (result.residue) {
