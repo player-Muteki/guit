@@ -2,8 +2,11 @@
 
 调研日期：2026-09-29。基线提交：`2ca0403`。本文只固定 C01–C05 依赖的事实与决策依据，
 不是实现记录；`app/src-tauri/src/activity.rs`、`app/src/activityModel.ts` 在写作时仍不存在。
-自该提交起 `app/src-tauri/` 未再变动（`git log 2ca0403..HEAD -- app/src-tauri/` 为空），
-因此本文所有 Rust 行号在当前 HEAD 上仍然有效；前端行号随双 Tab 收敛已重新核对。
+自该提交起 `app/src-tauri/` 一度未变动，因此初稿的行号当时在 HEAD 上有效；仅本地收敛
+（`6d26df5`）之后 `repo.rs`、`write.rs`、`main.rs`、`submodules.rs` 都动了，**本文的
+Rust 行号已按那个提交重新核对过一遍**（`watch.rs`、`session.rs`、`runner.rs`、`model.rs`
+不在该提交里，行号未变）。行号是导航用的，任何时候都以符号名为准：改了签名或搬了函数，
+先按名字找，别信这里的数。前端行号随双 Tab 收敛已重新核对，同样只作导航。
 
 所有 Git 行为均在一次性临时仓库中实测（隔离 `GIT_CONFIG_GLOBAL`、`GIT_CONFIG_NOSYSTEM=1`），
 不触碰开发仓库。主机条件同 [A01 基线](05-baseline-a01.md)：Linux x86_64、Git 2.53。
@@ -48,7 +51,7 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 
 一个必须保持的既有事实：`repo::status_output` 带 `--no-optional-locks`，因为它测到
 普通 `git status` 会创建并删除 `.git/index.lock`，这些事件回流给 watcher 后一次真实改动
-会引发无限刷新（`repo.rs:353-357`，并有测试 `status_output_never_acquires_the_index_lock`）。
+会引发无限刷新（`repo.rs:365-369`，并有测试 `status_output_never_acquires_the_index_lock`）。
 新增的元数据读取同样不得取索引锁，也不得自己成为事件源。
 
 ### 1.1 保留路径与种类的真实用途（防止按域失效被做成一张矩阵）
@@ -57,7 +60,7 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 `repo / branch / files / operation` 四项（`session.rs:175-186`），
 `capture_inner` 的全部内容是**一次 `git status` 加一次 `inflight::detect` 文件读**
 （`session.rs:200-223`）；分支列表、tag、stash、worktree、history 页都是独立的按需命令
-（`main.rs:1659-1675`：`history_page`、`list_refs`、`stash_list`），不在快照里，
+（`main.rs:1232-1245`：`history_page`、`list_refs`、`stash_list`），不在快照里，
 也不由 watcher 触发。
 
 因此“事件携带种类与路径”不是为了在后端若干 Git 读之间做选择——后端只有一个捕获单元，
@@ -133,7 +136,7 @@ quiet period 得以走完。缺失的那条断言是“事件永不停时刷新�
 | 干净，但把一个已跟踪文件的 mtime 推到未来（索引 stat 缓存过期，正是 Git 最想顺手写索引的那个状态） | 141 | **0** | `--no-optional-locks` 覆盖的正是这一档，不是只覆盖“新鲜”那一档 |
 | 同一过期状态，**去掉**该参数 | 174 | **15** = 6 create + 5 remove + 3 modify-name + 1 modify-data | 每次捕获自带一对 `index.lock` 事件 |
 
-前两行是新增节奏的前置条件；第三行是 `repo.rs:353-357` 那次历史测量的现场复现（Git 2.53、
+前两行是新增节奏的前置条件；第三行是 `repo.rs:365-369` 那次历史测量的现场复现（Git 2.53、
 tmpfs，与它记录的同一类文件系统）。顺带量到的一件事：**141 条全是 Access**，
 即一次 `git status` 大约触碰 23 个文件，而 `refresh_worthy` 恰好把整类丢掉。
 因此本节下面那条“不得把 `Close(Write)` 升格为触发源”的规则，保护的是一个**此刻成立、
@@ -271,7 +274,7 @@ git 锁文件的 `Access(Close(Write))` 就在同一批事件里。C01 保留事
   不得因为“算出来和上次一样”就判定这次更新没发生或退化成重枚举。
 
 还有一条接线要求来自验收侧的“手动重试可恢复”：溢出/降级状态必须能被**既有的手动刷新**
-清除——`main.rs:115` 的 `refresh_repository` 与 watcher 触发走的是同一条
+清除——`main.rs:110` 的 `refresh_repository` 与 watcher 触发走的是同一条
 `session::refresh` → `publish` 路径，复位就挂在发布成功之后。不得为它新增按钮、
 新命令或新的前端调用面。
 
@@ -338,7 +341,7 @@ git 锁文件的 `Access(Close(Write))` 就在同一批事件里。C01 保留事
 这一失败已经有先例可循：submodule 视图读取的 `ls-files --stage` 起初共用 64 KB，
 于是约一千个文件以上的仓库就报“列表过大”（包括根本没有 submodule 的仓库），后来改为
 在模块内定义具名常量 `GITLINK_OUTPUT_LIMIT = runner::STATUS_OUTPUT_LIMIT`
-（`submodules.rs`），`docs/known-limitations.md` 记录了这次修正。活动枚举沿用同一形状：
+（`submodules.rs:41`），`docs/known-limitations.md` 记录了这次修正。活动枚举沿用同一形状：
 在自己的模块里定义一个具名上限、取 32 MB 档、注释说明它随**文件数**而非提交数增长。
 不采用“按条目数截断”，因为 `runner` 的截断按字节判定；超长 UTF-8 深路径同样按字节计。
 超过该上限时保持失败关闭，界面按 §4 的 `unavailable` 呈现。
@@ -408,7 +411,7 @@ git 锁文件的 `Access(Close(Write))` 就在同一批事件里。C01 保留事
 1. 候选集合在 `activity.rs` 内部以**字节 / `OsStr`** 形态存活，`stat` 走字节路径。
    既有先例够用：`status.rs` 把路径存成 `Vec<u8>`（`raw_path()`），
    `PathTable` 按原始字节映射回 `FileId`（AGENTS.md 的“不能逆向的显示名”规则）。
-2. lossy 只允许出现在**显示名**上，先例是 `model.rs:203` 与 `repo.rs:324 to_display`；
+2. lossy 只允许出现在**显示名**上，先例是 `model.rs:203` 与 `repo.rs:336 to_display`；
    `ActivityView` 的可选显示名因此同样不可逆，不得被前端拿去寻址。
 3. §2.2 的输出上限必须以 `-z` 的原始字节计。引用形态把每个非 ASCII 字节从 1 字节
    变成 4 字节（`\344`）再加首尾引号：实测 `中文.txt` 从 10 字节变 18 字节。
@@ -423,7 +426,7 @@ Git 按字节序输出（`bad\xff` < `plain` < `quo"te` < `中文`），而最�
 夹具：`sub/` 里有一个已跟踪且已修改的文件加一个新文件，`ok/` 里有一个新文件，
 然后 `chmod 000 sub`。用 guit 实际下发的那条形
 （`status --porcelain=v2 -z --branch --untracked-files=all --ignored=no`，
-`repo.rs:362-371`）实测：
+`repo.rs:373-383`）实测：
 
 | 读取 | 退出码 | stdout | stderr |
 | --- | --- | --- | --- |
@@ -435,7 +438,7 @@ Git 按字节序输出（`bad\xff` < `plain` < `quo"te` < `中文`），而最�
 
 1. **可分辨的状态只能靠 stderr。** 好消息是部分数据真的可用（`ok/` 照样报出），
    坏消息是 `repo::status_output` 现在只 gate 退出码与截断，然后
-   `Ok(output.stdout)` 把 stderr 丢掉（`repo.rs:383-395`）。照这个 helper 原样复用，
+   `Ok(output.stdout)` 把 stderr 丢掉（`repo.rs:387-407`）。照这个 helper 原样复用，
    活动索引会进入 `ready`，而面板对 `sub/` 的判断来自一次根本没读到的读取。
    C02 因此需要 helper 交出 stderr（或一个“有警告”的标志）。这是 §1.1 之外第二处
    “阶段 C 必须改既有后端形状”的地方，而且改的是**共享**路径：同一个洞今天就让
@@ -477,7 +480,11 @@ Git 按字节序输出（`bad\xff` < `plain` < `quo"te` < `中文`），而最�
 由此得到三条实现规则：
 
 1. **分类只看 stderr 是否为空，不看文本。** 同一个失败的 stderr 在 zh_CN 下 79 B、
-   在 `LC_ALL=C` 下 90 B，文本随 `LC_*`/gettext 变化。任何“按 `warning:` 前缀过滤”
+   在 `LC_ALL=C` 下 90 B，文本随 `LC_*`/gettext 变化。补一条边界：
+   `user_git_command`（`repo.rs:31-45`）**已无条件**设 `LC_ALL=C`，所以 shipped 路径
+   拿到的永远是那 90 B 的 C 文案，zh_CN 那一读是“环境默认下会看到什么”的对照，
+   不是 guit 的现场。规则本身不因这个放宽，反而更硬：文案仍然是 Git 的输出，
+   随 Git 版本变，而 guit 这边连语言都不控制。任何“按 `warning:` 前缀过滤”
    “从 stderr 里抠出读不到的目录名”都会随语言环境失效——而且实测第一行本来就
    **没有** `warning:` 前缀（它是 git 在 diff-index 阶段写的裸行）。所以
    `partial` 的判据是 rc=0 ∧ stderr 非空，需要告诉用户“哪一部分没读到”时，
@@ -490,8 +497,8 @@ Git 按字节序输出（`bad\xff` < `plain` < `quo"te` < `中文`），而最�
 3. **索引损坏那一支已经在正确的一侧，无需为它加分支。** `.git/index` 不可读返回
    128 而非 0，走现有 `git_status_failed`；§2.5 第 3 条的 `unavailable` 覆盖它。
 
-helper 改动的影响面实测清点：`repo::status_output`（`repo.rs:344`）的非测试调用点只有两个
-——`session.rs:205`（快照 capture）与 `write.rs:992`（写前 recheck）。两处今天都在丢 stderr，
+helper 改动的影响面实测清点：`repo::status_output`（`repo.rs:356`）的非测试调用点只有两个
+——`session.rs:205`（快照 capture）与 `write.rs:885`（写前 recheck）。两处今天都在丢 stderr，
 所以两处都会把“目录读不动”当成“读完了”：快照把不可读目录显示成无变化，recheck 把同一个
 不完整集合当成绑定事实去确认。签名因此从 `Result<Vec<u8>, ProbeError>` 改为同时交出 stderr
 是**两个调用点各自要决定如何使用它**的改动，而不是一个内部重构；C02 的实现提交要么同时给出
@@ -557,6 +564,15 @@ helper 改动的影响面实测清点：`repo::status_output`（`repo.rs:344`）
 
 因此本轮定形的重枚举形状只有一条：**不带 pathspec 的 `ls-files --cached --others
 --exclude-standard -z`，从仓库根跑，输出当作无类别的字节路径集合**。
+这条形状在仅本地收敛之后仍然成立，且不需要重测那张表：`repo::user_git_command` 现在
+无条件带上 `-c submodule.recurse=false` 与 `GIT_NO_LAZY_FETCH=1`（后者必须在剥离
+`GIT_*` 之后设置，否则会被自己删掉），枚举与快照都经它下发。在一个含 gitlink
+（`update-index --add --cacheinfo 160000,…`）与手工搭出的真 submodule（`.gitmodules`
+加内部未跟踪文件）的夹具上比对四种下发——默认、只带 recurse、只带 `GIT_NO_LAZY_FETCH`、
+两者都带（即 guit 的实际形状）：合并 `ls-files` 的输出**逐字节相同**（45 B、5 项），
+“合并 = 两次调用的并集”在四种下发下都成立，`status --porcelain=v2 -z` 同样逐字节相同。
+两条控制都不改变本地读取的输出，只改变会下载的那几种，因此 §3.1 的数值与 §3.2 的
+九形状比对对它们都还有效。
 本节第 2 条 bullet 里“范围可以缩到该目录”的那个方案被否掉，理由不是慢
 （限定目录确实把 14.2 ms 压到 4.6 ms），而是三条合起来的性价比：
 
@@ -730,14 +746,14 @@ freshness；调整后只维护一个计时器**（设计 §4.2 末段）。这�
   用户设 60 秒不得让面板的 Git 数据陈旧到 60 秒，设 1 秒也不得变成每秒一次 Git 读。
 
 顺带记录一处本次不涉及、但下一个真正需要后端持久化的设置一定会踩的迁移陷阱：
-`main.rs:230-238` 在读 `window.json` 时把 `schema_version != settings_version()`
+`main.rs:258-266` 在读 `window.json` 时把 `schema_version != settings_version()`
 判成 `settings_invalid`，也就是说**升版本号会让老用户已存的窗口几何整体作废**；
 现有新增字段一律用 `#[serde(default)]` 而把 `settings_version()` 保持为 1
-（`main.rs:148-166`）。写盘 helper 与 `WindowSettings` 类型耦合
-（`write_window_settings`，`main.rs:184`），要复用就得先泛化成按类型写 JSON 的 helper；
+（`main.rs:143-160`）。写盘 helper 与 `WindowSettings` 类型耦合
+（`write_window_settings`，`main.rs:179`），要复用就得先泛化成按类型写 JSON 的 helper；
 另外该文件的校验把“窗口尺寸非法”和“版本不匹配”判成同一种错误，
 一个只描述窗口的文件名也解释不了别的偏好，因此届时应当另建具名文件，
-沿用 `session.rs:382-420` 里 `RECENT_SCHEMA_VERSION` 的“模块内常量 + 不匹配即拒绝”形状。
+沿用 `session.rs:16` 常量与 `session.rs:420` 的拒绝 里 `RECENT_SCHEMA_VERSION` 的“模块内常量 + 不匹配即拒绝”形状。
 
 ### 4.2 若某个值真要接到后端环路，生效路径只有两条
 
@@ -752,7 +768,7 @@ freshness；调整后只维护一个计时器**（设计 §4.2 末段）。这�
 ### 4.3 活动状态不得挂进快照
 
 `SnapshotView` 是 `publish` 的唯一载荷，而 `publish` 需要一个完整的 `Capture`
-（`PathTable` + 视图，`session.rs:237-261`）。把活动状态塞进快照会强制两件事之一：
+（`session.rs:188` 的 `Capture`，其 `PathTable` 在 `model.rs:110`）。把活动状态塞进快照会强制两件事之一：
 每次索引变化都配一次 Git 捕获（与 §1.1 的“免 Git 读增量更新”直接矛盾），
 或者造一次没有捕获的发布（破坏“快照即一次捕获”的既有不变量，并让 `version`
 与文件寻址之间的关系变得可疑）。因此活动状态走**独立事件通道**，载荷直接取设计里
@@ -960,18 +976,27 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
 - 命令面有门禁：`app/tests/ipc-surface.mjs` 要求每个 `generate_handler![]` 里的名字
   在前端以**带引号字面量**出现（注释会被剥掉后再匹配），并且反过来要求每个
   `invoke("...")` 的字面量都有注册。任何一边改名都会让门禁失败。
-- 事件面没有对应的检查。本轮按同样的文本口径数了一遍：后端 `emit("...")` 的名字
-  共 7 个，前端 `listen<...>("...")` 的名字共 7 个，两边**恰好一一对应**
-  （`askpass-request`、`clone-progress`、`probe-progress`、`repo-refreshed`、
-  `submodule-progress`、`sync-progress`、`watch-status`）。也就是说，这条门禁**今天加上
-  是免费的**：它现在就是绿的。而名字对不上时不会有任何东西失败——面板只是再也不更新，
+- 事件面没有对应的检查。本轮按同样的文本口径数了一遍，**并且是在仅本地收敛落地之后
+  重数的**（`6d26df5` 删掉了克隆/同步/子模块/凭据那几个 emit）：后端 `emit("...")`
+  的名字共 **2** 个，前端 `listen<...>("...")` 的名字共 **2** 个，两边**恰好一一对应**
+  （`repo-refreshed`、`watch-status`）。也就是说，这条门禁**今天加上是免费的**：
+  它现在就是绿的。而名字对不上时不会有任何东西失败——面板只是再也不更新，
   这与 §2.5 那一族“读不到长得像没变化”的形状是同一个。
+  **扫描必须允许 `(` 与字面量之间有换行**：`watch-status` 那四处后端调用全部写成
+  `app.emit(\n    "watch-status",\n …`，而 `repo-refreshed` 是单行
+  （`watch.rs:246`）。按行匹配的正则（`grep -o '\.emit(\s*"'` 这一类）只会数出
+  1 个后端名字对 2 个前端名字，于是这条门禁在**代码没坏的时候报红**。
+  能跨行的写法是把整个文件读进来再用 `\s` 匹配（`\s` 含换行），本轮就是这样重数的。
 - 载荷类型同样没有共享。`watch-status` 的后端形状是
   `WatchStatus { mode: &'static str, failed: bool }`（`watch.rs:168-173`，
-  带 `#[serde(rename_all = "camelCase")]`），前端 `state.ts:224` 的接收端却是窄并集
-  `"none" | "poll" | "events"`，而**中间的桥在 `main.ts` 里把认不出的值折成 `"events"`**
-  ——也就是折成看起来健康的那一档。线上类型比落地类型宽，桥又朝好的方向失败：
+  带 `#[serde(rename_all = "camelCase")]`），前端 `state.ts:98`/`134`/`176` 三处
+  接收端却是窄并集 `"none" | "poll" | "events"`，而**中间的桥在 `main.ts:283-284`
+  把认不出的值折成 `"events"`**——也就是折成看起来健康的那一档，且那份载荷是就地匿名
+  写的 `{ mode: string; failed: boolean }`。线上类型比落地类型宽，桥又朝好的方向失败：
   这条链路上没有任何一处会因为多了一个 mode 值而报错。
+  同一段代码也给出了 C04 监听应当照抄的形状：两个 `listen` 都把 `unlisten` 交给
+  `onDispose`（B03 的释放登记），并配一句注释说明“只要会话活着后端就在推”，
+  所以停止方式是**留着**而不是丢掉。活动事件是第三个住户，没有理由不沿用。
 
 由此对 C01/C02/C04 定三条：
 
@@ -985,7 +1010,7 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
    所以夹具要断言的是**键名**，不只是能不能编译。
 3. **C02 的提交里带上事件名门禁**，形状照 `ipc-surface.mjs`：扫 `src-tauri/src/*.rs`
    里的 `emit("x")` 与 `src/**/*.ts` 里的 `listen<...>("x")`，两个方向都不许有孤儿。
-   它现在就能通过（7/7），因此不存在“先加测试还得先修代码”的负担；
+   它现在就能通过（2/2），因此不存在“先加测试还得先修代码”的负担；
    而活动事件一旦加入，它就是这条面上第一个可能被拼错的名字。
 
 顺带把 C01 的一处既有约束连上：本文 §1.2 要求 Watch 模式自带兜底、并把降级做成可见状态。
@@ -1103,7 +1128,7 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
   §2.4 的字节契约也只在 Linux/UTF-8 文件系统上测得，Windows 下名字如何到达
   `OsString`（WTF-8 形态）与 Git 的输出编码都还是未知。
 - `status_output` 把 stderr 一并交出已不是“要不要改”的问题：影响面清点是两个生产调用点
-  （`session.rs:205` 快照、`write.rs:992` 写前 recheck，§2.6 末）。剩下未决的是
+  （`session.rs:205` 快照、`write.rs:885` 写前 recheck，§2.6 末）。剩下未决的是
   **recheck 一侧如何处置非空 stderr**——把它当作“绑定事实不可信”直接拒绝写入，
   是当前 fail-closed 形状的自然延伸，但会让一个只读不动无关目录的仓库失去写入口。
   活动索引那侧按 §2.5 的表分状态已经定形，快照那侧的处置与它是同一次改动。
@@ -1122,6 +1147,9 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
   那两件事之一已经答复：B03 的记录写明 `publishSnapshot(null)` 是“会话结束”在总线里的
   唯一翻译点，前端唯一的出处是 `state.ts` 的 `applySnapshot(null)`，两处都收敛到同一个动作。
   仍待 B05 落地后复核的是域键是否升级为那个会话身份，以及活动通道是否订阅同一处。
+  B04 的记录对这一点给了一句可执行的口径：`refsKey` 里那几个远端字段来自本地跟踪引用的
+  元数据，读它们不联网，因此换会话身份时应当改**键的来源**而不是删字段（[B04 记录]
+  （13-local-scope-b04.md）第 4 节）。
   B03 已经落地（`d60f177`），本节引用的那些出口名都在盘上复核过，
   因此这一节现在可以作为 HEAD 的属性引用；它当初读自工作树这一点不再构成限制。
 - §4.9 的第三条盲区留下一个未做的选择：C04 的周期定时器与事件监听要能被数出来，
@@ -1180,10 +1208,14 @@ mtime 索引的三项成本用一次性 Rust 原型测得（临时目录下 `car
 §4.6 与 §4.7 不是测出来的：它们的依据是前端代码本身（未提交的并行改动、
 `mainPanel.ts` 的量下限那一段），复现方式就是去读那两处，
 因此这两节是三份记录里最容易随时间失效的，落地前必须复核而不是照抄。
-§4.8 的“两侧各 7 个名字且一一对应”是一次文本扫描（Python：对 `src-tauri/src/**/*.rs`
+§4.8 那两个名字（“两侧各 2 个且一一对应”，`6d26df5` 之后重数；在那之前是 7/7）来自一次
+文本扫描（Python：对 `src-tauri/src/**/*.rs`
 取 `\.emit\(\s*"([^"]+)"`、对 `src/**/*.ts` 取 `listen(?:<[^()]*>)?\(\s*"([^"]+)"`，
-比集合差）。两个正则都只认字面量，因此**这条数只在“两侧都写字面量”这个前提下成立**：
-任何一个名字改成变量拼接，扫描就看不见它，7/7 会变成假平的对称。C02 若真要加这条夹具，
+比集合差）。两个正则里的 `\s` 必须能吃到换行，这不是风格：后端 `watch-status` 那几处把
+字面量写在 `emit(` 的**下一行**，按行匹配的工具（`grep -o '\.emit\(\s*"'` 那一类）
+会数出后端 1 个、前端 2 个，于是这条门禁在代码没坏的时候报红——本轮先用按行的写法数过，
+就是这个假失败。两个正则也都只认字面量，因此**这条数只在“两侧都写字面量”这个前提下成立**：
+任何一个名字改成变量拼接，扫描就看不见它，2/2 会变成假平的对称。C02 若真要加这条夹具，
 得按 `ipc-surface.mjs` 的做法先剥注释、再在夹具里断言“扫出来的数量不为 0”
 （那个文件正是用“解析出的命令数必须 >50”来防止解析器退化后让所有断言空过）。
 阶段 C 实现时应把这些断言固化为 `app/tests/` 下的夹具测试。
@@ -1282,3 +1314,10 @@ mtime 索引的三项成本用一次性 Rust 原型测得（临时目录下 `car
 - `modify-name` 每次保存恒为 3 条是**这个 bin 的形状**（notify 把 rename 拆开递出），
   不是内核事件数；换成读 inotify 原始队列会看到另一种条数。本文用的是环路真正数到的那一层，
   所以这张表的条数可以直接用于“每次保存产生几条会触发刷新的输入”。
+§3.1 末那四种下发用同一类一次性 Python 夹具测得。**子模块必须手工搭**：
+写 `.gitmodules`、在子目录里 `git init` 并提交，再用
+`update-index --add --cacheinfo 160000,<oid>,mods` 把 gitlink 放进索引。
+`git submodule add file:///…` 会被 Git 默认的 `protocol.file.allow=user` 拒绝
+（实测 `fatal: transport 'file' not allowed`），而为了搭一个读取形状的夹具去放开那条
+传输策略，正好把本文要避免的“下载”带进了测量现场。gitlink 与真子模块同时放进一个夹具，
+是因为 `submodule.recurse` 这一维只有在这两种项都在场时才可能被观察到差别。
