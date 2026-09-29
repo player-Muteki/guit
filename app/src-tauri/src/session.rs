@@ -2,6 +2,7 @@ use crate::inflight;
 use crate::model::{BranchView, FileId, FileView, PathTable};
 use crate::perf;
 use crate::probe::{Code, ProbeError};
+use crate::refs::{self, RefListing};
 use crate::repo::{self, RepoIdentity};
 use crate::status;
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,8 @@ struct ActiveRepo {
     /// Resolved by write actions against this snapshot's IDs.
     paths: Arc<PathTable>,
     view: SnapshotView,
+    /// The names this capture saw, kept only to compare with the next one.
+    refs: RefObservation,
     version: u64,
     session_id: u64,
     history_generation: u64,
@@ -315,14 +318,16 @@ fn graph_input(
     })
 }
 
-/// Everything a refresh can reveal about the names in the repository: the head
-/// the listing is anchored on, how far it sits from its upstream, and whether
-/// Git is midway through an operation. A snapshot does not report a branch
-/// elsewhere in the repository that someone else moved, so this is the whole
-/// of what a refresh can say here — the rest belongs to whoever opens the
-/// picker and reads the names again.
+/// The head a listing is anchored on: name, state and commit, or nothing at all
+/// for a repository whose snapshot reports no branch.
 type Head<'a> = Option<(Option<&'a str>, crate::model::HeadState, Option<&'a str>)>;
 
+/// What a refresh can say about the names from the status side alone: the head
+/// the listing is anchored on, how far it sits from its upstream, and whether
+/// Git is midway through an operation. This is *not* the whole of what a refresh
+/// can see about names — the namespace itself is compared separately, from the
+/// observation below — because a status line only ever speaks about the branch
+/// currently checked out.
 fn refs_input(
     view: &SnapshotView,
 ) -> (
@@ -342,9 +347,45 @@ fn refs_input(
     )
 }
 
+/// What one capture could say about the names in the repository.
+///
+/// `Unknown` is not an empty listing. A repository with no branches, tags and
+/// remote-tracking refs is a fact the panel can draw; a listing Git refused to
+/// give in full — a ref it skipped, a ref whose object is gone, a listing over
+/// the capture bound — is a fact the panel must say it does not know, and it has
+/// to compare as its own state so that a read which stays broken does not
+/// re-invalidate everything bound to it on every refresh, and a read that heals
+/// does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RefObservation {
+    Known(RefListing),
+    Unknown,
+}
+
+/// Reads the namespace once, from wherever Git will answer: the object and ref
+/// database of a bare repository, the work tree of any other. Failure collapses
+/// to `Unknown` without keeping the code, because the counter below only needs
+/// to know that the answer is not usable — which part broke is this read's
+/// business, not the generation's.
+fn observe_refs(identity: &RepoIdentity) -> RefObservation {
+    let directory = if identity.is_bare {
+        identity.git_dir.as_path()
+    } else {
+        match identity.work_dir() {
+            Ok(directory) => directory,
+            Err(_) => return RefObservation::Unknown,
+        }
+    };
+    match refs::list(directory) {
+        Ok(listing) => RefObservation::Known(listing),
+        Err(_) => RefObservation::Unknown,
+    }
+}
+
 struct Capture {
     paths: PathTable,
     view: SnapshotView,
+    refs: RefObservation,
 }
 
 fn capture(identity: &RepoIdentity) -> Result<Capture, ProbeError> {
@@ -399,7 +440,14 @@ fn capture_inner(identity: &RepoIdentity) -> Result<Capture, ProbeError> {
         files,
         operation,
     };
-    Ok(Capture { paths, view })
+    // The names are read on every capture, and their failure never fails the
+    // capture. A status that cannot be read says nothing about this repository,
+    // so the snapshot is not published; a ref listing Git refused says nothing
+    // about the *names*, which is one domain's unknown and the other's answer.
+    let refs_start = Instant::now();
+    let refs = observe_refs(identity);
+    perf::mark("capture.refs", refs_start.elapsed());
+    Ok(Capture { paths, view, refs })
 }
 
 /// Store a fresh capture as the session's current snapshot. With `guard` the
@@ -430,7 +478,9 @@ fn publish(
     let (session_id, history_generation, refs_generation) = match current.as_ref() {
         Some(active) if guard => {
             let head_moved = graph_input(&active.view) != graph_input(&view);
-            let names_moved = head_moved || refs_input(&active.view) != refs_input(&view);
+            let names_moved = head_moved
+                || refs_input(&active.view) != refs_input(&view)
+                || active.refs != snapshot.refs;
             (
                 active.session_id,
                 active.history_generation + u64::from(head_moved),
@@ -446,6 +496,7 @@ fn publish(
         identity: identity.clone(),
         paths: Arc::new(snapshot.paths),
         view: view.clone(),
+        refs: snapshot.refs,
         version,
         session_id,
         history_generation,
@@ -1004,16 +1055,98 @@ mod tests {
         let merging = refresh(&state).unwrap().expect("session open");
         assert_eq!(merging.history_generation, committed.history_generation);
         assert_eq!(merging.refs_generation, committed.refs_generation + 1);
-        // A name that no snapshot reports — a tag on some other commit — moves
-        // neither. The picker reads the names again the moment it opens, which
-        // is the honest place to notice it.
+        // A name the head never mentions is news about the names and nothing
+        // else: a tag on an existing commit moves no commit, so the graph keeps
+        // its generation while the listing bound to `refsGeneration` is thrown
+        // away and read again.
         repo::git_with(
             &fixture.repo,
             &[],
             &["update-ref", "refs/tags/later", "HEAD"],
         );
         let tagged = refresh(&state).unwrap().expect("session open");
-        assert_eq!(tagged.refs_generation, merging.refs_generation);
+        assert_eq!(tagged.refs_generation, merging.refs_generation + 1);
+        assert_eq!(tagged.history_generation, committed.history_generation);
+    }
+
+    /// A tag on the commit that is already the head, a branch nobody is standing
+    /// on, a remote-tracking ref a terminal wrote: none of them moves a commit,
+    /// and all of them are news about the names. The graph counter is the
+    /// topology's, so it stays put while the listing bound to the names counter
+    /// is thrown away and read again — which is what lets a label appear on a row
+    /// without the page being laid out a second time.
+    #[test]
+    fn a_name_that_no_head_move_explains_still_moves_the_refs_generation() {
+        let fixture = fixture();
+        commit(&fixture.repo, "first.txt");
+        let state = SessionState::default();
+        let mut last = open(&state, &fixture.repo).unwrap();
+        let mut step = |args: &[&str], why: &str| {
+            repo::git_with(&fixture.repo, &[], args);
+            let before = last.clone();
+            let after = refresh(&state).unwrap().expect("session open");
+            assert_eq!(
+                after.history_generation, before.history_generation,
+                "{why}: no commit moved"
+            );
+            assert_eq!(
+                after.refs_generation,
+                before.refs_generation + 1,
+                "{why}: a name moved"
+            );
+            last = after;
+        };
+        step(&["tag", "v1"], "a tag on the head");
+        step(&["tag", "-a", "v2", "-m", "annotated"], "an annotated tag");
+        step(
+            &["update-ref", "refs/heads/dev", "HEAD"],
+            "a branch nobody is on",
+        );
+        step(
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+            "a remote-tracking ref read as local metadata",
+        );
+        step(&["tag", "-d", "v1"], "a tag deleted again");
+        // The same repository, read a second time with nothing moved: a refresh
+        // always publishes a newer version, and no domain is invalidated by it.
+        let still = refresh(&state).unwrap().expect("session open");
+        assert!(still.version > last.version);
+        assert_eq!(still.refs_generation, last.refs_generation);
+        assert_eq!(still.history_generation, last.history_generation);
+    }
+
+    /// A reference whose object is gone is a name Git refuses to list at all,
+    /// and it breaks the names without breaking the status: the snapshot still
+    /// publishes, and what the names domain now knows is that it does not know.
+    /// The failing read must advance the counter once — the bound listing has to
+    /// be discarded — and must not advance it again while nothing heals or breaks.
+    #[test]
+    fn an_unreadable_namespace_is_unknown_and_not_an_empty_listing() {
+        let fixture = fixture();
+        commit(&fixture.repo, "first.txt");
+        let state = SessionState::default();
+        let opened = open(&state, &fixture.repo).unwrap();
+        let ghost = fixture.repo.join(".git/refs/heads/ghost");
+        fs::write(&ghost, "0123456789012345678901234567890123456789\n").unwrap();
+        let broken = refresh(&state).unwrap().expect("the status still answers");
+        assert!(broken.version > opened.version);
+        assert_eq!(broken.refs_generation, opened.refs_generation + 1);
+        assert_eq!(broken.history_generation, opened.history_generation);
+        assert_eq!(
+            broken.branch.as_ref().unwrap().name.as_deref().unwrap(),
+            "main",
+            "the rest of the repository is still on screen"
+        );
+        let again = refresh(&state).unwrap().expect("still open");
+        assert_eq!(
+            again.refs_generation, broken.refs_generation,
+            "a read that stays broken is not news twice"
+        );
+        // A listing that comes back after the failure is a name set the panel
+        // never had, so it counts as a move on its own.
+        fs::remove_file(&ghost).unwrap();
+        let healed = refresh(&state).unwrap().expect("still open");
+        assert_eq!(healed.refs_generation, again.refs_generation + 1);
     }
 
     #[test]

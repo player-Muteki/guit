@@ -218,6 +218,17 @@ pub fn list(directory: &Path) -> Result<RefListing, ProbeError> {
         let first_line = detail.lines().next().unwrap_or("").to_owned();
         return Err(ProbeError::new("refs_list_failed", first_line));
     }
+    if !output.stderr.is_empty() {
+        // Git skips a ref it cannot parse and says so on stderr while still
+        // exiting 0: the listing that comes back is shorter than the repository.
+        // A name silently missing is worse than no listing, because the panel
+        // would render it as a name that does not exist — so the same rule
+        // `status` follows applies here: a partial answer is a failed read.
+        return Err(ProbeError::new(
+            "refs_unavailable",
+            "Git left a reference out of the listing; the whole listing was refused.",
+        ));
+    }
     let parse_start = Instant::now();
     let listing = parse_listing(&output.stdout);
     perf::mark("refs.parse", parse_start.elapsed());
@@ -465,6 +476,46 @@ mod tests {
         );
         // Empty input is a legitimate empty listing (fresh unborn repo).
         assert_eq!(parse_listing(&[]).unwrap().branches.len(), 0);
+    }
+
+    /// Git exits 0 and *skips* a reference it cannot parse, putting the
+    /// complaint on stderr. The listing that comes back is then shorter than the
+    /// repository, and a name silently missing is rendered as a repository that
+    /// has no such name — so a partial answer is refused whole, the way an
+    /// incomplete status is. Measured on this host's Git 2.53: a loose ref whose
+    /// content is not an object id is dropped with a warning, rc still 0.
+    #[test]
+    fn a_ref_git_skips_refuses_the_whole_listing() {
+        let root = fixture();
+        let dir = root.path();
+        commit(dir, "one");
+        std::fs::write(dir.join(".git/refs/heads/ghost"), "not-an-object-name\n").unwrap();
+        let error = list(dir).unwrap_err();
+        assert_eq!(error.code.as_str(), "refs_unavailable");
+        assert!(!error.message.is_empty());
+        // The same repository with the broken name gone answers again: this is
+        // one bad ref refusing the listing, not a listing that cannot be read.
+        std::fs::remove_file(dir.join(".git/refs/heads/ghost")).unwrap();
+        let listing = list(dir).expect("the listing returns");
+        assert_eq!(listing.branches.len(), 1);
+    }
+
+    /// A reference that parses but points at an object the repository does not
+    /// have is a different shape: Git refuses the whole read rather than
+    /// inventing a shorter answer.
+    #[test]
+    fn a_ref_whose_object_is_gone_is_a_failed_read() {
+        let root = fixture();
+        let dir = root.path();
+        commit(dir, "one");
+        std::fs::write(
+            dir.join(".git/refs/heads/ghost"),
+            "0123456789012345678901234567890123456789\n",
+        )
+        .unwrap();
+        let error = list(dir).unwrap_err();
+        assert_eq!(error.code.as_str(), "refs_list_failed");
+        assert!(!error.message.is_empty());
     }
 
     #[test]
