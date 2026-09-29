@@ -2,7 +2,8 @@
 
 调研日期：2026-09-29。基线提交：`ec1cf61`（阶段 C 收口之后）。本文只固定 D01–D05
 依赖的事实与决策依据，不是实现记录：写作时 `history::page` 仍是两次各自解析 `HEAD`
-的读取，`parse` 仍只核对行槽位是否存在。行号仅作导航，任何时候以符号名为准。
+的读取，`parse` 仍只核对行槽位是否存在。**§1–§3 描述的是实施前的树；D01 的落地见
+§4（提交 `861a1ca`）。** 行号仅作导航，任何时候以符号名为准。
 
 主机条件同 [A01 基线](05-baseline-a01.md)：Linux x86_64、Git 2.53、WebKitGTK。
 **本文没有 Windows/macOS 证据**。所有 Git 形状都在一次性 `/tmp` 仓库里实测
@@ -141,3 +142,102 @@ pin 带来的残差要写清楚，因为它属于 D02 而不是 D01：`%D` 的�
 隔离配置同上；仓库建在 `/tmp` 下并随脚本删净，不含任何用户数据。
 D01 落地后的可重跑证据是 `cargo test` 里新增的那几条（pin、双读混排拒绝、
 held lock 下的图读取），以及既有分页/合并顺序测试不变。
+
+## 4. D01 落地记录：`861a1ca`
+
+提交：`861a1ca`（"Name the commit a history page is about, in both of its reads"），
+基线 `84eb0db`。只改后端四个文件：`history.rs`、`session.rs`、`main.rs`、
+`branches.rs`（后者只改一条断言，见 §4.3）。前端与 IPC 面**一个字节都没动**，
+`HistoryPage`/`CommitView` 的线格式不变，所以 `ipc-surface.mjs` 的四类划分照旧。
+
+### 4.1 代码事实
+
+- `history::pinned_rev(directory, target)`：pin 的唯一出处。显式 `target` 先过
+  `valid_oid`（不合即 `history_target_invalid`），否则跑
+  `rev-parse --verify HEAD`；非成功是 `history_head_unresolved`，成功但答案不是
+  一个完整 oid 是 `history_protocol_error`。**截断不需要单独分支**——被砍短的回答
+  本来就不是完整 oid，`valid_oid` 那道检查会拒绝它，这正是 §1.2 想要的失败形状。
+- `history::page` 第一句就取 pin，两次读都带这个 oid 且都跟 `--`；
+  `topology()` 的 `target` 从 `Option<&str>` 变成必填 `&str`，"少一个参数就少一次
+  歧义"落在类型上。
+- `history::parse(bytes, nodes, graph, start, remotes)`：`nodes` 是新增的必填参数，
+  位置在 `graph` 之前。每个 offset 断言 `node.oid == oid` **且**
+  `node.parents == parents`；任一不等（含"槽位用完"）都由同一个闭包
+  `mismatch()` 生成 `history_graph_mismatch`，文案不指认哪一次读出错——按 §1.4，
+  pin 之后"历史在两次读之间变了"已不是唯一可能，代码看不出错在哪一侧就不该写进
+  shipped 文本。原来的"reload to try again"那句随之删掉：它给的补救动作正是代码
+  无法保证的那件事。
+- `session::SessionState::pinned_head()`：`snapshot() → view.branch → branch.oid`。
+  `main.rs` 里 `let target = oid.or_else(|| sessions.pinned_head())`；命令层原有的
+  unborn gate（非 bare、`HeadState::Unborn` → 空页）留在原地，因为它读的是快照，
+  比让 Git 报一句 fatal 更准确。
+- bare 仓库走 `page` 内部 fallback（`view.branch` 为 `None` ⇒ pin 为 `None`），
+  每页多一个 `rev-parse` 进程——与 §1.2 的预测一致。
+
+### 4.2 与契约的两处偏离（都不是让步，是实现时才显形的）
+
+1. **失败顺序变了。** pin 在正文读之前，所以 unborn 的失败码从
+   `history_page_failed`（Git 的 stderr 首行）变成 `history_head_unresolved`。
+   §1.2 写的是"新增一个失败码"，没写它会顶替旧的那条；受影响的是
+   `branches.rs` 里那条 unborn 断言（含其注释），已改。
+2. **`history_target_invalid` 现在有两道。** 命令层保留原有检查（前端边界），
+   `pinned_rev` 再加一道（argv 边界）。§1.4 只说了"在构建 argv 的地方拒绝"，
+   没说撤掉边界那道；两道并存的意义是：直接调用 `page` 的测试与将来任何后端调用者
+   都在模块内被拦住，不依赖调用者自觉。
+
+### 4.3 新增的测试与其能承讲到哪一步
+
+`history::tests` 25 → 30 条。逐条说明它断言的到底是"实测"还是"内存构造"：
+
+| 测试 | 形状 | 承讲范围 |
+| --- | --- | --- |
+| `two_reads_are_committed_to_the_same_commits_not_just_the_same_length` | 内存构造：手写记录 + 合成 `plain_nodes` | 槽位在而 oid 不同、oid 同而 parents 不同、两者皆同三种；这是 §1.1 说的"长度相同内容不同"那一半，**但不是真实竞态样本**，竞态仍没有被构造出来过 |
+| `a_pinned_commit_is_the_history_a_page_is_about` | 真实仓库 | 显式 pin 的页面只关于那个提交，即使 HEAD 已前进；无 pin 时答 HEAD |
+| `a_page_read_needs_no_lock_someone_else_is_holding` | 真实仓库 + held `index.lock` | §1.3 的结论进了可重跑的测试：锁被别人占着不是"历史读不出来"，且读不吃掉锁、锁在不在两次结果逐字段相同（`CommitView` 因此加 `PartialEq, Eq`） |
+| `a_bare_repository_resolves_its_own_head_for_every_page` | 真实仓库 | bare 的 pin fallback 与"bare + unborn 是拒绝不是空页" |
+| `a_target_that_is_not_a_full_commit_id_never_reaches_git` | 真实仓库 | `HEAD`/`--all`/`refs/heads/main`/短名/空串五种都在 `pinned_rev` 被拒，不进进程 |
+
+bare 夹具的做法与 §3 预期不同，值得记一条 Git 事实：**Git 拒绝在 bare 仓库里
+`commit`**（本机 Git 2.53，`git --git-dir=….git commit --allow-empty` ⇒ rc=128
+"this operation must be run in a work tree"）。可选的替代是 `git clone --bare`
+一个本地路径，但那会把 clone 这个动作写进产品源码树，与 AGENTS.md 的仅本地范围
+相冲（测试夹具不是产品入口，但也不必为此引入一个更容易被误读的形状）。落地的做法
+是普通仓库提交完之后 `git config core.bare true`：同一份对象库、没有工作树，
+`rev-parse` 与 `log` 都照常答（实测 `--is-bare-repository` 为 true、历史两行）。
+
+门槛（本机 Linux x86_64、Git 2.53、Node 26）：`cargo test` **305/305**
+（`84eb0db` 为 300，+5）；`cargo fmt --check` clean；
+`cargo clippy --locked --all-targets` clean；`npm run build` 0 errors、
+`npm run test:fixture` 305/305（本轮未改前端，这个数是全树的数）；
+`color-contrast.py` 与 `responsive-check.py`（含 row-height 两条）fails=0。
+`read-budget.mjs` 没有重跑：它统计的是前端 `invoke` 次数与 DOM 结果，
+D01 在两者上都没有变化。
+
+### 4.4 残差：现在仍然没有一致性保障的部分
+
+- **标签侧仍活着。** `%D` 由正文读那一刻的 refs 算出，pin 冻结拓扑不冻结标签，
+  与 §1.4 的预测逐字相同。这条现在有了测试可依赖（`a_pinned_commit…` 之后没有断言
+  标签），但**没有**断言"标签与快照的分支名一致"——那是 D02 的
+  `refsGeneration` 与结构化 ref，不是这里能凑的。
+- **UI 呈现没有被驱动过。** `history_head_unresolved` 今天只在两种情况下能被真实
+  用户看到：bare 且无提交的仓库。非 bare 的 unborn 走命令层的空页 gate。
+  `docs/known-limitations.md` 未新增条目，因为这个码在真实 WebView 里没有跑过。
+- **深页代价照旧。** 拓扑读仍是 `-n start+limit+1`，`remote_names` 仍是每页第三个
+  进程。D03 前不引数字。
+
+### 4.5 D03 继承的一条测量缺陷（先修它，再谈缓存）
+
+`page` 里两个 perf 标签共用一个起点：
+
+```rust
+let parse_start = Instant::now();   // 现状即如此，早于 D01
+let graph_start = parse_start;
+…
+perf::mark("history.graph", graph_start.elapsed());
+perf::mark("history.parse", parse_start.elapsed());
+```
+
+两行 `elapsed()` 都在 `parse` 之后取，因此 `history.graph` 与 `history.parse` 报的是
+同一段时间（拓扑读 + 布局 + 解析）。这不是 D01 引入的（`84eb0db` 的树即如此），
+但 D03 要用 `GUIT_PERF=1` 的相位耗时来决定检查点尺寸与缓存边界，**在那之前先把这两个
+起点分开**，否则量到的是"整个后处理"，无法回答"前缀重读值不值得换成检查点"。
