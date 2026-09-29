@@ -7,6 +7,14 @@ are still reachable at that size, then that the restore gives the window its own
 box back. Overflow is layout-check.py's job; this suite is about reachability at
 the minimum size and about the resize round-trip.
 
+The last thing it does is press the app bar's own close, because that is the one
+route the window ever leaves by and nothing else here exercises it: the app must
+end by itself, and the geometry it writes on the way out must be the box the
+window had at that moment — the restored one, not the minimum it was shrunk to.
+That is a claim about a file the app owns, so it is sampled twice through the
+same channel and the two samples are compared to each other rather than to a
+number (see `geometry`).
+
 Four channels, and the assertion has to use the one that can see its subject:
 - `showing_names()` carries *controls* — tab items, buttons, inputs. A plain
   label span has no accessible name at all, so Settings' "Interface zoom" text
@@ -26,6 +34,7 @@ Needs python3-gi and a live AT-SPI bus; the release binary comes from
 `npm run bin:release`.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -51,6 +60,26 @@ APPBAR = {"Open repository", "Refresh status", "Close session", "Commit",
 # carries them.
 APPBAR_NARROW = APPBAR - {"Commit", "Open repository", "Refresh status", "Close session"}
 ZOOM = {"Zoom in", "Zoom out", "Reset zoom"}
+
+
+def saved_bounds(work):
+    """What the application last wrote its own box down as, in its own units.
+
+    The geometry file carries physical pixels while the sizes this suite asks the
+    window for are logical ones, so it is never compared to a number here — only
+    to another reading of the same file, which is the same unit by construction.
+    """
+    path = os.path.join(work, ".config", "dev.guit.desktop", "window.json")
+    for _ in range(20):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                saved = json.load(handle)
+            if isinstance(saved.get("width"), int) and isinstance(saved.get("height"), int):
+                return saved
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.25)
+    return None
 
 
 class Report:
@@ -156,6 +185,9 @@ def main():
         A.click(A.find_button(name="Test compact window"))
         time.sleep(2.5)
         compact_rect = document_rect()
+        # Sampled while the window is at its minimum, so the box the close writes can be
+        # compared against a reading of the same file rather than against a number.
+        compact_saved = saved_bounds(work)
         report.check("the window really shrinks to the minimum",
                      wide_rect is not None and compact_rect is not None
                      and compact_rect[0] < wide_rect[0],
@@ -207,6 +239,33 @@ def main():
                      wide_rect is not None and restored is not None
                      and abs(restored[0] - wide_rect[0]) <= 16,
                      f"wide={wide_rect} compact={compact_rect} restored={restored}")
+
+        # --- close it the way the app bar offers ---
+        # The press is the last thing this suite does, because it is the end of the only
+        # route a window ever leaves by: the app bar's close is a request, the close hook
+        # is what answers it, and the answer is to write the box down and then destroy the
+        # window. Whether that happened is read from the process and from the file — the
+        # tree is gone as soon as it does, so there is no third channel left to check it
+        # with. Nothing is held here: no operation is running, which is the case in which
+        # the panel is allowed to go straight away.
+        A.click(A.find_button(name="Close guit"))
+        ended = True
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            ended = False
+        report.check("the app bar's close ends the application on its own", ended,
+                     "" if ended else "still running fifteen seconds after the press")
+        final_saved = saved_bounds(work) if ended else None
+        report.check("the close leaves the window's box written down", final_saved is not None,
+                     "" if final_saved is not None else "no readable window.json")
+        if final_saved is not None and compact_saved is not None:
+            # The restore happened between the two readings, so what the close stored must
+            # be wider than the minimum it was shrunk to — the box the window actually had.
+            report.check(
+                "what the close wrote down is the box the window had then, not the minimum it was shrunk to",
+                final_saved["width"] > compact_saved["width"],
+                f"compact={compact_saved['width']} final={final_saved['width']}")
     finally:
         try:
             os.killpg(os.getpgid(proc.pid), 15)

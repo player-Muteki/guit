@@ -5,8 +5,8 @@
 // live one. So these are gates over the sources, one per way the panel could quietly
 // start lying — a button that destroys instead of closing, a pin that reports the state
 // that was asked for, a maximise label that remembers rather than reads, a first run that
-// is unpinned while the code says it is pinned, and an action the capability file never
-// granted.
+// is unpinned while the code says it is pinned, an action the capability file never
+// granted, and a close that throws a running operation away without saying so.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -70,6 +70,44 @@ test("the close button requests a close and leaves the destruction to the close 
   assert.match(hook, /hooks\.onClosing\(\)[\s\S]*await persistWindowSettings\(\)[\s\S]*currentWindow\.destroy\(\)/);
   // Only one place in the file may destroy.
   assert.equal(win.match(/\.destroy\(\)/g)?.length, 1);
+});
+
+test("a close is held before anything is thrown away, on every route onto a close", () => {
+  // The hook is the one path: the title bar, the app-bar button and a desktop quit key all
+  // arrive here, so a hold asked for here cannot be bypassed by whichever of them was used.
+  const hook = win.slice(win.indexOf("onCloseRequested"));
+  const veto = hook.indexOf("hooks.vetoClose()");
+  assert.ok(veto !== -1, "the close hook must ask before it lets go of anything");
+  assert.match(hook, /if \(hooks\.vetoClose\(\)\) return;/);
+  for (const step of [
+    "window.clearTimeout(saveTimer)",
+    "hooks.onClosing()",
+    "await persistWindowSettings()",
+    "currentWindow.destroy()",
+  ]) {
+    assert.ok(hook.indexOf(step) > veto, `${step} must follow the answer, so a held close changes nothing`);
+  }
+  assert.match(main, /installWindowHooks\(\{[\s\S]*?vetoClose,[\s\S]*?onClosing:/);
+});
+
+test("the hold names the operation that is running and is released only by the button it shows", () => {
+  // A second press of the same corner is not a decision: an accidental double click on a
+  // title bar would otherwise be how a commit gets stranded mid-write. So the release is a
+  // named control, and the panel says what would be left running in the words it shows.
+  const veto = main.slice(main.indexOf("const vetoClose"), main.indexOf("// --- events ---"));
+  assert.match(veto, /isWriteRunning\(\)/);
+  assert.match(veto, /statusLine\(\)\.message/, "the warning must quote the operation the status line is reporting");
+  assert.match(veto, /label: "Close anyway"/);
+  assert.match(veto, /closeAccepted = true;/);
+  assert.equal(
+    main.match(/closeAccepted = true/g)?.length,
+    1,
+    "only the shown button may release a hold, and a hold released cannot outlive its press",
+  );
+  // The reading side: an acceptance is taken off the table on every ask, whether or not a
+  // write turns out to be running, so nothing armed can carry into a later operation.
+  assert.match(veto, /const accepted = closeAccepted;\s*closeAccepted = false;/);
+  assert.match(veto, /if \(accepted \|\| !isWriteRunning\(\)\) return false;/);
 });
 
 // --- what a button is allowed to say ---

@@ -215,9 +215,21 @@ These need a human and a second machine, and are honestly outstanding:
   runs through the tabs and the Settings rows, both of which are watched, and the key
   press reaches the window itself.
 - Closing the window writes the geometry and the panel's choices down before the window
-  is gone. What it does not do is reap a Git process that was still running: an
-  operation in flight at exit leaves its process group behind. A *cancelled* operation
-  kills the group; nothing kills it on the way out of the application.
+  is gone. What it does not do is reap a Git process that was still running: an operation
+  in flight at exit leaves its process group behind, and that is the decision rather than
+  the gap. A *cancelled* operation kills the group and reports the killing; nothing else
+  kills on that behalf, because a clean cut off halfway deletes files with no record of it
+  and a commit stopped between its objects and its ref leaves an index lock behind. The
+  close is therefore held while a write is running, and released only by the button the
+  refusal shows.
+- That hold has never been exercised in a live window. It is gated over the sources — the
+  asking order inside the close hook, the one place that may release it, and the fact that
+  a held close clears nothing, lets go of nothing, writes nothing and destroys nothing.
+  Running it for real needs an operation that outlasts the click that starts it, in a
+  repository the run would then have to be trusted not to change, which no harness here
+  does. What the narrow-window harness *does* run is the other side: pressing the app bar's
+  close with nothing in flight ends the application by itself and leaves the box the window
+  had at that moment on disk, compared against the box it held while shrunk to the minimum.
 - Multi-display clamping of a restored window is unverified (see **Manual gates still
   open**): the verification host is single-display, so the round trip through a scale
   change or a second monitor is a claim the stored fields support but no run has shown.

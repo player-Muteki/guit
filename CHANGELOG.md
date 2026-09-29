@@ -76,6 +76,19 @@ is the record of what is not verified.
   window, not a second way to destroy it: it runs the same path the title bar's close
   runs, which writes the window's size and the panel's choices down before the window is
   gone, so there is exactly one place that can lose them.
+- A close that would strand a running Git operation is held, and the holding says so. Every
+  route onto a close — the decoration's own button, the app bar, a desktop quit key — is
+  asked before anything is let go of, and while an operation is in flight the answer is a
+  refusal that names it in the words the status line is already using. Nothing is written
+  down or released on that path, so the panel is exactly where it was. guit does not stop
+  the operation to close its window, and it does not kill it on the way out either:
+  cancelling is an operation's own kill path, with its own button in the status line, its
+  own death of the process group and its own report of what died, and an exit path cannot
+  make that choice on someone's behalf. Going ahead is the named button the refusal shows,
+  good for that one close and never for a later one, so two clicks on the same corner are
+  not how a commit ends up running with nothing watching it. An open external tool does
+  not hold a close: that program has its own window and its own way to finish, and it is
+  not mid-way through writing anything to the repository.
 - The first start of a fresh install is above other windows, because a monitoring panel
   that a maximised editor covers is not monitoring anything. It is an ordinary setting
   after that: whatever a person leaves it at is what the next start does, and a stored

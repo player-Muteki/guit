@@ -200,6 +200,15 @@ export async function restoreWindowSize(): Promise<void> {
 export interface WindowHooks {
   onGeometryChange(text: string): void;
   onFocus(): void;
+  /** Something is about to be thrown away, so a close is held. Every route onto
+   * a close — the title bar, the app-bar button, a keyboard quit — is asked
+   * before the window goes, and this module keeps no opinion about when one
+   * should be held: it asks and does what the answer says. Whoever answers is
+   * the only party that can also tell the user why, so the message belongs to
+   * this call, not to the caller's return value. A held close leaves the window
+   * exactly as it was, which is what makes a second, deliberate press a
+   * decision rather than an accident. */
+  vetoClose(): boolean;
   /** The window is going away for good. Each component lets go of what it
    * attached — watchers, timers, document handlers — before the size is
    * written down and the window is destroyed. */
@@ -222,6 +231,9 @@ export async function installWindowHooks(hooks: WindowHooks): Promise<void> {
     });
     await currentWindow.onCloseRequested(async (event) => {
       event.preventDefault();
+      // Asked first, before anything is written down or thrown away: a held
+      // close must leave the panel exactly as the user left it.
+      if (hooks.vetoClose()) return;
       window.clearTimeout(saveTimer);
       hooks.onClosing();
       await persistWindowSettings();

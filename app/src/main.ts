@@ -23,6 +23,7 @@ import {
   setWatchMode,
   setWatchFailed,
   setWriteRunning,
+  statusLine,
   subscribe,
   VIEW_ORDER,
 } from "./state";
@@ -296,6 +297,41 @@ async function confirmTicket(
   }
 }
 
+// --- closing ---
+// guit does not kill a Git process on the way out. Cancelling is the operation's
+// own kill path — it takes the process group down and reports what died — and it
+// is a choice the user made, in the status line, about an operation they started.
+// Nothing on the exit path can make that choice for them: a `git clean` cut off
+// halfway can leave files deleted and no report of it, and a commit stopped
+// between its object write and its ref update leaves an index lock behind. So an
+// operation in flight is left running, and the close that would have stranded it
+// is refused until it is *deliberately* accepted through the named button, which
+// is the only thing that can release the hold.
+let closeAccepted = false;
+
+const vetoClose = (): boolean => {
+  // Taken off the table whatever happens next: an acceptance is good for the one
+  // press that asked for it, never for a later operation.
+  const accepted = closeAccepted;
+  closeAccepted = false;
+  if (accepted || !isWriteRunning()) return false;
+  pushToast({
+    level: "warning",
+    message: `${statusLine().message} is still running, and guit does not stop a Git operation to close its window. ` +
+      "Cancel it in the status line, or close with it still running.",
+    actions: [
+      {
+        label: "Close anyway",
+        run: () => {
+          closeAccepted = true;
+          void closeWindow().catch(showError);
+        },
+      },
+    ],
+  });
+  return true;
+};
+
 // --- events ---
 // The backend pushes these for as long as the session lives, so the way to
 // stop them is kept rather than dropped.
@@ -377,6 +413,7 @@ void (async () => {
     await installWindowHooks({
       onGeometryChange: (text) => settings.noteGeometry(text),
       onFocus: () => void refreshSession(true),
+      vetoClose,
       onClosing: () => disposeAll(),
       onError: showError,
     });
