@@ -68,6 +68,31 @@
 因此作为“同一主机同一构建”的量级仍可引用；但其中前端 DOM 规模已随双 Tab 合并变化，
 若要把它当作 C 阶段新增常驻开销的对照，需要重跑一次同口径测量而不是复用旧数。
 
+### 7.1 分隔条那一提交之后复判（逐项按本轮清点，不转抄阶段记录）
+
+依据是对该提交的一次文件清单核对：它**没有触碰 `app/src-tauri/` 下任何文件**
+（按名字过滤 `src-tauri` 命中数为 0），改的是 `splitModel.ts`、`mainPanel.ts`、
+`changes.ts`、`history.ts`、`settings.ts`、`style.css`、`tokens.css`、
+新增 `tests/main-split.mjs`，另外动了 `tools/bench/responsive-check.py` 与
+`tools/live/b-shot.sh`。
+
+| 本记录的口径 | 复判 | 依据 |
+| --- | --- | --- |
+| `cargo test` 353 单元 + 5 集成、`cargo fmt --check`、`cargo clippy --locked --all-targets` | **仍然适用** | 该提交零个 `src-tauri` 文件改动；C01/C02/C03 的 Rust 侧继续与这一条基线直接比较，不需要“先重跑一次旧口径” |
+| dist 体积 JS 103.28 kB / CSS 29.11 kB | **再次不适用** | 同一文件清单里 `style.css`/`tokens.css` 都变了；阶段记录自报的产物已是 JS 105.11 kB / CSS 30.03 kB。任何“体积变化 = 性能变化”的解释都不成立，两边都不要引用 |
+| `npm run test:fixture` 123/123 | **口径已变** | 新增 7 条分隔比夹具把计数推到 130；C 阶段夹具的计数只能与“落地当时的最新数”比，不能与本记录比 |
+| `responsive-check.py` fails=0 | **不构成对新清单的证据** | 该提交给必需令牌清单加了 `--main-split`/`--main-list-floor`/`--main-graph-floor`（门禁强度上升）。本记录那次 fails=0 是对**旧清单**跑的，换清单必须重跑 |
+| idle CPU 0.19% / RSS 437.4 MiB | **不能直接当 C04 的对照基数** | 同一提交新增两个列表的 `ResizeObserver` 与一个 chrome 观察器，其阶段记录自己写明这三者当时没有 disconnect。C 要测的是“活动索引 + 计时那一行”的增量，减去的基数已经变大 |
+| “idle 期间未捕获 git 子进程”（1Hz `/proc` 采样） | **口径待升级** | 并行改动里出现了尚未提交的 `tools/bench/read-budget.mjs`。“无周期 Git 重查”以后应引用它的计数，而不是继续引用 1Hz 采样的“没看见”——本记录第 5 节已把这条例列为弱口径 |
+
+因此本记录给 C 阶段留一个**带时机的动作**，而不是一句“后续重测”：复跑必须在
+**那一组生命周期/订阅改动提交之后、C04 第一次给出数字之前**，用同一个
+`tools/bench/idle-baseline.py`、同一个 release 构建、同一夹具规格
+（`make-repo.sh /tmp/... 1000 0 100`）与同一个 300 s/1 Hz 窗口。
+早于它重测会把 B 的改动算进 C 的账，晚于它给数则 C04 的增量不可归因。
+若届时确实无法重跑（无桌面条件），本记录第 2 节一律标注为“旧基数”，
+C 阶段只能报相对同一旧基数的“不可分解的合计变化”，不得把差值解释成活动索引自身的开销。
+
 ## 结论
 
 完成(gates 全绿;idle 基线已固定,RSS 预算缺口已记录待修订;主窗口内容级桌面证据按路线图标记未测,须在 H 前补齐)。
