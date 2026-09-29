@@ -662,6 +662,97 @@ helper 改动的影响面实测清点：`repo::status_output`（`repo.rs:356`）
 列出的形状负责。fsmonitor 在场时后果是拒绝而非错写，方向仍然安全，
 但它应当在 `docs/known-limitations.md` 里有一条未验证的记录（与 §2.2 上限那条同批落地）。
 
+#### C02 落地后的形状修正与实现记录（`f0c01bf` + `c118518`，锚点按符号）
+
+上面两节是决定过程；这一小节是交付事实。差异与兑现清单都写在这里，正文原样不动。
+
+**`rc=0 ∧ stderr 非空` 落在两个调用点，不是只落在活动索引那一侧。**
+`repo::status_output` 的返回类型从 `Vec<u8>` 换成 `StatusRead { stdout, warned }`
+（`repo.rs`）：文本**不外露**，只外露“是否为空”这一个布尔量——§2.6 第 1 条的理由
+（文案随 `LC_*` 与 Git 版本变，且实测第一行没有 `warning:` 前缀）。两侧各自拒绝：
+`session::capture_inner` 在 `warned` 时返回 `git_status_incomplete` 并且**不发布快照**；
+`write::status_index` 返回 `write_incomplete_read` 并且**拒绝写入**。§2.6 末尾那句
+“不能只改活动索引一侧就宣称 false-clean 已闭合”因此是按字面兑现的，
+不是靠一个内部重构顺带做到的。`runner::Output` 本来就带 `stderr`，runner 缝隙未动。
+
+**良性侧从“探针量过”升级成门。** `repo::tests::ordinary_shapes_never_look_incomplete`
+现在把上表九个良性形状全部用真 git 构造并断 `!warned`：干净、已跟踪文件被修改、
+索引 stat 过期（用 `File::set_modified` 推到 epoch，不需要 sleep）、`.gitignore` 里的
+坏模式、未初始化 gitlink、`--skip-worktree` 且盘上已删、`--assume-unchanged` 且盘上已改、
+`core.excludesFile` 指向读不到的路径、config 末尾一行裸词；表外另加 unborn、
+删除+重命名、冲突、detached、嵌套仓库五个。为此测试侧拆出三个 runner：
+`git_command` 持有两者共用的环境隔离（这样它们不可能漂成在测不同的仓库），
+`git_with` 仍断言成功，`git_leaving_state` 把退出码当信息——**冲突状态只有在
+`merge --no-commit --no-ff` 失败之后才存在**，用断言成功的 runner 建这个夹具会
+在建夹具那一步 panic，这是上一版把它当成失败的原因。
+
+一条新量到的事实**收窄了上表第 9 行**：“`.git/config` 末尾追加一行畸形”只在最轻的形式下良性。
+裸词一行（无空格、无 `=`）rc=0 且 stderr 空，Git 静默跳过；**含空格的一行或未闭合的
+section 是 `fatal: bad config line`、rc=128**，并且 `rev-parse` 同样拒绝，所以 guit
+在 `repo::detect` 那一步就把这个目录报成 `not_a_repository`，根本不经过 status 读取。
+两个形式各钉一个测试（前者是上面那个门里的 `a repository configuration with a stray line`，
+后者是 `a_config_git_refuses_to_parse_is_not_a_repository_at_all`），这条边界不是注释里的说明。
+
+另外两条只有夹具能给的实测：造“未初始化 gitlink”的免网络办法是
+`git update-index --add --cacheinfo 160000,<空树 oid>,mods`——`git status` 对它
+rc=0、stderr 空（一次性探针量到的字节；上面那个门钉的是它 `!warned` 这件事），
+因为不存在的目录不会被遍历；而 `git add -f <内嵌仓库>` 在子仓库
+**没有提交**时返回 128（`没有检出一个提交`），所以
+`activity::tests::a_nested_repository_is_never_a_candidate_added_or_not` 必须先在
+`inner` 里 commit。同一夹具顺带确认了 §2.5 撤回 `--stage` 之后仍然成立的那一半：
+`ls-files` 对一个已 add 的内嵌仓库给出 `inner`（无斜杠），未 add 时给出 `inner/`，
+两种形式都不是文件（探针量到那次列出的 stderr 是 **0 字节**，钉住的则是
+`lstat` 把它们挡在候选集合之外）——分类只由文件系统决定，不由字节决定。
+
+**交付的状态与理由是六个名字，不是九个。** `ActivityState { Ready, Empty, Partial,
+Unavailable }` × `ActivityReason { ReadFailed, OutputLimit, UnreadablePaths,
+RefreshFailed, SessionClosed }`，`serde(rename_all = "camelCase")`。`scanning` 与
+`stale` 按 §2.5 那张表的分工不进后端集合，理由写在 `ActivityState` 的 doc 上而不是
+只写在这里：前者是“前端还没收到任何东西”的态，后端铸它就等于替前端决定它收到过什么；
+后者是“我多久没拿到证据了”，一次扫描在发生的当下永远是新鲜的，
+只有继续走着的钟能判它。
+`Partial` 与 `Ready` 才携带
+`latestModifiedAt` / `displayName`，`Empty` 与 `Unavailable` 两者都是 `None`——
+一个从不指文件的态，就没有把文件名错附给它的可能。年龄的展示形状属于 C04。
+
+**§4.10 的接线按原样落地，两处按事实补。** `ActivityTracker` 是 `watch::supervisor`
+栈上的局部值：一个所有者、没有锁、随它度量的那次会话一起消失；`activity-updated`
+在 `repo-refreshed` **之后**发，携带本轮已发布的 `session_id`（必须读在 emit 把快照
+move 走之前）。`Err` 分支发 `tracker.unavailable(RefreshFailed)`，`session_id` 为
+`None`；`stop()` 发 `ActivityView::cleared(SessionClosed)`。**没有注册任何新命令**，
+所以 `ipc-surface` 的四张表一字未改，`repo-refreshed` 与 `activity-updated` 的成对
+关系由新的门来管。
+
+一处要说清的现状（**不是漏接**）：手动刷新那条命令走 `session::refresh` 并把快照
+直接返回给前端，它不经过 watcher 的 `fire()`，因此**不重新扫描活动索引**。年龄随后
+在下一个兜底 tick 追上——`run_loop` 的 `next_fallback` 在 Watch 模式同样按
+`poll_interval` 到点就 `fire()`（§1.5 选定的那半个分支），所以这个滞后有一个已知的
+上界，而不是“直到下一次有事件为止”。把 `incomplete` 之类的复位挂到发布点，是
+C01 记录里已经写明为空的那件事，两件事同一批兑现。
+
+**前端形状有一处必须改写原文的推论：generation 只能在同一 `sessionId` 内比较。**
+§4.10 的会话身份落地后，重开的会话从 1 重新计数，跨会话比较会把重开后的第一个值
+永久拒掉（`state.ts::applyActivity` 里那条“同会话才比”就是这个原因，并有命名夹具
+覆盖）。第二条原文没有、实现补上：`applySnapshot(null)` 直接清空 activity，
+不等后端那次 clear——否则会话已结束的窗口会一直显示一个年龄。
+时间戳全程是 epoch 毫秒，前端不解析字符串。
+
+`app/tests/activity-channel.mjs` 是这批新增的门，做两件事：把后端 `emit` 与前端
+`listen` 的事件名集合对齐（漏一侧就红），以及**从 `activity.rs` 的声明里推导**载荷
+字段名与枚举词再和 `types.ts` 比对——字段在前端重述一遍等于没有门，因为它跟着改
+就一起绿。改名会失败已按变异验证：把 `ReadFailed` 改成别的词，夹具变红，改回即绿。
+
+§2.2 的 32 MB 枚举上限与 §2.6 的 fsmonitor 未验证记录都在这一批落到了
+`docs/known-limitations.md`；`CHANGELOG.md` 记的是交付事实“读不动的目录不再被报成
+无变化”，而不是这条规则的来源。
+
+**两条义务本批没有兑现，是排期不是漏网。** 其一：`MtimeIndex::note` 只做一次比较
+和一次插入，被改写的那个持有者不变时它**不重算最大值**，`MtimeIndex` 也没有
+`forget` 与重建走查计数——`activity::tests::a_steady_writer_does_not_move_the_maximum`
+钉的是这个语义（以及 `(mtime, path)` 的平局裁决与到达顺序无关），钉不了成本，
+成本属于消费 `Window` 的 C03。其二：年龄那一行的界面与它的 CHANGELOG 条目一起
+留给有显示的那一批，本批只交付了 `currentActivity()` 与它的订阅。
+
 ## 3. C03：增量更新的触发来源
 
 “哪些来源变化会改变候选集合”已由上表给出，落到监听上需要分别处理：
@@ -1273,10 +1364,11 @@ B03 的记录接受这条，并把身份**判给了 B05 一处定义**：键的�
 确实会以"读了多少次"的形式暴露自己；不要把断言建在这上面——它依赖真实时长，
 而间隔默认是秒级，计数那条是确定性的。
 
-### 4.10 B05 的标识形态：读自并行工作树，**尚未落地**
+### 4.10 B05 的标识形态：读自并行工作树，**现已落地**（`a7227ae`）
 
-本节全部读自未提交的工作树，不是 HEAD 的事实；因此按符号引用，不按行号引用
-（行号在两次读之间就会漂）。它答掉了 §6 里挂着的那条“域键是否升级为会话身份”。
+本节最初读自未提交的工作树，因此按符号引用，不按行号引用（行号在两次读之间就
+会漂）。它答掉了 §6 里挂着的那条“域键是否升级为会话身份”。落地后逐条复核过，
+下面写的形状与 `session.rs` / `snapshotBus.ts` 当前代码一致。
 
 工作树里看到的形状：`SnapshotView` 增加 `sessionId` / `historyGeneration` /
 `refsGeneration` 三个后端铸造的数；新增 `ReadContext { sessionId, generation: Option<u64> }`

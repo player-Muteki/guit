@@ -43,8 +43,9 @@ const ENUMERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What the activity line may claim about its own evidence. `scanning` and
 /// `stale` are deliberately absent: the first belongs to a frontend that has
-/// received nothing yet, and the second needs an index that outlives the scan
-/// which built it, which only incremental updating creates.
+/// received nothing yet, and the second is "how long have I had no evidence",
+/// which a scan always answers as fresh by construction and only a clock that
+/// keeps running between scans can decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ActivityState {
