@@ -26,12 +26,16 @@ export interface ThemeDeclaration {
 }
 
 /** One rule of a parsed fragment. `nested` holds the rules inside an at-rule that
- * groups others; `selector` is null for a rule that has none. */
+ * groups others; `selector` is null for a rule that has none. `prelude` is the
+ * at-rule's own text as it was written, kept because a grouping rule cannot be
+ * handed back to the engine without it — `@media` on its own says nothing about
+ * which condition was asked for. */
 export interface ThemeRule {
   kind: RuleKind;
   selector: string | null;
   declarations: ThemeDeclaration[];
   nested?: ThemeRule[];
+  prelude?: string;
 }
 
 export type ProblemKind =
@@ -52,8 +56,18 @@ export interface ThemeFinding {
   /** The name that was refused, so the fragment can be edited rather than
    * rewritten from scratch. */
   item: string;
-  /** Why it was refused. These are the answers the user can act on. */
-  because: "network" | "layout" | "hides-controls" | "overrides-panel" | "too-wide" | "not-a-theme";
+  /** Why it was refused. These are the answers the user can act on. The last one
+   * is not decided here: `themeCss.ts` writes an accepted value with the engine's
+   * own setter and asks whether it survived, so "the renderer could not read it"
+   * is a fact about this engine rather than a rule of the subset. */
+  because:
+    | "network"
+    | "layout"
+    | "hides-controls"
+    | "overrides-panel"
+    | "too-wide"
+    | "not-a-theme"
+    | "not-readable";
 }
 
 export interface ThemeReview {

@@ -18,6 +18,7 @@ const REASONS: Record<ThemeFinding["because"], string> = {
   "overrides-panel": "insists on beating a colour the panel chose to stay readable",
   "too-wide": "can set more than it says, so write the specific property instead",
   "not-a-theme": "is neither a colour nor a typeface",
+  "not-readable": "is not a value the panel's renderer could read, so nothing from it is applied",
 };
 
 /** Two findings are about a whole rule rather than about one name inside it, and

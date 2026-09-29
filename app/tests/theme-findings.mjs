@@ -45,10 +45,16 @@ const everything = reviewThemeCss([
 
 const declaredReasons = () => {
   const source = readFileSync(new URL("../src/themeCssModel.ts", import.meta.url), "utf8");
-  const clause = /because:\s*((?:"[a-z-]+"\s*\|?\s*)+)/.exec(source);
+  const clause = /because:\s*([\s\S]*?);/.exec(source);
   assert.ok(clause, "the finding type must declare its reasons as a closed union");
   return [...clause[1].matchAll(/"([a-z-]+)"/g)].map((one) => one[1]);
 };
+
+// `not-readable` is not a decision of the subset: it is what the engine says when
+// `themeCss.ts` hands it an accepted name and value and the value does not survive
+// the write. No fragment reaches it through the pure review, and no fixture should
+// pretend one does.
+const ENGINE_ONLY = new Set(["not-readable"]);
 
 const tableReasons = () => {
   const source = readFileSync(new URL("../src/themeFindings.ts", import.meta.url), "utf8");
@@ -64,7 +70,12 @@ test("the reasons the reviewer can give, the reasons the table has words for and
     everything.findings.filter((one) => !RULE_LEVEL.has(one.kind)).map((one) => one.because),
   );
   assert.deepEqual([...table].sort(), [...declared].sort());
-  assert.deepEqual([...reached].sort(), [...declared].sort());
+  const reachable = new Set([...reached, ...ENGINE_ONLY]);
+  assert.deepEqual([...reachable].sort(), [...declared].sort());
+  for (const reason of ENGINE_ONLY) assert.equal(declared.has(reason), true, `${reason} must stay declared`);
+  for (const finding of everything.findings) {
+    assert.equal(ENGINE_ONLY.has(finding.because), false, `the pure review reached ${finding.because}`);
+  }
 });
 
 test("every reason renders as a sentence, not a blank or a placeholder", () => {

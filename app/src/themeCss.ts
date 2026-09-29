@@ -1,24 +1,32 @@
-// The DOM half of a pasted theme fragment: read it with the engine's parser, in a
-// document the panel's own cascade cannot be reached from; ask the pure reviewer
-// about every declaration the parser found; and hand back stylesheet text that the
-// engine wrote.
+// The engine half of a pasted theme fragment: hand the reviewed declarations to
+// the renderer's own property setter, and hand back the stylesheet text the
+// renderer wrote.
 //
-// Two rules shape this file, and both come from what it is for.
+// Three rules shape this file.
 //
-// The decisions are not here. `themeCssModel.ts` decides, declaration by
-// declaration, and this file asks it the same question for the same declaration.
-// A second copy of the policy would drift, and the drift would show up as a
-// preview that described one fragment while the panel applied another.
+// The decisions are not here. `themeParse.ts` reads what the person wrote and
+// `themeCssModel.ts` decides, declaration by declaration; this file only writes
+// what it is told to write. A second copy of the policy would drift, and the drift
+// would show up as a preview that described one fragment while the panel applied
+// another.
 //
-// The text applied is never assembled here. Declarations are removed from the
-// parsed rule, and what survives is read back as `cssText` — the engine's own
-// serialization, which by construction parses again into what it came from. A
-// fragment whose value contained a brace, a semicolon or an escape could produce
-// text that means something else on the way back in, and that is how a theme
-// becomes a stylesheet the reviewer never approved.
+// The names come from the author, not from the engine. Measured on WebKitGTK
+// (2.52.6), asking CSSOM for a rule's properties returns longhands: `font:
+// 12px/1.5 serif` arrives as seventeen entries including `font-weight: normal`,
+// none of them named `font`. Reviewing that list would refuse the shorthand by
+// never seeing it, apply the defaults it stood for, and tell the person about
+// thirteen properties they never typed.
+//
+// The text applied is never assembled here. Each declaration is written with
+// `setProperty`, which takes the name and the value as separate arguments, and what
+// survives is read back as `cssText` — the engine's own serialization, which by
+// construction parses again into what it came from. A fragment whose value contained
+// a brace, a semicolon or an escape could produce text that means something else on
+// the way back in, and that is how a theme becomes a stylesheet nobody reviewed.
 
 import type { ThemeDeclaration, ThemeFinding, ThemeRule } from "./themeCssModel";
-import { isThemeSelector, judgeDeclaration } from "./themeCssModel";
+import { reviewThemeCss } from "./themeCssModel";
+import { parseThemeFragment } from "./themeParse";
 
 export interface ThemeFragment {
   /** One entry per surviving rule, in the order the fragment stated them. */
@@ -28,19 +36,36 @@ export interface ThemeFragment {
   empty: boolean;
 }
 
-const FRAME_STYLE = "position:absolute;width:0;height:0;border:0;visibility:hidden";
+/** Anything the engine will accept new rules into: a sheet, or a grouping rule. */
+interface Container {
+  insertRule(text: string, index: number): number;
+  deleteRule(index: number): void;
+  readonly cssRules: CSSRuleList;
+}
 
-/** Parse, review and harvest a fragment. Returns nothing usable if the fragment
- * could not be read as a stylesheet at all — a parse failure is reported, never
- * treated as an empty theme the user may as well accept. */
+/** Review a fragment and return the stylesheet text to apply. A fragment that
+ * cannot be read is reported, never treated as an empty theme the user may as well
+ * accept. */
 export function reviewThemeFragment(text: string): ThemeFragment {
-  const findings: ThemeFinding[] = [];
-  const sheet = parseSheet(text, findings);
-  if (sheet === null) return { rules: [], findings, empty: true };
-  const host: RuleHost = { rules: () => sheet.cssRules, remove: (index) => sheet.deleteRule(index) };
-  prune(host, [], findings);
+  const parsed = parseThemeFragment(text);
+  const review = reviewThemeCss(parsed.rules);
+  const findings: ThemeFinding[] = [...parsed.findings, ...review.findings];
+  if (review.empty) return { rules: [], findings, empty: true };
+
+  let sheet: CSSStyleSheet;
+  try {
+    sheet = new CSSStyleSheet();
+    sheet.replaceSync("");
+  } catch {
+    findings.push({ kind: "unparsed", at: "the fragment", item: "the pasted text", because: "not-a-theme" });
+    return { rules: [], findings, empty: true };
+  }
+
   const rules: string[] = [];
-  collect(host.rules(), rules);
+  for (const rule of review.allowed) {
+    const written = writeRule(sheet, rule, findings, sheet.cssRules.length);
+    if (written !== null) rules.push(written);
+  }
   return { rules, findings, empty: rules.length === 0 };
 }
 
@@ -53,159 +78,102 @@ export function writeThemeStyle(host: HTMLElement, css: string): void {
   host.textContent = css;
 }
 
-/** The frame document's `about:blank` is same-origin and its stylesheet is parsed
- * synchronously, so a detached-enough frame is the one mechanism that needs nothing
- * measured on the shipping engine first. A constructed `CSSStyleSheet` would be
- * neater and is not assumed: what it takes to make that the only path is a run on
- * WebKitGTK, and a reviewer that silently had no rules to review is worse than a
- * frame nobody can see. */
-function parseSheet(text: string, findings: ThemeFinding[]): CSSStyleSheet | null {
-  const frame = document.createElement("iframe");
-  frame.setAttribute("hidden", "");
-  frame.setAttribute("aria-hidden", "true");
-  frame.setAttribute("title", "");
-  frame.setAttribute("sandbox", "");
-  frame.setAttribute("style", FRAME_STYLE);
-  document.body.appendChild(frame);
-  try {
-    const doc = frame.contentDocument;
-    if (doc === null) throw new Error("no parse document");
-    const style = doc.createElement("style");
-    style.textContent = text;
-    doc.head.appendChild(style);
-    const sheet = style.sheet as CSSStyleSheet | null;
-    if (sheet === null) throw new Error("no parse sheet");
-    // Touch the rule list here: a sheet that cannot answer is refused while the
-    // frame is still in hand, rather than at the first rule the caller reads.
-    void sheet.cssRules.length;
-    return sheet;
-  } catch {
-    findings.push({
-      kind: "unparsed",
-      at: "the fragment",
-      item: "the pasted text",
-      because: "not-a-theme",
-    });
+/** Returns the engine's text for the rule, or null when it was refused — and a
+ * refused rule is gone from the container, so nothing half-written can be applied. */
+function writeRule(container: Container, rule: ThemeRule, findings: ThemeFinding[], index: number): string | null {
+  const place = rule.selector ?? rule.prelude ?? "the fragment";
+  const inserted = insertEmpty(container, rule, index, findings, place);
+  if (inserted === null) return null;
+
+  if (rule.kind === "style") {
+    const written = writeDeclarations((inserted.rule as CSSStyleRule).style, rule.declarations, findings, place);
+    if (written === 0) {
+      container.deleteRule(inserted.index);
+      return null;
+    }
+    return inserted.rule.cssText;
+  }
+
+  const group = inserted.rule as CSSGroupingRule;
+  let kept = 0;
+  for (const nested of rule.nested ?? []) {
+    const text = writeRule(into(group), nested, findings, group.cssRules.length);
+    if (text !== null) kept++;
+  }
+  if (kept === 0) {
+    container.deleteRule(inserted.index);
     return null;
-  } finally {
-    frame.remove();
   }
+  return group.cssText;
 }
 
-function kindOf(rule: CSSRule): ThemeRule["kind"] {
-  // Named by constructor rather than by the legacy numeric `type`, which reports a
-  // CSSFontFaceRule as a STYLE_RULE on some engines — and a font face read as a
-  // style rule is a remote resource applied as a colour.
-  const name = rule.constructor.name;
-  if (name === "CSSMediaRule") return "media";
-  if (name === "CSSSupportsRule") return "supports";
-  if (name === "CSSImportRule") return "import";
-  if (name === "CSSFontFaceRule") return "font-face";
-  if (name === "CSSKeyframesRule") return "keyframes";
-  if (name === "CSSStyleRule") return "style";
-  return "other";
+/** The same three methods, aimed at the inside of a grouping rule. */
+function into(group: CSSGroupingRule): Container {
+  return {
+    insertRule: (text: string, index: number) => group.insertRule(text, index),
+    deleteRule: (index: number) => group.deleteRule(index),
+    cssRules: group.cssRules,
+  };
 }
 
-/** Where a rule lives and how it is taken out of it.
- *
- * A `CSSRuleList` is read-only: removal belongs to the sheet or the grouping rule
- * that owns it. Carrying the owner along is what makes one traversal work for both,
- * rather than two similar ones that can drift apart on a nested rule. */
-interface RuleHost {
-  rules(): CSSRuleList;
-  remove(index: number): void;
+interface Inserted {
+  rule: CSSRule;
+  index: number;
 }
 
-function prune(host: RuleHost, trail: string[], findings: ThemeFinding[]): void {
-  const rules = host.rules();
-  // Descending, because deleting shifts everything after the index.
-  for (let index = rules.length - 1; index >= 0; index--) {
-    const rule = rules[index];
-    const kind = kindOf(rule);
-    const styleRule = rule as CSSStyleRule;
-    const grouped = rule as CSSGroupingRule;
-    const label = kind === "style" ? styleRule.selectorText : `@${kind}`;
-    const here = [...trail, label];
-
-    if (kind !== "style" && kind !== "media" && kind !== "supports") {
-      findings.push({
-        kind: "at-rule",
-        at: trailLabel(trail),
-        item: `@${kind}`,
-        because: kind === "keyframes" ? "layout" : "not-a-theme",
-      });
-      host.remove(index);
-      continue;
-    }
-
-    if (kind === "style" && !isThemeSelector(styleRule.selectorText)) {
-      findings.push({
-        kind: "selector",
-        at: trailLabel(trail),
-        item: styleRule.selectorText,
-        because: "hides-controls",
-      });
-      host.remove(index);
-      continue;
-    }
-
-    if (kind === "style") {
-      pruneDeclarations(styleRule, here, findings, () => host.remove(index));
-      continue;
-    }
-
-    prune(
-      { rules: () => grouped.cssRules, remove: (nested: number) => grouped.deleteRule(nested) },
-      here,
-      findings,
-    );
-    if (grouped.cssRules.length === 0) host.remove(index);
-  }
-}
-
-function pruneDeclarations(
-  rule: CSSStyleRule,
-  trail: string[],
+/** Make the rule's own shell, with nothing in it. The text handed to the engine is
+ * the at-rule's prelude or the selector, both of which the review constrained to
+ * brace-free and readable forms; the values never enter this string. */
+function insertEmpty(
+  container: Container,
+  rule: ThemeRule,
+  index: number,
   findings: ThemeFinding[],
-  removeRule: () => void,
-): void {
-  const style = rule.style;
-  const names: string[] = [];
-  for (let position = 0; position < style.length; position++) {
-    const name = style.item(position);
-    if (name !== null) names.push(name);
+  place: string,
+): Inserted | null {
+  const shell = rule.kind === "style" ? `${rule.selector ?? ""} {}` : `${rule.prelude ?? ""} {}`;
+  try {
+    container.insertRule(shell, index);
+  } catch {
+    findings.push({ kind: "unparsed", at: place, item: shell, because: "not-a-theme" });
+    return null;
   }
-  let substantive = 0;
-  for (const name of names) {
-    const value = style.getPropertyValue(name);
-    const declaration: ThemeDeclaration = {
-      property: name,
-      value,
-      important: style.getPropertyPriority(name) === "important",
-    };
-    if (declaration.property.trim() !== "" && declaration.value.trim() !== "") substantive++;
-    if (judgeDeclaration(declaration, trail, findings) === null) style.removeProperty(name);
+  const read = container.cssRules[index] as CSSStyleRule | CSSGroupingRule | undefined;
+  if (read === undefined) {
+    findings.push({ kind: "unparsed", at: place, item: shell, because: "not-a-theme" });
+    return null;
   }
-  // The same notice the pure review gives: the rule said something and all of it
-  // was refused, so the findings above are read as the reason for its absence.
-  if (style.length === 0 && substantive > 0) {
-    findings.push({
-      kind: "empty",
-      at: trailLabel(trail),
-      item: rule.selectorText,
-      because: "not-a-theme",
-    });
-    removeRule();
+  if (rule.kind === "style" && (read as CSSStyleRule).selectorText !== rule.selector) {
+    // The engine read a different rule than the one that was reviewed, so the
+    // review says nothing about what would be applied.
+    container.deleteRule(index);
+    findings.push({ kind: "unparsed", at: place, item: shell, because: "not-a-theme" });
+    return null;
   }
+  return { rule: read, index };
 }
 
-function collect(rules: CSSRuleList, into: string[]): void {
-  for (let index = 0; index < rules.length; index++) {
-    const rule = rules[index];
-    into.push(rule.cssText);
+function writeDeclarations(
+  style: CSSStyleDeclaration,
+  declarations: ThemeDeclaration[],
+  findings: ThemeFinding[],
+  place: string,
+): number {
+  let kept = 0;
+  for (const declaration of declarations) {
+    try {
+      style.setProperty(declaration.property, declaration.value, declaration.important ? "important" : "");
+    } catch {
+      findings.push({ kind: "value", at: place, item: declaration.property, because: "not-readable" });
+      continue;
+    }
+    if (style.getPropertyValue(declaration.property) === "") {
+      // The renderer was given the name and the value separately and still has
+      // nothing for it: the value is not one this engine reads.
+      findings.push({ kind: "value", at: place, item: declaration.property, because: "not-readable" });
+      continue;
+    }
+    kept++;
   }
-}
-
-function trailLabel(trail: string[]): string {
-  return trail.length === 0 ? "the fragment" : trail.join(" → ");
+  return kept;
 }
