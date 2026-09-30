@@ -30,12 +30,6 @@
 //! all — a commit id has to be resolved by the backend, not fuzzy-scored
 //! against prose.
 
-// The matcher is reached by `search` and by its tests, and nothing outside those
-// two files calls either: the attribute goes with the command registration that
-// puts the scan in front of the frontend. Listing it here rather than at each
-// item keeps the warning gate on for everything else.
-#![allow(dead_code)]
-
 use icu_normalizer::ComposingNormalizerBorrowed;
 use serde::Serialize;
 use unicode_segmentation::UnicodeSegmentation;

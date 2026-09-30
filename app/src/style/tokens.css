@@ -421,6 +421,12 @@
      190px and call it a panel. */
   --detail-cap: 30vh;
   --list-cap: 45vh;
+  /* The search layer floats over the panel rather than pushing it, so the
+     window's short axis caps it too. A candidate that is not on screen is a
+     candidate that will not be picked, so the layer gets the room a list of
+     the same height would ask for and scrolls inside it; nothing below it
+     moves, because it is not in the panel's flow. */
+  --search-cap: 40vh;
 }
 
 /* Short windows. Height is the axis that runs out first: the shell spends
@@ -436,6 +442,7 @@
     --block-gap: 0.3rem;
     --detail-cap: 26vh;
     --list-cap: 40vh;
+    --search-cap: 36vh;
   }
 }
 
@@ -449,6 +456,7 @@
     --tab-item-size: 1.6rem;
     --detail-cap: 22vh;
     --list-cap: 34vh;
+    --search-cap: 30vh;
   }
 }
 

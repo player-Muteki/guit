@@ -4,9 +4,15 @@ import {
   bestHit,
   canAskAgain,
   closedLane,
+  drawCommit,
+  drawnCommits,
+  drawRef,
   dropReason,
+  errorCode,
   fieldText,
+  hasMark,
   hasRows,
+  hiddenCommits,
   highlight,
   isSettled,
   locateCommit,
@@ -19,7 +25,10 @@ import {
   outcomeOf,
   refsUsable,
   segments,
+  typed,
   unansweredNames,
+  DRAWN_COMMITS,
+  SEARCH_DEBOUNCE_MS,
   STOP_SCAN_CAP,
 } from "../src/searchModel.ts";
 
@@ -430,4 +439,158 @@ test("being overtaken is not the search failing", () => {
   // A code this file has not been told about is a refusal too: an unrecognised
   // rejection may not be read as "the reader moved on" and keep its rows.
   assert.equal(outcomeOf("a_code_this_file_has_not_met"), "refused");
+});
+
+// A fragment written in units, because units are what a drawn string is indexed
+// by. Where a test needs the byte offsets to differ it says so and measures them.
+const frag = (start, end) => ({ byteStart: start, byteEnd: end, unitStart: start, unitEnd: end });
+
+test("a keystroke is a query only after the wait, and never mid-composition", () => {
+  // The read budget is measured from the keystroke, not from the request, so the
+  // wait has to leave room inside it for the Git process that follows.
+  assert.ok(SEARCH_DEBOUNCE_MS > 0 && SEARCH_DEBOUNCE_MS < 150, `${SEARCH_DEBOUNCE_MS}ms`);
+  const at = 10_000;
+  assert.deepEqual(typed("  fix lane ", false, at), {
+    query: "fix lane",
+    askAt: at + SEARCH_DEBOUNCE_MS,
+  });
+  // A field that holds only spaces asks nothing, so the answer it left closes.
+  assert.deepEqual(typed("", false, at), { query: null, askAt: null });
+  assert.deepEqual(typed("   ", false, at), { query: null, askAt: null });
+  // An input method fires an `input` event for every piece of one character.
+  // The text is carried — the end of the composition has to be able to ask it —
+  // but nothing in the middle of one is askable.
+  assert.deepEqual(typed("候选", true, at), { query: "候选", askAt: null });
+  // The end of a composition re-enters as an ordinary keystroke, which restarts
+  // the count for the text that actually landed.
+  assert.deepEqual(typed("候选", false, at + 30).askAt, at + 30 + SEARCH_DEBOUNCE_MS);
+});
+
+test("a rejection's code is read out of the object the backend ships", () => {
+  assert.equal(errorCode({ code: "search_superseded", message: "replaced" }), "search_superseded");
+  // A code that is not a string names nothing, and a rejection with no code at
+  // all is the same: both are read as a refusal rather than as a quiet drop.
+  assert.equal(errorCode({ code: 7 }), "");
+  assert.equal(errorCode({ message: "an unexpected error" }), "");
+  assert.equal(errorCode("search_superseded"), "");
+  assert.equal(errorCode(null), "");
+  assert.equal(errorCode(undefined), "");
+  assert.equal(outcomeOf(errorCode({ message: "an unexpected error" })), "refused");
+});
+
+test("the layer draws a bounded number of rows and counts what it left out", () => {
+  const commits = Array.from({ length: DRAWN_COMMITS + 7 }, (_, index) =>
+    commitHit(oid("a"), { offset: index }),
+  );
+  const { result } = answered(1, 4, {
+    window: window({ commits, complete: false, nextCursor: 2000 }),
+  });
+  // Cut in the scan's own order, newest first, so the rows the reader sees are
+  // the rows the walk found first — and the button in the footer is the only way
+  // to the rest, never a silent skip.
+  assert.equal(drawnCommits(result).length, DRAWN_COMMITS);
+  assert.equal(drawnCommits(result)[0].offset, 0);
+  assert.equal(drawnCommits(result)[DRAWN_COMMITS - 1].offset, DRAWN_COMMITS - 1);
+  assert.equal(hiddenCommits(result), 7);
+  const few = answered(1, 5, { window: window({ commits: commits.slice(0, 3) }) });
+  assert.equal(drawnCommits(few.result).length, 3);
+  assert.equal(hiddenCommits(few.result), 0);
+});
+
+test("a row splits its message at the boundary the backend reported", () => {
+  const message = "Refactor lane\nthe lane fans out";
+  const both = drawCommit(
+    commitHit(HEAD, {
+      message,
+      subjectEndUnits: 13,
+      hits: [
+        { field: "subject", tier: "contiguous", fragments: [frag(9, 13)] },
+        { field: "body", tier: "contiguous", fragments: [frag(18, 22)] },
+      ],
+    }),
+  );
+  assert.deepEqual(both.subject, [
+    { text: "Refactor ", marked: false },
+    { text: "lane", marked: true },
+  ]);
+  assert.deepEqual(both.body, [
+    { text: "\nthe ", marked: false },
+    { text: "lane", marked: true },
+    { text: " fans out", marked: false },
+  ]);
+  assert.equal(hasMark(both.subject), true);
+  assert.equal(hasMark(both.body), true);
+  assert.equal(hasMark([]), false);
+  assert.equal(hasMark([{ text: "nothing", marked: false }]), false);
+
+  // A body-only match leaves the subject plain and earns the second line; a
+  // subject-only match leaves the body unmarked, which is what tells a view not
+  // to copy the message twice.
+  const bodyOnly = drawCommit(
+    commitHit(HEAD, {
+      message,
+      subjectEndUnits: 13,
+      hits: [{ field: "body", tier: "contiguous", fragments: [frag(18, 22)] }],
+    }),
+  );
+  assert.deepEqual(bodyOnly.subject, [{ text: "Refactor lane", marked: false }]);
+  assert.equal(hasMark(bodyOnly.subject), false);
+  assert.equal(hasMark(bodyOnly.body), true);
+
+  // A match that runs across the split is cut there rather than repeated, so the
+  // two lines together are still exactly the message.
+  const across = drawCommit(
+    commitHit(HEAD, {
+      message: "lane\nlane two",
+      subjectEndUnits: 4,
+      hits: [{ field: "subject", tier: "subsequence", fragments: [frag(0, 8)] }],
+    }),
+  );
+  assert.deepEqual(across.subject, [{ text: "lane", marked: true }]);
+  assert.deepEqual(across.body, [
+    { text: "\nlan", marked: true },
+    { text: "e two", marked: false },
+  ]);
+
+  // The id and the author columns index their own strings, not the message.
+  const id = oid("c");
+  const meta = drawCommit(
+    commitHit(id, {
+      authorName: "Kys",
+      hits: [
+        { field: "oid", tier: "prefix", fragments: [frag(0, 3)] },
+        { field: "author", tier: "contiguous", fragments: [frag(1, 3)] },
+      ],
+    }),
+  );
+  assert.deepEqual(meta.oid, [
+    { text: id.slice(0, 3), marked: true },
+    { text: id.slice(3), marked: false },
+  ]);
+  assert.deepEqual(meta.author, [
+    { text: "K", marked: false },
+    { text: "ys", marked: true },
+  ]);
+
+  // A fragment that does not fit the message costs a highlight and never a
+  // letter out of place.
+  const wrong = drawCommit(
+    commitHit(HEAD, {
+      message,
+      subjectEndUnits: 13,
+      hits: [{ field: "body", tier: "contiguous", fragments: [frag(30, 45)] }],
+    }),
+  );
+  assert.deepEqual(wrong.body, [{ text: message.slice(13), marked: false }]);
+});
+
+test("a name row is cut at its own matches", () => {
+  assert.deepEqual(drawRef(refHit("feature/search-ui", { fragments: [frag(8, 14)] })), [
+    { text: "feature/", marked: false },
+    { text: "search", marked: true },
+    { text: "-ui", marked: false },
+  ]);
+  assert.deepEqual(drawRef(refHit("plain", { fragments: [] })), [
+    { text: "plain", marked: false },
+  ]);
 });

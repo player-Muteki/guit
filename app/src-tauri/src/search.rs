@@ -29,10 +29,6 @@
 //! capture, a failed exit, a record that does not split into the four fields the
 //! format asked for, or an id that is not an id all refuse the whole window.
 
-// The scan is reached only by its tests so far: the command that carries it
-// belongs to the search context, and the attribute goes with that registration.
-#![allow(dead_code)]
-
 use crate::fuzzy::{self, Field, Query};
 use crate::history::valid_oid;
 use crate::perf;
@@ -1684,8 +1680,16 @@ mod tests {
     /// resolves to.
     struct Bare {
         root: tempfile::TempDir,
-        dir: std::path::PathBuf,
         head: String,
+    }
+
+    impl Bare {
+        /// The repository the fixture built inside its temporary root. The root
+        /// is a field rather than a local so the directory outlives every path
+        /// taken from it.
+        fn dir(&self) -> std::path::PathBuf {
+            self.root.path().join("bare")
+        }
     }
 
     fn bare_fixture(commits: &[(String, String)]) -> Bare {
@@ -1698,7 +1702,7 @@ mod tests {
         );
         import(&dir, "main", commits);
         let head = oid(&dir, "HEAD");
-        Bare { root, dir, head }
+        Bare { root, head }
     }
 
     fn search(
@@ -1853,7 +1857,7 @@ mod tests {
     fn a_bare_repository_is_searched_from_the_commit_its_head_names() {
         let bare = bare_fixture(&[("guit test".to_owned(), "Refactor the graph lane".to_owned())]);
         let state = session::SessionState::default();
-        let view = session::open(&state, &bare.dir).expect("open bare");
+        let view = session::open(&state, &bare.dir()).expect("open bare");
         // Git reports no status in a bare repository, so the snapshot names no
         // branch and the session pins no head. The search still has an anchor:
         // the commit `HEAD` resolves to, read back as a full id.

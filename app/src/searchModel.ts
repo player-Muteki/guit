@@ -114,6 +114,56 @@ export interface SearchPage {
 /// `complete: false` means only that another window exists.
 export const STOP_SCAN_CAP = "search_scan_capped";
 
+// --- what a keystroke means -----------------------------------------
+
+/// How long the field waits after the last keystroke before a scan is asked
+/// for. The number is in the open because the read budget is measured from the
+/// keystroke, not from the request: a wait that lived inside a view would let a
+/// panel meet 150 ms of work by spending 400 ms of silence. One Git process
+/// costs about 5 ms of that, so the wait, not the walk, is what a burst of
+/// typing is actually charged for.
+export const SEARCH_DEBOUNCE_MS = 120;
+
+/// What the reader has typed, and when it may be asked.
+///
+/// The two are decided together because they are the same question: a string in
+/// a field is not yet a query. An input method composes one character out of
+/// several keystrokes and fires an `input` event for each of them, and a scan
+/// started on a half-composed character is a scan thrown away — so while a
+/// composition is open, nothing is askable. An empty field is not a question
+/// either; closing an answer costs no read, and `query: null` is how the view
+/// knows to close rather than to ask.
+export interface Typing {
+  query: string | null;
+  /// The reading of the caller's clock at which this query may be asked, or
+  /// `null` when it may not be asked at all. The clock is whatever the caller
+  /// measures with, since this file only ever compares a deadline to the number
+  /// it was minted from; a test drives it with integers.
+  askAt: number | null;
+}
+
+/// The state of the field after a keystroke, a paste, or the end of a
+/// composition. `composing` is true between `compositionstart` and
+/// `compositionend`; the end of one is fed back through here as an ordinary
+/// input, which is what restarts the count for the text that actually landed.
+export function typed(query: string, composing: boolean, at: number): Typing {
+  const trimmed = query.trim();
+  if (trimmed === "") return { query: null, askAt: null };
+  if (composing) return { query: trimmed, askAt: null };
+  return { query: trimmed, askAt: at + SEARCH_DEBOUNCE_MS };
+}
+
+/// The machine-readable code of a rejected read, or `""` when the rejection
+/// carries none. Every backend failure arrives as a coded object, and the code
+/// is the only part that says what happened rather than what was said; a
+/// rejection with no code names no known failure, which `outcomeOf` reads as a
+/// refusal — the safe answer to a failure it has not been told about.
+export function errorCode(error: unknown): string {
+  if (typeof error !== "object" || error === null || !("code" in error)) return "";
+  const code = (error as { code: unknown }).code;
+  return typeof code === "string" ? code : "";
+}
+
 /// The three things a rejected search read can mean, kept apart because each
 /// owes the screen a different sentence.
 ///
@@ -300,6 +350,26 @@ export function hasRows(result: SearchResult | null): boolean {
   return result !== null && (result.commits.length > 0 || result.refs.length > 0);
 }
 
+/// How many commit rows one layer draws. A window may carry a hundred commits
+/// and the overlay is 340 px wide in its smallest legal window, so a list that
+/// rendered all of them would push the footer — the one that says whether the
+/// scan finished — past everything the reader can see. The count is decided
+/// here rather than in the view because the sentence about the rows left out is
+/// a claim about the answer, not about the layout.
+export const DRAWN_COMMITS = 40;
+
+/// The rows to draw: the scan's own order, newest first, cut at the limit. A
+/// later window is asked for by name, so nothing here silently drops a hit the
+/// reader could have reached.
+export function drawnCommits(result: SearchResult): CommitHit[] {
+  return result.commits.slice(0, DRAWN_COMMITS);
+}
+
+/// Commits the answer holds that the layer is not drawing.
+export function hiddenCommits(result: SearchResult): number {
+  return Math.max(0, result.commits.length - DRAWN_COMMITS);
+}
+
 /// Whether the names in an answer are the names on screen. The listing is taken
 /// during the scan and its generation is read *before* the listing, so an answer
 /// whose names moved looks older than it is — and the safe reading of an answer
@@ -414,6 +484,12 @@ export function highlight(hit: SearchHit, commit: CommitHit): Segment[] {
   return segments(fieldText(hit, commit), hit.fragments);
 }
 
+/// The runs of one name row: the name itself, cut at its own matches. A name
+/// carries exactly one field, so there is nothing to choose between.
+export function drawRef(ref: RefHit): Segment[] {
+  return segments(ref.name, ref.fragments);
+}
+
 /// The best hit on a commit row, which is the first one: the backend orders a
 /// row's fields by the ladder (`oid` before `subject` before `body` before
 /// `author`) and each field's own matches by the matcher's key. A row highlights
@@ -427,4 +503,58 @@ export function bestHit(commit: CommitHit): SearchHit | null {
 /// How many of a commit's fields matched beyond the one a row highlights.
 export function otherFields(commit: CommitHit): number {
   return Math.max(0, commit.hits.length - 1);
+}
+
+/// Whether any of these runs is a match. It is the difference between a second
+/// line that explains a hit and a second line copied in for nothing.
+export function hasMark(runs: readonly Segment[]): boolean {
+  return runs.some((run) => run.marked);
+}
+
+/// The whole of one result row's text, decided in one place: which runs of the
+/// subject line and the body are matches, where the message splits into those
+/// two lines, and what the id and author columns carry.
+///
+/// A commit can match in the subject and in the body at once, and both index
+/// the same message text, so their fragments are concatenated in the order the
+/// ladder puts them in — subject before body, which is also their order in the
+/// string. A fragment that does not sit where the previous one left off is
+/// dropped by `segments` rather than clamped, so an answer that does not fit
+/// its own field costs a missing highlight and never a letter out of place.
+export interface RowDraw {
+  subject: Segment[];
+  body: Segment[];
+  oid: Segment[];
+  author: Segment[];
+}
+
+export function drawCommit(commit: CommitHit): RowDraw {
+  const fragmentsOf = (field: HitField): Fragment[] => {
+    const hit = commit.hits.find((candidate) => candidate.field === field);
+    return hit === undefined ? [] : hit.fragments;
+  };
+  const runs = segments(commit.message, [
+    ...fragmentsOf("subject"),
+    ...fragmentsOf("body"),
+  ]);
+  const end = Math.min(Math.max(0, commit.subjectEndUnits), commit.message.length);
+  const subject: Segment[] = [];
+  const body: Segment[] = [];
+  let at = 0;
+  for (const run of runs) {
+    const next = at + run.text.length;
+    if (next <= end) subject.push(run);
+    else if (at >= end) body.push(run);
+    else {
+      subject.push({ text: run.text.slice(0, end - at), marked: run.marked });
+      body.push({ text: run.text.slice(end - at), marked: run.marked });
+    }
+    at = next;
+  }
+  return {
+    subject,
+    body,
+    oid: segments(commit.oid, fragmentsOf("oid")),
+    author: segments(commit.authorName, fragmentsOf("author")),
+  };
 }

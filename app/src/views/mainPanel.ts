@@ -1,16 +1,18 @@
-// The main panel: the changes area and the commit history of the current
-// branch, on one page, visible together.
+// The main panel: the search field, the changes area and the commit history of
+// the current branch, on one page, visible together.
 //
-// It composes the two regions instead of owning any of their behaviour — the
-// regions stay independently testable, and neither is a page of its own any
-// more. A page for the files and a page for the graph would make the panel
-// two tabs, and the panel is one: the point of the layout is that staging a
-// file and reading the graph happen in the same glance.
+// It composes the regions instead of owning any of their behaviour — each stays
+// independently testable, and none of them is a page of its own any more. A page
+// for the files and a page for the graph would make the panel two tabs, and the
+// panel is one: the point of the layout is that staging a file and reading the
+// graph happen in the same glance.
 //
-// What the panel does own is the split between the two: a user on a short
+// What the panel does own is the split between the two lists: a user on a short
 // window decides which of the two regions gets the room, and both keep a
 // floor the drag cannot go below. The ratio lives in `--main-split`, so the
-// stylesheet owns the geometry and this file only answers "how much".
+// stylesheet owns the geometry and this file only answers "how much". The search
+// field is not part of that bargain — it is chrome, and it keeps its own height
+// whatever the split says.
 
 import { el } from "../dom";
 import { onDispose } from "../lifecycle";
@@ -32,7 +34,11 @@ const SPLIT_KEY = "guit.mainSplit";
 // region holds is what it must keep showing.
 const LIST_SELECTOR = ".file-list, .history-list";
 
-export function createMainPanel(changes: HTMLElement, history: HTMLElement): ViewDescriptor {
+export function createMainPanel(
+  search: HTMLElement,
+  changes: HTMLElement,
+  history: HTMLElement,
+): ViewDescriptor {
   const splitter = el("div", {
     class: "splitter main-splitter",
     role: "separator",
@@ -42,7 +48,7 @@ export function createMainPanel(changes: HTMLElement, history: HTMLElement): Vie
     "aria-valuemin": SPLIT_MIN,
     "aria-valuemax": SPLIT_MAX,
   });
-  const element = el("section", { class: "main-panel" }, [changes, splitter, history]);
+  const element = el("section", { class: "main-panel" }, [search, changes, splitter, history]);
 
   let stored: string | null;
   try {

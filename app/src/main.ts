@@ -39,6 +39,7 @@ import { closeWindow, installWindowHooks, minimizeWindow, restoreWindowState, se
 import { createChangesView } from "./views/changes";
 import { createHistoryView } from "./views/history";
 import { createBranchesView } from "./views/branches";
+import { createSearchView } from "./views/search";
 import { createSettingsView } from "./views/settings";
 import { createWelcomeView } from "./views/welcome";
 import { createMainPanel } from "./views/mainPanel";
@@ -156,6 +157,15 @@ const history = createHistoryView({
     setStatus(`New tag will point at ${oid.slice(0, 10)} — enter a name and press Create tag.`);
   },
 });
+// The search field reaches the graph through one callback and nothing else: it
+// names a commit, the history view decides how that commit gets on screen. No
+// write is reachable from here by any route.
+const search = createSearchView({
+  onError: showError,
+  revealCommit: (oid) => {
+    history.reveal(oid);
+  },
+});
 // The interval row is the one setting this page does not keep: the timer it
 // changes lives with the age line, so asking the changes view is what keeps the
 // panel to a single repeating timer no matter how often the row is used.
@@ -194,7 +204,7 @@ shell = createShell({
 // The main panel and the branch overlay are the only two places a repository
 // view goes: the files and the graph share one page, the picker covers it.
 shell.registerView({ id: "welcome", element: welcome.element });
-shell.registerView(createMainPanel(changes.element, history.element));
+shell.registerView(createMainPanel(search.element, changes.element, history.element));
 shell.registerView(settings.descriptor);
 // The picker reads the names on the way in, which is what lets a snapshot pass
 // over it while it is closed.
@@ -225,6 +235,7 @@ function render(): void {
   shell.render();
   changes.render();
   history.render();
+  search.render();
   branches.render();
   settings.render();
   toasts.render();
@@ -234,6 +245,10 @@ function render(): void {
 // it is drawing, and the names the picker lists while the picker is up. The
 // changed files need no read of their own — they are already in the snapshot.
 onDispose(subscribeToDomain("graph", () => history.sync()));
+// The search is a read of the same history, so it moves on the same counter: a
+// history that changed under an answer leaves an answer about a graph that is no
+// longer drawn, and this is where that is noticed.
+onDispose(subscribeToDomain("graph", () => search.sync()));
 onDispose(subscribeToDomain("refs", () => {
   if (shell.isOverlayOpen()) branches.sync();
 }));

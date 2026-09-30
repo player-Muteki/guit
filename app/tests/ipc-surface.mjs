@@ -300,6 +300,7 @@ test("the registry is registered once", () => {
 // with the same one echoed back.
 const BOUND_READS = [
   "history_page",
+  "search_repository",
   "commit_files",
   "open_commit_diff",
   "list_refs",

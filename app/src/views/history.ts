@@ -41,6 +41,7 @@ import {
 } from "../historyModel";
 import { revealScroll, rowHeightPx, visibleWindow, HISTORY_ROW_REM } from "../fileModel";
 import { currentFontPx } from "../font";
+import { locateCommit } from "../searchModel";
 import { readRefListing } from "../refsStore";
 import { contextMatches, readContextFor, subscribeToDomain } from "../snapshotBus";
 import {
@@ -77,10 +78,27 @@ export interface HistoryDeps {
   onError(error: unknown): void;
 }
 
+export type RevealRoute =
+  /// The commit was already among the rows drawn: the list scrolled to it.
+  | "loaded"
+  /// It was not, so a page was read starting at that commit and the head line
+  /// now says so.
+  | "anchored";
+
 export interface HistoryView {
   element: HTMLElement;
   sync(): void;
   render(): void;
+  /**
+   * Puts one commit on screen and answers which way it got there.
+   *
+   * A search hit is named by its object id alone, and the search's own position
+   * in its walk is not a row index in this graph: the two orders coincide only
+   * at the newest end. So the honest read is either "this page already has it"
+   * or "read the page that starts at it", and the second one changes what the
+   * head line is claiming about the rows below it.
+   */
+  reveal(oid: string): RevealRoute;
 }
 
 export function createHistoryView(deps: HistoryDeps): HistoryView {
@@ -147,8 +165,20 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     title: "The names on these commits could not be read.",
   });
   namesRetry.hidden = true;
+  // A page can be read from a commit other than the head — that is how a search
+  // hit that no loaded row carries reaches the screen. The rows then describe
+  // that commit's ancestry and not the branch's recent history, which is a
+  // claim the head line has to make out loud. The button is the way back.
+  const anchorNotice = el("span", { class: "history-anchored", role: "status", hidden: true });
+  const anchorClear = button("Branch head", () => {
+    anchorOid = null;
+    void loadPage(true);
+    render();
+  }, { class: "btn btn-quiet", title: "Draw the history from the branch head again." });
+  anchorClear.hidden = true;
   const listHead = el("div", { class: "history-list-head" }, [
-    branchButton, countLabel, namesRetry, el("div", { class: "spacer" }), firstParentLabel, findBox, moreButton,
+    branchButton, anchorNotice, anchorClear, countLabel, namesRetry,
+    el("div", { class: "spacer" }), firstParentLabel, findBox, moreButton,
   ]);
 
   const rowsHost = el("div", { class: "virtual-rows" });
@@ -252,6 +282,11 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // This is Git's own notion of a mainline, so the backend decides what it
   // means; the view only asks for one or the other.
   let firstParent = false;
+  // The commit the loaded pages were read *from*, when that is not the head.
+  // Only a reveal sets it, and only a reveal from a commit no loaded row
+  // carries; every other route to a new page — a refresh, a branch switch, a
+  // mainline change — starts from the head again and clears it.
+  let anchorOid: string | null = null;
   // The find box searches what is loaded and says so; it never claims to have
   // searched commits that were never fetched.
   let find: FindQuery = { text: "", regex: false, caseSensitive: false };
@@ -932,6 +967,17 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     branchButton.disabled = snapshot === null || isWriteRunning();
   };
 
+  // What the head line claims about where these pages came from. It is drawn
+  // with the rows it describes rather than with the click that asked for them,
+  // so the sentence and the graph it is about always change together.
+  const renderAnchor = (): void => {
+    const anchored = anchorOid;
+    const shown = anchored !== null && commits.length > 0;
+    anchorNotice.hidden = !shown;
+    anchorClear.hidden = !shown;
+    if (anchored !== null) anchorNotice.textContent = `Drawn from ${anchored.slice(0, 10)} — not the branch head.`;
+  };
+
   // One write, on the lane every write shares. A switch asks for no preview and
   // no ticket: it is not a destructive operation here, and what it cannot do
   // Git itself refuses with HEAD left where it was. The snapshot that refusal
@@ -984,12 +1030,13 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     if (loading || asked === undefined) return;
     if (!reset && !hasMore) return;
     loading = true;
+    const anchored = anchorOid;
     moreButton.disabled = true;
     try {
       const read = await invoke<SessionRead<HistoryPage>>("history_page", {
         context: asked,
         start: historyPageStart(commits.length, reset),
-        oid: null,
+        oid: anchored,
         firstParent,
       });
       // Two questions, and both have to answer yes: is the screen still the one
@@ -1013,6 +1060,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       splitter.hidden = false;
       emptyState.hidden = true;
       updateCount();
+      renderAnchor();
       renderRows();
     } catch (error) {
       deps.onError(error);
@@ -1020,6 +1068,12 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     } finally {
       loading = false;
       moreButton.disabled = !hasMore;
+      // A reveal that landed while this page was being read changed what the
+      // page should have started from, and the rows above came from the old
+      // one. Reading again is the only answer that matches the head line; the
+      // second read captures the anchor it was asked with, so this runs once
+      // per change rather than per retry.
+      if (anchorOid !== anchored) void loadPage(true);
     }
   };
 
@@ -1272,6 +1326,32 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     if (bubbleAt !== null && !bubble.matches(":hover")) closeBubble();
   });
 
+  // --- putting one commit on screen ---
+  // The search layer names a commit and stops there: which of the two honest
+  // routes reaches it is decided here, because only this view knows which
+  // commits it has drawn. Nothing about a search hit may narrow the graph — the
+  // rows a page carries are the rows the backend laid out, all of them, and the
+  // only thing a reveal changes is which page that is.
+  const reveal = (oid: string): RevealRoute => {
+    const locator = locateCommit(oid, visible.map((commit) => commit.oid));
+    if (locator.kind === "loaded") {
+      revealRow(locator.index);
+      setCursor(visible[locator.index], locator.index);
+      // The answer comes with the jump rather than waiting for the pointer,
+      // same as every other route to a row.
+      openBubble(visible[locator.index], locator.index);
+      flashRowAt(locator.index);
+      return "loaded";
+    }
+    // Not on screen. The search's position in its own walk is not an index into
+    // this graph — the two orders coincide only at the newest end — so the
+    // commit is read as the start of a page rather than as a row number, and
+    // the head line says as much while those rows are up.
+    anchorOid = oid;
+    void loadPage(true);
+    return "anchored";
+  };
+
   // --- lifecycle ---
   // Whether the graph has to be read again is not this view's question to
   // answer: the snapshot fan-out only reaches the graph domain when the backend
@@ -1291,6 +1371,10 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     }
     const head = snapshot.branch?.oid ?? null;
     graphContext = readContextFor(snapshot, "graph");
+    // A refresh is the branch's own history again, whatever page was on screen
+    // before it, so the page that was read from a commit goes with the rows it
+    // described.
+    anchorOid = null;
     // The listing is asked for the same session the page is about to be read
     // for, so the rows are never drawn with the previous repository's names.
     void readNames();
@@ -1319,5 +1403,5 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     if (commits.length > 0) renderRows();
   };
 
-  return { element, sync, render };
+  return { element, sync, render, reveal };
 }

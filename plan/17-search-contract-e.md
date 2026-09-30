@@ -377,3 +377,132 @@ E02 已经落地（异常一律整窗拒绝），前半句要先问清四件事�
   第二仓库从 1 开始计数、裸仓库从 HEAD 解析出的那个提交搜。阶段退出门槛仍差 E04）
 ```
 
+
+## 11. E04 动手前要先拿到的事实
+
+E04 的验收是三句："搜索没有 Git 写副作用；范围外引用说明清楚；原图拓扑不被过滤破坏"。
+落到这套界面上有六件事先要问清，每件都决定一个接口：
+
+1. **输入框在 Main 页，不在 app bar。** `shell.ts` 的那一行已经装了字标、仓库名、分支
+   chip、四个会话按钮、提交钮、More 与四只窗控，而它在 340 宽与放大档下的换行行为是被
+   阶段 G 的探针逐档钉住的（`zoom-reflow-check.py` 记的就是"18 起两行、四只钮贴右边界"）。
+   再加一个输入框等于重测那一整段，而搜索恰恰只在有会话时有意义——它属于 Main，欢迎态
+   里根本没有它。→ 接口：`createSearchView(deps)` 交出 `element`，由 `main.ts` 作为
+   `.main-panel` 的第一个子元素交给 `createMainPanel`，形状与另两个区域一样（`sync()` +
+   `render()`）。
+2. **结果层不能借 shell 的那一个 overlay 槽。** `registerOverlay` 只存一份内容与一个
+   `onShow`，今天被分支选择器占着；而 `escapeStack` 那句"菜单 → overlay → 对话框"是按
+   一层写的。两个页面级浮层同时可开会让她变成一句谎。→ 接口：结果层是搜索模块自己的
+   绝对定位元素，和 `.menu` 同档（z 序 40，`--surface-raised` + `--line`），开合与焦点
+   归还在模块内闭环，Escape 到它就停。
+3. **组合期不检索，这条今天整个仓库都没有实现过。** 全仓没有一处 `isComposing`：现有
+   的"不误触发"靠的是普通键只挂在非输入元素的监听上（`/` 挂在 `listPane`）。中文输入法
+   的候选串会以 `input` 事件一段一段进来，每一个都是"半个查询"。→ 接口：
+   `compositionstart` 关闭发查询、`compositionend` 当作一次普通输入重新计时；120 ms
+   的 debounce 写在纯模型里并可测，因为验证文档要求"不把 debounce 隐藏在统计外"。
+4. **能在纯模型里钉的行为必须留在模型里。** 这个仓库的接线测试是**源码 gate**
+   （`app/tests/changes-wiring.mjs` 读源文件比正则），没有 DOM shim，也没有 `invoke`
+   桩。所以"这条答案该不该丢、这一窗怎么并、三种拒绝各说什么"只能在
+   `app/src/searchModel.ts` 里被真的跑过——视图那一层留给源码 gate 检查形状。→ 接口：
+   `views/search.ts` 里不许出现任何判断，只有 DOM 与事件；它 import 纯模型。
+5. **图定位第一次真的用 `history_page` 的 `oid`。** 后端从 D01 就收这个参数（
+   `main.rs:540` 先按完整 id 验），前端 `history.ts:989` 至今恒传 `null`。扫描序与图形序
+   只在"新→旧"上重合（§9 第 4 条），所以命中要么在已加载页里（按 oid 找行），要么就以
+   它为锚读一页并替换窗口——后一种必须让图头部说出"这一页是从这个提交画的"，并留下一条
+   回分支头的路，否则读者以为自己在看分支。结果层永不写 `visible`，也不过滤任何行
+   （验收第三句）。→ 接口：`HistoryView.reveal(oid)` 返回它走的是哪条路，搜索模块只决定
+   要不要关自己。
+6. **页内那个 `Find in loaded commits` 要被统一搜索替掉。** 它正是退出门槛点名的"仅前端
+   已加载过滤"，而且它 `visible = filterCommits(...)` 会把非命中行删掉再画图——同一件事
+   在统一搜索的验收里是禁止的。两个输入框也和 OUTLINE"一个输入框搜索…"冲突。→ 决定：
+   统一搜索先落地（第一次提交，自己完整），删页内 find 与它的 `filterCommits` 调用点是
+   第二次提交（它带着 `historyModel.ts` 的导出与一批夹具，独立成一次更容易回退）。
+
+两条是约束：命令注册必须与它的前端 `invoke` 字面量同一次提交（`ipc-surface.mjs` 的
+BOUND_READS 那条），所以 `search.rs`/`fuzzy.rs` 的两个 `allow(dead_code)` 在第一次提交里
+一起撤；输入框的任何一条路径都不许碰写 lane——G03 的"没有 Git 写副作用"由"这个模块只
+import `search_repository` 与 `history_page` 两条读"来担保，而 `history_page` 只在
+`reveal` 里被 `history.ts` 自己调用。
+
+
+## 12. E04a 落地记录
+
+```text
+任务：E04a 顶栏输入、IME、结果浮层、高亮、键盘导航与图定位——第一次提交，统一搜索自己
+  完整（§11 第 6 条决定页内 find 留给第二次提交）
+对应产品目标：G03 统一模糊搜索。本阶段的验收句是"搜索没有 Git 写副作用；范围外引用说明
+  清楚；原图拓扑不被过滤破坏"。三句都有钉处：第一句是 `search-wiring.mjs` 数出这个 view
+  只有 `invoke<` 一次且那条是 bound read，第二句是 `refRow` 把 `commitOid === null` 与
+  `reachedFromHead` 的三种值分别写成三种话，第三句是 `reveal` 只换"从哪一页读"而不写
+  `visible`。
+起止提交与变更文件：起始代码基线 `a340cc7`（并行开发者的 reset 记录）→ 本文与代码同一次
+  提交。测量就在共享树里做，因为那次之后他手上只有一份未跟踪的 `tools/bench/` 探针，
+  Rust 侧与 `cargo fmt` 都没有在飞改动可碰；`cargo fmt -- --check` 与 clippy 都不写源码。
+  变更文件：app/src/views/search.ts（新增：字段、层、行、键盘与计时，判断一律外置）、
+  app/src/searchModel.ts（`SEARCH_DEBOUNCE_MS`/`typed`/`errorCode`/`DRAWN_COMMITS`/
+  `drawnCommits`/`hiddenCommits`/`hasMark`/`drawCommit`/`drawRef`）、
+  app/src/views/history.ts（`RevealRoute` 与 `reveal(oid)`、`anchorOid`、头行的
+  `.history-anchored` 那条与"Branch head"回退钮、`loadPage` 在锚点中途变了之后重读一次）、
+  app/src/views/mainPanel.ts（三区域签名，search 是第一个子元素）、app/src/main.ts、
+  app/src/style.css、app/src/style/tokens.css（`--search-cap` 40vh，两档短窗收到 36/30vh）、
+  app/tests/search-model.mjs（20→25 条）、app/tests/search-wiring.mjs（新增 8 条源码
+  gate）、app/tests/ipc-surface.mjs（BOUND_READS 加 `search_repository`）、
+  app/src-tauri/src/main.rs（注册命令 + `manage(search::SearchState::default())`）、
+  app/src-tauri/src/search.rs 与 fuzzy.rs（撤掉两个模块级 `allow(dead_code)`；撤之后
+  `Bare { root }` 那条 "field is never read" 才露出来，于是把它改成 `Bare::dir()` 读
+  root，而不是再拿一条 attribute 把警告按下去）、tools/bench/responsive-check.py
+  （`--search-cap` 进"declared"与"restated for a short window"两份清单）、CHANGELOG.md、
+  本文 §11–§12。Cargo.toml 无变更。
+输入条件及 fixture：Rust 侧 373 条测试没有新增一条——本阶段没有新读，只是把 E03 已经
+  测过的读接上命令面。前端新增 13 条：5 条算得出结果的（等待、拒绝码、行宽、切分、名字
+  行），8 条读源文件的（一个 invoke、不借 shell 的 overlay 槽、面板第一子元素、等待写在
+  模型里、组合期不发、`locateCommit` 只在 history 侧、锚点那条句与回退钮、Escape 停在层）。
+  高亮夹具把跨 subject/body 边界的那一段单独钉住：`frag(0, 8)` 打在 `"lane\nlane two"`
+  上，subject 拿到 `"lane"`、body 拿到 `"\nlan"`，两段合起来仍是原串——这一条是"高亮不
+  搬字母"的唯一证据。
+实现行为与异常路径：一次按键 → `typed(field.value, composing, now)` → 到点才
+  `send(query, 0, true)`；fresh 才 `nextQueryId`，"Search further back" 沿用同一个
+  `queryId`，因为 `SearchState::begin` 把相等 id 认作同一趟扫描的下一窗并共用那面旗标，
+  换新 id 会让 `mergePage` 以 `window` 拒收自己后半程。答案回来先问"这屏还是发起那一屏
+  吗"（`requestSeq`、`contextMatches`），再让 `mergePage` 决定它属于哪个问题。三种拒绝
+  各有一条路：closed 清空、overtaken 静默、refused 写一句"The search could not be read."
+  并交给 `onError`。层的可见性是 `wanted && shown` 两个旗标，`shown` 不含"正在问"，所以
+  首窗还在路上时屏上是字段旁的"Searching…"而不是一个空盒子；一个空的未完窗仍会打开层，
+  因为它的页脚说的是"Nothing in the history read so far"而不是"Nothing matched"，而
+  `isSettled` 之前那条 `nothingMatched` 永不成立。图定位两条路：已加载 → `revealRow` +
+  `setCursor` + 开泡 + flash；未加载 → `anchorOid = oid` 后整页重读，头行写明"Drawn from
+  <oid10> — not the branch head."，`sync()` 一律清掉锚点。
+运行命令、退出码、日志位置：`npm run build` 退出 0（47 modules，产物
+  `index-BTx7x47s.js` / `index-MT9q80KC.css`）、`npm run test:fixture` 402 pass / 0 fail
+  （含 ipc-surface 9 条与 user-facing-copy 1 条）、`cargo fmt -- --check` 零 diff、
+  `cargo clippy --locked --all-targets` 0 条告警、`cargo test` 373 passed / 0 failed、
+  `responsive-check.py` 与 `color-contrast.py dist/assets` 都 fails=0。输出不落盘。
+  `--search-cap` 走 tokens.css 那条正是 `color-contrast.py` 已有的
+  `--accent on --surface-raised` 4.5:1 与 `--text-faint on --surface-raised` 4.5:1 覆盖
+  的面，所以那一份 gate 没加新配对。
+桌面/性能证据与环境：本轮没有任何渲染度量。`layout-probe.mjs` 需要 msedge，本宿主没有
+  装（`which msedge/google-chrome/chromium` 全空），所以那九个尺寸上的
+  overlap/overflow/invisible 三条与"两区域同时有盒子"那条，本阶段没有跑过——这一句是要在
+  渲染探针那一步补的证据，不是"通过"。WebKit 那条通道倒是通的：
+  `appearance-engine-probe.ts` 在本宿主 fails=0，说明写 `search-layer-engine-probe.ts`
+  不需要新环境。读预算那个数（输入到候选 warm p95 ≤150ms）也还没量：它现在至少包含了
+  120 ms 的等待，而等待之所以写在 `searchModel.ts` 里并写成导出的常量，正是为了这一条
+  能被算进去而不是被藏起来。宿主：Ubuntu 26.04、Git 2.53、Node 26；Windows/macOS 仍只是
+  构建配置。
+未解决限制：页内那个 `Find in loaded commits` 还在，于是 Main 上暂时有两个输入框——§11
+  第 6 条把它排成第二次提交，因为它要删 `filterCommits` 在 view 里的调用点并带走
+  `historyModel.ts` 的导出与一批夹具。`cancel_search` 这条命令仍没有，清空字段只停止
+  下一次提问，已开始的那一趟走到自己那一窗结束。`--search-cap` 在 340x400 上到底遮住
+  多少没量过；`.search-view` 是 `.main-panel` 的 `flex: 0 0 auto` 兄弟，两个区域的地板
+  加上它装不进短窗时按既有规则整面板滚，这条也是待量。键盘到搜索框的入口还没有：`/`
+  今天仍绑在 `history.ts` 的 `listPane` 上，`focusField()` 交出去但没人调它——把它接成
+  一个全局快捷键属于第二次提交删页内 find 的那一刀。
+回退方式：删 app/src/views/search.ts、app/tests/search-wiring.mjs，把 mainPanel.ts 退回
+  两参数签名、main.ts 退掉 createSearchView、history.ts 退掉 reveal/anchor 那条、
+  searchModel.ts 退掉 §12 列的九个导出、tokens.css 与 style.css 退掉 `--search-cap` 与
+  `/* --- search --- */` 整块，再把 main.rs 的注册与 `manage` 撤掉、恢复两个
+  `#![allow(dead_code)]` 与 `Bare` 的三个字段即可。回退后 `ipc-surface.mjs` 与
+  `responsive-check.py` 的两处条目要一起退，否则它们各自扫到一个不再存在的事实。
+结论：完成（三句验收都有钉处；阶段退出门槛仍差 E04b 的删页内 find 与 E04c 的渲染证据
+  和读预算）
+```

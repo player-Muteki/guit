@@ -335,6 +335,80 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
    divider the user did not ask for. */
 .main-splitter::after { content: ""; position: absolute; inset-inline: 0; inset-block: -0.25rem; }
 
+/* --- search --- */
+/* The field is chrome at the top of the panel, and the layer under it is the
+   same kind of thing a menu is: an answer to the question the field is asking,
+   drawn above the page rather than in it. Same elevation for the same job.
+   It hangs off the bar's own box instead of the document, so it moves with the
+   panel it belongs to and cannot outlive the session that filled it. */
+.search-view { position: relative; flex: 0 0 auto; padding: 0.35rem var(--gutter) 0; }
+.search-view[hidden] { display: none; }
+.search-bar { display: flex; align-items: center; gap: 0.4rem; }
+.search-field { flex: 1 1 auto; min-width: 0; max-width: 22rem; }
+.search-hint { flex: 0 1 auto; font-size: var(--text-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-hint:empty { display: none; }
+.search-results {
+  position: absolute;
+  z-index: 40;
+  top: 100%;
+  left: var(--gutter);
+  right: var(--gutter);
+  max-height: var(--search-cap);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.search-results[hidden] { display: none; }
+.search-list { display: flex; flex-direction: column; }
+.search-row {
+  display: block;
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  text-align: start;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+}
+.search-row + .search-row, .search-heading + .search-row { border-top: 1px solid var(--line); }
+.search-row:hover { background: var(--surface-hover); }
+.search-row.active { background: var(--surface-active); }
+/* A name that names no commit has no row to be shown on, and the difference
+   between "nothing to do here" and "this one is broken" is said by the row. */
+.search-row.inert { color: var(--text-muted); cursor: default; }
+.search-row.inert:hover { background: none; }
+.search-row-line, .search-row-body { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-row-body { color: var(--text-muted); }
+.search-row-meta { display: flex; gap: 0.5rem; margin-top: 0.1rem; font-size: var(--text-xs); color: var(--text-faint); overflow: hidden; }
+.search-row-oid { font-family: var(--font-mono); }
+.search-row-hit { color: var(--text-muted); font-style: italic; }
+/* The match is carried by weight as well as by hue, so the mark survives a
+   theme that flattens colour and a reader who cannot separate the two. */
+.search-mark { color: var(--accent); font-weight: 600; }
+.search-heading { padding: 0.35rem 0.5rem 0.1rem; font-size: var(--text-xs); color: var(--text-muted); }
+.search-ref { display: flex; gap: 0.4rem; align-items: baseline; }
+.search-ref-kind { flex: 0 0 auto; font-size: var(--text-xs); color: var(--text-muted); }
+/* Sticky because the sentence that says whether the scan finished is the one
+   the reader needs most when the list is long enough to scroll. */
+.search-footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  border-top: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+.search-summary { flex: 1 1 auto; font-size: var(--text-xs); color: var(--text-muted); }
+.search-footer .btn[hidden] { display: none; }
+
 /* --- overlay --- */
 /* The branch picker covers the panel instead of becoming a third page. It is
    not a modal: the tab strip and the status bar stay reachable while it is
@@ -510,6 +584,12 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
    keeps the line it is on. The cap is the menu's own width, so the button and
    the list it opens ask the same room for a name. */
 .history-branch { flex: 0 1 auto; min-width: 0; max-width: 11rem; overflow: hidden; text-overflow: ellipsis; }
+/* The sentence that says the page below was read from a commit rather than from
+   the branch is the head line's news, and it is the same length whatever the
+   window: it loses its tail before it takes the room the count and the paging
+   button are standing in. The button beside it is the way back, so it never
+   wraps alone. */
+.history-anchored { flex: 0 1 auto; min-width: 0; font-size: var(--text-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The find box takes the room the head has left and gives it back when it
    closes, so opening it never squeezes the count or the Load-older button
    into wrapping. */

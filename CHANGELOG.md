@@ -194,6 +194,44 @@ release it belongs to did not measure.
   panel does not yet have a box to type an id into, so no screen has been measured
   showing them, and the abbreviations themselves are verified against the one host and
   Git version every other record here comes from.
+- Main now carries a search field, above the changes area and the graph, and it asks
+  Git rather than the rows already on screen. A message subject, a message body, a
+  commit id and an author name are all matched, in any of them and by the same
+  rules: contiguous letters beat scattered ones, an id is matched as an id and not as
+  prose, and a letter written as a base plus a combining mark is found in the same
+  word written as one code point, because both sides are composed and case-folded
+  before they are compared — while what is drawn stays exactly the text Git stored.
+  There is no pinyin, no translation and no semantic matching: the characters typed
+  are the characters looked for. Branch and tag names are searched
+  with the commits, and a name that names no commit — a tag on a tree — is shown as
+  that fact instead of being offered as a jump. A remote-tracking name is labelled as
+  what Git last recorded about a remote, never as the remote's current state.
+- The answer says how much of the history it covers. A scan that finished and found
+  nothing is the only state worded as "nothing matched"; one that reached its ceiling
+  says it is not the whole history, one still walking says nothing has matched *in the
+  history read so far* and offers to search further back, and a commit whose reach was
+  never probed is never described as outside the branch. The rows are drawn newest
+  first, as the walk found them, and the count of what the layer left out is written
+  beside them.
+- Picking a result changes no filter. A commit already in the loaded page is scrolled
+  to and opened; one that is not is read as the start of a page, and while those rows
+  are up the graph's head line says they were drawn from that commit and are not the
+  branch's recent history, with a button back to the head. Every row the page carries
+  stays drawn, in the graph's own topological order. A search asks one read and shares
+  no lane with a write: nothing reachable from this field stages, commits, resets or
+  cleans anything, and no repository is changed by searching it.
+- The field waits 120 ms after the last keystroke before asking, and asks nothing at
+  all while an input method is mid-composition — a half-written character is not a
+  question. That wait is a number in the search model, not hidden in the view, because
+  the budget it is measured against runs from the keystroke. The layer opens over the
+  page the way a menu does, is closed by Escape or by a click outside it, and is walked
+  with the arrow keys, Home, End and Enter. What each of those sentences may claim, and
+  which answer belongs to the question on screen, are pinned by the search model's
+  tests; that the field asks one read, sits in the panel and never filters the graph is
+  pinned as a claim about the sources. The layer itself has not yet been measured in a
+  drawn page, and no number for its read budget has been taken — the host and Git
+  version behind every measurement here are the ones the rest of this record comes
+  from.
 
 ### Changed
 

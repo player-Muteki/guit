@@ -652,6 +652,26 @@ async fn open_commit_diff(
 }
 
 #[tauri::command]
+async fn search_repository(
+    app: tauri::AppHandle,
+    context: session::ReadContext,
+    query_id: u64,
+    query: String,
+    cursor: u64,
+) -> Result<session::SessionRead<search::SearchPage>, ProbeError> {
+    // `query_id` numbers the reader's question rather than this request: every
+    // window of one question carries the same id and shares one cancellation, and
+    // a window belonging to an older question is refused before Git is asked.
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<session::SessionState>();
+        let lane = app.state::<search::SearchState>();
+        search::page(&sessions, &lane, context, query_id, &query, cursor)
+    })
+    .await
+    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
+#[tauri::command]
 async fn list_refs(
     app: tauri::AppHandle,
     context: session::ReadContext,
@@ -1236,6 +1256,7 @@ fn main() {
         .manage(write::WriteState::default())
         .manage(extools::ToolState::default())
         .manage(history::GraphCache::default())
+        .manage(search::SearchState::default())
         .setup(|app| {
             // Reclaim what a kill -9 left behind — abandoned atomic-write
             // siblings of the config files. The count is reported but
@@ -1272,6 +1293,7 @@ fn main() {
             open_external_tool,
             cancel_exttool,
             history_page,
+            search_repository,
             commit_files,
             open_commit_diff,
             list_refs,
