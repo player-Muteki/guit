@@ -14,10 +14,12 @@
 use crate::probe::ProbeError;
 use crate::status::StatusEntry;
 use crate::write::{self, OperationKind, OperationResult, Outcome, PreviewResult, WriteState};
-use crate::{branches, history, model, sequencer, session};
+use crate::{branches, history, model, repo, runner, sequencer, session};
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// The wire-level mode of a plain reset. `hard` is deliberately not
 /// expressible here: it exists only as the ticketed `reset_hard`
@@ -333,6 +335,304 @@ fn tracked_dirty_set(sessions: &session::SessionState) -> Result<Vec<Vec<u8>>, P
         })
         .map(|(raw, _)| raw.clone())
         .collect())
+}
+
+/// A restore preview reads whole listings — the target tree, every untracked
+/// path — so it takes the bound `status` and the gitlink listing take, not the
+/// 64 KB default. A repository of roughly a thousand files passes the default
+/// (measured while fixing the submodule listing), and a truncated listing would
+/// read as "nothing is in the way".
+const LISTING_OUTPUT_LIMIT: usize = runner::STATUS_OUTPUT_LIMIT;
+
+/// One untracked path, in the granularity Git itself reported it. Git keeps a
+/// repository of its own as one folded entry ending in `/` while it expands a
+/// plain untracked directory file by file — 100 entries for `extra/` against the
+/// single `nested/` — so the trailing separator *is* the report that this is
+/// somebody else's repository, and no filesystem probing is needed to know it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Untracked {
+    pub raw: Vec<u8>,
+    pub repository: bool,
+}
+
+/// One path the current commit and the target disagree about, and whether the
+/// target holds it — the letter Git gave, kept because it is the difference
+/// between the restore writing this path and taking it away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Difference {
+    pub raw: Vec<u8>,
+    pub in_target: bool,
+}
+
+/// What the two steps of a clean restore would touch, in the granularity each
+/// class was measured in. Nothing here is inferred from what Git is expected to
+/// refuse: measured on the same shapes, `reset --hard` refuses nothing at all —
+/// it overwrites an untracked file, destroys an untracked directory and destroys
+/// a nested repository with its own `.git`, each with rc 0 and no warning.
+#[derive(Debug, Default)]
+pub(crate) struct Restoration {
+    /// The commit the restore goes to, and the one it leaves, both full ids as
+    /// Git resolved them — never the text that was typed.
+    #[allow(dead_code)] // read by the ticket these sets become
+    pub target_oid: String,
+    #[allow(dead_code)]
+    pub head_oid: String,
+    /// Every path the two trees disagree about.
+    #[allow(dead_code)]
+    pub differences: Vec<Difference>,
+    /// Tracked changes on one of those paths: the local edits the restore throws
+    /// away. This is the intersection of two reads, because neither alone says
+    /// it — status says where the working copy is dirty, the difference says
+    /// which of those paths the target moves at all.
+    #[allow(dead_code)]
+    pub discarded: Vec<Vec<u8>>,
+    /// Untracked paths the restore writes, because the target holds the path
+    /// itself or a path above it. A claim about scope, not about bytes: a file
+    /// whose contents already match is written all the same, so "nothing
+    /// changed there afterwards" never means "nothing was overwritten".
+    pub overwritten: Vec<Untracked>,
+    /// Untracked paths a fresh `git clean -nd` agrees to remove, less anything
+    /// the restore writes — `clean` is silent about a path the reset has just
+    /// made tracked, so promising it would be promising a thing Git will not do.
+    pub removals: Vec<Untracked>,
+    /// Untracked paths neither step touches: `clean` does not list a repository
+    /// without a second force, and guit never adds one. These are stated as
+    /// staying, with the reason, not as failures.
+    pub left_behind: Vec<Untracked>,
+    /// Repositories the restore would destroy or write through. The one class
+    /// that refuses the operation instead of being listed in it.
+    pub blocked: Vec<Untracked>,
+}
+
+impl Restoration {
+    /// The refusal Git will not make on guit's behalf. `checkout` and
+    /// `switch --detach` do block on this shape, but they move HEAD off the
+    /// branch, so they cannot be the restore; `reset --hard` walks straight
+    /// through. An ignored path the target tracks is not here — the restore
+    /// writes it, and saying so belongs in the preview, not in a rejection.
+    #[allow(dead_code)] // goes away with the command that stages this preview
+    pub(crate) fn guard(&self) -> Result<(), ProbeError> {
+        let Some(first) = self.blocked.first() else {
+            return Ok(());
+        };
+        let name = model::display_name(&first.raw);
+        let subject = if self.blocked.len() == 1 {
+            format!("`{name}` is a Git repository of its own")
+        } else {
+            format!(
+                "`{name}` and {} other paths are Git repositories of their own",
+                self.blocked.len() - 1
+            )
+        };
+        Err(ProbeError::new(
+            "reset_preview_repository",
+            format!("{subject}; a clean restore neither removes one nor writes inside one, so the restore was refused."),
+        ))
+    }
+}
+
+/// Whether `parent` names a directory that `path` sits inside. The separator has
+/// to be the first difference, or `src` would claim `srclist.txt`.
+fn is_ancestor_dir(parent: &[u8], path: &[u8]) -> bool {
+    matches!(path.strip_prefix(parent), Some(rest) if rest.first() == Some(&b'/'))
+}
+
+/// Whether the restore writes this path: the target holds the path itself, or
+/// holds a path above it. The destruction happens at the directory level — the
+/// target's `y`, a file, takes away everything under an untracked `y/` — so a
+/// name-for-name comparison reports no obstacle exactly where a directory goes.
+fn claimed_by_target(held: &BTreeSet<&[u8]>, raw: &[u8]) -> bool {
+    held.contains(raw)
+        || raw
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| *byte == b'/' && held.contains(&raw[..index]))
+}
+
+/// Whether the `git clean -nd` listing covers this path, as its own entry or as
+/// a directory the listing folds several files into (`Would remove extra/`
+/// stands for every file in it). The listing is the only source of the removal
+/// promise, so a path Git did not list is never promised.
+fn covered_by_clean(found: &[(Vec<u8>, bool)], raw: &[u8]) -> bool {
+    found
+        .iter()
+        .any(|(candidate, _)| candidate == raw || is_ancestor_dir(candidate, raw))
+}
+
+/// One of the listings a restore plan is built from, as the exact bytes Git
+/// separated with NULs. Every way the read can fail answers with a refusal, not
+/// with an empty listing: a preview built on a read Git could not finish would
+/// promise less than the restore touches, and a restore is not recoverable the
+/// way a refused preview is.
+fn read_listing(
+    work_root: &Path,
+    args: &[&str],
+    purpose: &str,
+) -> Result<Vec<Vec<u8>>, ProbeError> {
+    let mut command = repo::user_git_command(work_root);
+    command.args(args);
+    let output = runner::run_with_limit(
+        command,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+        Duration::from_secs(30),
+        LISTING_OUTPUT_LIMIT,
+        |_, _| {},
+    )?;
+    if !output.status.success() {
+        return Err(ProbeError::new(
+            "reset_preview_failed",
+            format!("Git would not give its list of {purpose}; the restore was refused."),
+        ));
+    }
+    if output.truncated {
+        return Err(ProbeError::new(
+            "reset_preview_too_large",
+            format!("Git's list of {purpose} was too large to read; the restore was refused."),
+        ));
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == b'\0')
+        .filter(|piece| !piece.is_empty())
+        .map(|piece| piece.to_vec())
+        .collect())
+}
+
+/// `diff --name-status -z --no-renames <head> <target>`: which paths the two
+/// trees differ on, and which of them the target holds. Renames are turned off
+/// because the pair record is a different `-z` shape, and the question a restore
+/// asks is about paths, not about credit. A letter this does not recognise
+/// refuses the whole preview rather than being skipped: the letter is what says
+/// whether the restore writes the path or takes it away, so guessing one is
+/// guessing what the operation does.
+fn tree_differences(
+    work_root: &Path,
+    head: &str,
+    target: &str,
+) -> Result<Vec<Difference>, ProbeError> {
+    let tokens = read_listing(
+        work_root,
+        &["diff", "--name-status", "-z", "--no-renames", head, target],
+        "the difference between the target and the commit the branch is on",
+    )?;
+    let unreadable = || {
+        ProbeError::new(
+            "reset_preview_failed",
+            "Git described that difference in a shape this preview does not read; the restore was refused.",
+        )
+    };
+    if tokens.len() % 2 != 0 {
+        return Err(unreadable());
+    }
+    let mut differences = Vec::with_capacity(tokens.len() / 2);
+    for pair in tokens.chunks_exact(2) {
+        if pair[0].len() != 1 {
+            return Err(unreadable());
+        }
+        let in_target = match pair[0][0] {
+            b'A' | b'M' | b'T' => true,
+            b'D' => false,
+            _ => return Err(unreadable()),
+        };
+        differences.push(Difference {
+            raw: pair[1].clone(),
+            in_target,
+        });
+    }
+    Ok(differences)
+}
+
+/// Every path the target tree holds, exactly as Git lists it. A gitlink appears
+/// as its own path with nothing below it, because `-r` does not descend into
+/// another repository — which is also why the claim test needs this read and not
+/// only the path difference.
+fn target_paths(work_root: &Path, target: &str) -> Result<Vec<Vec<u8>>, ProbeError> {
+    read_listing(
+        work_root,
+        &["ls-tree", "-r", "-z", "--name-only", target],
+        "the paths the target holds",
+    )
+}
+
+/// `ls-files --others --exclude-standard -z`: what is untracked, with the
+/// repository's own ignore rules applied. `--exclude-standard` is not optional —
+/// without it ignored files enter as untracked (5 entries against 3 on the same
+/// repository) and the restore would promise to remove what the default
+/// protection keeps.
+fn untracked_paths(work_root: &Path) -> Result<Vec<Untracked>, ProbeError> {
+    Ok(read_listing(
+        work_root,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        "which files are untracked",
+    )?
+    .into_iter()
+    .map(|raw| match raw.strip_suffix(b"/".as_slice()) {
+        Some(directory) => Untracked {
+            raw: directory.to_vec(),
+            repository: true,
+        },
+        None => Untracked {
+            raw,
+            repository: false,
+        },
+    })
+    .collect())
+}
+
+/// The affected sets a clean restore is previewed from: five listings that each
+/// answer one class of path, plus the one target resolution the ordinary reset
+/// already uses, in the order the measurements set. Resolve first, because a
+/// target that is not exactly one commit has nothing to be previewed against;
+/// then the two tree reads, then the working copy, then what `clean` itself
+/// agrees to remove.
+#[allow(dead_code)] // goes away with the command that stages this preview
+pub(crate) fn plan_restore(
+    work_root: &Path,
+    sessions: &session::SessionState,
+    target: &str,
+) -> Result<Restoration, ProbeError> {
+    let target_oid = resolve_target(work_root, target)?;
+    let head_oid = resolve_commit(work_root, "HEAD")
+        .ok_or_else(|| ProbeError::new("reset_head", "HEAD does not name a commit."))?;
+    let differences = tree_differences(work_root, &head_oid, &target_oid)?;
+    let held_list = target_paths(work_root, &target_oid)?;
+    let held = held_list
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<BTreeSet<&[u8]>>();
+    let changed = differences
+        .iter()
+        .map(|difference| difference.raw.as_slice())
+        .collect::<BTreeSet<&[u8]>>();
+    let discarded = tracked_dirty_set(sessions)?
+        .into_iter()
+        .filter(|raw| changed.contains(raw.as_slice()))
+        .collect();
+    let removal_promise = write::clean_candidates(work_root, &[])?;
+    let mut plan = Restoration {
+        target_oid,
+        head_oid,
+        differences,
+        discarded,
+        ..Restoration::default()
+    };
+    for item in untracked_paths(work_root)? {
+        if claimed_by_target(&held, &item.raw) {
+            if item.repository {
+                plan.blocked.push(item.clone());
+            }
+            plan.overwritten.push(item);
+        } else if !item.repository && covered_by_clean(&removal_promise, &item.raw) {
+            plan.removals.push(item);
+        } else {
+            // A repository Git folded into one entry is not in its own listing
+            // of what to remove, so it stays — the promise follows the listing,
+            // never the directory that contains it.
+            plan.left_behind.push(item);
+        }
+    }
+    Ok(plan)
 }
 
 /// The shared refusal path: everything rejected happens before Git runs,
@@ -1266,5 +1566,244 @@ mod tests {
             .find(|file| file.display == "base.txt")
             .expect("the conflicted file is in the snapshot");
         assert_eq!(entry.group, model::FileGroup::Conflict);
+    }
+
+    fn init(dir: &Path) {
+        git(dir, &["init", "--quiet", "--initial-branch=main"]);
+        git(dir, &["config", "user.name", "guit test"]);
+        git(dir, &["config", "user.email", "test@example.invalid"]);
+    }
+
+    /// A file under whatever directories its name names, so a test can write a
+    /// path Git is about to report without caring what the tree held before.
+    fn write_at(dir: &Path, relative: &str, body: &str) {
+        let path = dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn head(dir: &Path) -> String {
+        read(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// Commit whatever the working tree holds, the way the measurements did, and
+    /// answer with the commit id it became.
+    fn commit_all(dir: &Path, message: &str) -> String {
+        git(dir, &["add", "-A", "--"]);
+        git(dir, &["commit", "-qm", message]);
+        head(dir)
+    }
+
+    /// A repository inside the working tree, with a committed file of its own:
+    /// the shape `reset --hard` destroys with rc 0 and no warning, and the shape
+    /// `ls-files --others` reports as one folded entry instead of a file list.
+    fn repository_in(dir: &Path, name: &str) {
+        let inside = dir.join(name);
+        std::fs::create_dir_all(&inside).unwrap();
+        init(&inside);
+        write_at(&inside, "own.txt", "tracked inside another repository\n");
+        git(&inside, &["add", "-A", "--"]);
+        git(&inside, &["commit", "-qm", "the nested head"]);
+    }
+
+    fn names(list: &[Vec<u8>]) -> Vec<String> {
+        list.iter().map(|raw| model::display_name(raw)).collect()
+    }
+
+    fn untracked_names(list: &[Untracked]) -> Vec<String> {
+        list.iter()
+            .map(|item| {
+                let mut name = model::display_name(&item.raw);
+                if item.repository {
+                    name.push_str(" (repository)");
+                }
+                name
+            })
+            .collect()
+    }
+
+    /// The plan needs a session for the one read that is not a listing of the
+    /// repository: which paths the working copy is dirty on.
+    fn plan_for(dir: &Path, target: &str) -> Restoration {
+        let (_, sessions, version) = state_and_session(dir);
+        let (work_root, _) = sessions.commit_context(version).unwrap();
+        plan_restore(&work_root, &sessions, target).unwrap()
+    }
+
+    /// Every class a clean restore has to name, in one repository: a tracked
+    /// edit the target drops, an untracked file the target writes, an untracked
+    /// file a `clean` removes, and a repository neither step may touch.
+    #[test]
+    fn a_restore_plan_names_what_the_restore_writes_and_what_a_clean_removes() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, "keep.txt", "keep\n");
+        write_at(dir, "gone.txt", "the target's own bytes\n");
+        let target = commit_all(dir, "the target holds both");
+        write_at(dir, "keep.txt", "committed differently\n");
+        git(dir, &["rm", "-q", "--", "gone.txt"]);
+        let head_oid = commit_all(dir, "the tree dropped one file and rewrote the other");
+        write_at(dir, "keep.txt", "edited by hand\n");
+        write_at(dir, "gone.txt", "written again by hand\n");
+        write_at(dir, "plain.txt", "untracked\n");
+        repository_in(dir, "nested");
+
+        let plan = plan_for(dir, &target);
+        assert_eq!(plan.target_oid, target);
+        assert_eq!(plan.head_oid, head_oid);
+        assert_eq!(head(dir), head_oid, "a preview writes nothing");
+        let differences: Vec<String> = plan
+            .differences
+            .iter()
+            .map(|difference| {
+                format!(
+                    "{} {}",
+                    model::display_name(&difference.raw),
+                    if difference.in_target {
+                        "in the target"
+                    } else {
+                        "dropped"
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(
+            differences,
+            ["gone.txt in the target", "keep.txt in the target",]
+        );
+        // Two reads answer this one question: status says keep.txt is dirty, the
+        // difference says the target moves it. gone.txt is dirty in no sense a
+        // tracked listing can see, because nothing tracks it yet.
+        assert_eq!(names(&plan.discarded), ["keep.txt"]);
+        assert_eq!(untracked_names(&plan.overwritten), ["gone.txt"]);
+        assert_eq!(untracked_names(&plan.removals), ["plain.txt"]);
+        assert_eq!(untracked_names(&plan.left_behind), ["nested (repository)"]);
+        assert!(plan.blocked.is_empty());
+        plan.guard()
+            .expect("a repository nobody is writing over is left behind, not refused");
+    }
+
+    /// `clean -nd` answers one folded line for a whole untracked directory, and
+    /// one of the files under it is written by the restore rather than removed.
+    /// The plan splits them, because the promise a user confirms is a promise
+    /// about files.
+    #[test]
+    fn a_folded_untracked_directory_is_split_between_the_write_and_the_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, "keep.txt", "keep\n");
+        write_at(dir, "extra/wanted.txt", "the target's own bytes\n");
+        let target = commit_all(dir, "the target holds a file inside a directory");
+        git(dir, &["rm", "-q", "-r", "--", "extra"]);
+        commit_all(dir, "the whole directory dropped");
+        write_at(dir, "extra/wanted.txt", "written again by hand\n");
+        write_at(dir, "extra/other.txt", "and a sibling nobody tracked\n");
+
+        let plan = plan_for(dir, &target);
+        let folded = write::clean_candidates(dir, &[]).unwrap();
+        assert_eq!(
+            names(
+                &folded
+                    .iter()
+                    .map(|(raw, _)| raw.clone())
+                    .collect::<Vec<Vec<u8>>>()
+            ),
+            ["extra"],
+            "Git's own listing stands for the whole directory"
+        );
+        assert_eq!(untracked_names(&plan.overwritten), ["extra/wanted.txt"]);
+        assert_eq!(untracked_names(&plan.removals), ["extra/other.txt"]);
+        assert!(plan.left_behind.is_empty());
+        assert!(plan.blocked.is_empty());
+    }
+
+    /// The one class that is a refusal rather than a line in a preview: a
+    /// repository standing where the target writes. The test then runs the
+    /// command guit refuses to run, so the refusal stays about a loss that was
+    /// measured rather than a rule nobody can account for.
+    #[test]
+    fn a_repository_where_the_restore_writes_is_refused_before_anything_is_chosen() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, "keep.txt", "keep\n");
+        write_at(dir, "y", "the target's own bytes\n");
+        let target = commit_all(dir, "y is a file in the target");
+        git(dir, &["rm", "-q", "--", "y"]);
+        commit_all(dir, "y dropped from the tree");
+        repository_in(dir, "y");
+
+        let plan = plan_for(dir, &target);
+        assert_eq!(untracked_names(&plan.overwritten), ["y (repository)"]);
+        let refusal = plan.guard().expect_err("the plan refuses");
+        assert_eq!(refusal.code.as_str(), "reset_preview_repository");
+        assert!(refusal.message.contains("`y`"), "{}", refusal.message);
+        // Measured, not assumed: the very command refuses to run destroys the
+        // repository, its history and its own working copy, silently.
+        git(dir, &["reset", "--hard", &target]);
+        assert!(
+            !dir.join("y/own.txt").exists(),
+            "a restore was expected to take the nested file with it"
+        );
+    }
+
+    /// Going to the commit the branch is already on moves no tracked path, and
+    /// still has a removal to promise: the second step answers for itself.
+    #[test]
+    fn a_restore_to_the_commit_head_is_on_claims_no_tracked_path() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, "keep.txt", "keep\n");
+        let target = commit_all(dir, "one commit");
+        write_at(dir, "plain.txt", "untracked\n");
+
+        let plan = plan_for(dir, &target);
+        assert_eq!(plan.target_oid, plan.head_oid);
+        assert!(plan.differences.is_empty());
+        assert!(plan.discarded.is_empty());
+        assert!(plan.overwritten.is_empty());
+        assert_eq!(untracked_names(&plan.removals), ["plain.txt"]);
+    }
+
+    /// The ignore rules are applied before anything is listed, so an ignored
+    /// file enters none of the sets: the restore neither promises to remove it
+    /// nor counts it as something standing in the way.
+    #[test]
+    fn an_ignored_file_is_in_none_of_the_restore_lists() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, ".gitignore", "secret.txt\n");
+        write_at(dir, "keep.txt", "keep\n");
+        let target = commit_all(dir, "the ignore rule is committed");
+        write_at(dir, "secret.txt", "not for the panel\n");
+        write_at(dir, "plain.txt", "untracked\n");
+
+        let plan = plan_for(dir, &target);
+        assert_eq!(untracked_names(&plan.removals), ["plain.txt"]);
+        assert!(plan.overwritten.is_empty());
+        assert!(plan.left_behind.is_empty());
+    }
+
+    /// The plan is built on the same target resolution the ordinary reset uses,
+    /// so a branch name and every revspec are refused before one listing runs.
+    #[test]
+    fn a_restore_plan_refuses_a_target_that_is_not_exactly_one_commit() {
+        let root = dirty_repo();
+        let dir = root.path();
+        let (_, sessions, version) = state_and_session(dir);
+        let (work_root, _) = sessions.commit_context(version).unwrap();
+        for (typed, code) in [
+            ("main", "reset_target_shape"),
+            ("0000000", "reset_target_absent"),
+        ] {
+            let refusal = plan_restore(&work_root, &sessions, typed)
+                .err()
+                .unwrap_or_else(|| panic!("{typed} was accepted as a target"));
+            assert_eq!(refusal.code.as_str(), code, "{}", refusal.message);
+        }
     }
 }

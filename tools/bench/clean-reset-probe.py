@@ -519,6 +519,9 @@ def measure_cost() -> None:
     timed("rev-parse HEAD", ["rev-parse", "HEAD"])
     timed("diff --name-only HEAD <target>", ["diff", "--name-only", "HEAD", target])
     timed("diff --name-status HEAD <target>", ["diff", "--name-status", "HEAD", target])
+    timed("diff --name-status -z --no-renames HEAD <target>",
+         ["diff", "--name-status", "-z", "--no-renames", "HEAD", target])
+    timed("ls-tree -r -z --name-only <target>", ["ls-tree", "-r", "-z", "--name-only", target])
     timed("status --porcelain -z -uall", ["status", "--porcelain", "-z", "-uall"])
     timed("status --porcelain -z -uall --ignored", ["status", "--porcelain", "-z", "-uall", "--ignored"])
     timed("ls-files --others --exclude-standard -z", ["ls-files", "--others", "--exclude-standard", "-z"])

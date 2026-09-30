@@ -930,7 +930,7 @@ fn worktree_dirty(entry: &StatusEntry) -> bool {
 /// 2.53). Paths quoted this way can only name themselves; Git will not list an
 /// ignored file or a nested repository through them at all, so a request for
 /// either comes back empty rather than forceful.
-fn clean_candidates(
+pub(crate) fn clean_candidates(
     work_root: &Path,
     scope: &[Vec<u8>],
 ) -> Result<Vec<(Vec<u8>, bool)>, ProbeError> {
