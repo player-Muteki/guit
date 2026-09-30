@@ -928,3 +928,73 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
 - **§6.9 那一整列仍未量**：不区分大小写的宿主、符号链接、稀疏检出与 `skip-worktree`、
   `core.protectNTFS` 那一类名字、可执行位、未跟踪空目录、目标是 gitlink 而磁盘是未跟踪目录那一
   反向格；Windows/macOS 仍只是构建配置。这一片新增的两格都在同一台 Linux 宿主、同一份 Git 上。
+
+---
+
+## 10. F05 的落地：两条条件分开读，逐路径的答案由 Git 事后说
+
+两片提交：`3fa1d25`（两条条件、逐路径、`Outcome::Partial`）与 `fc638df`（跑了一半的恢复无论
+哪一步停下都说得出自己跑了什么）。测量那一片是 `86efc57`，只动探针。
+
+### 10.1 规则落到代码的哪一处
+
+- **两条条件各读各的**：`read_aftermath` 起两条进程，一条都不合并——`status --porcelain -z -uall`
+  走 `write::status_index`（那一份 fail-closed 的读法，截断就是截断），`diff --quiet <target>` 单独
+  一条读数。两者装进 `Aftermath { leftovers, status_answered, matches_target }`，`clean()` 要
+  `status_answered && leftovers 空 && matches_target == Some(true)`——**任何一条读不出来都不是
+  干净**，与 §「读失败永远不是干净仓库」同一条方向。
+- **`restore_verdict(removal, settled)` 是唯一的判词出口**：取消就是取消（哪怕事后那棵树看起来
+  已经平了，也不把它升格成 Success，也不降格成 Partial）；只有 removal 成功 **且** 两条条件都答
+  yes 才是 Success；其余全是 Partial——第一步跑了、承诺没守住，这一步没有被第二步撤销。
+- **逐路径的"移除／未移除"由 Git 事后那份名单判**（`Aftermath::still_there`：同名，或那条未跟踪
+  项是折叠目录时的祖先匹配），不是由"我们把哪些路径交给了 `clean`"判。句子给出"N of the M
+  path(s) promised for removal are not."，名单本身有 `AFTERMATH_DISPLAY_LIMIT = 8` 的上限加
+  "and K more"，与图表那些名单同一个做法。
+- **§9.2 留的那个位置现在填上了，但没有改判**：`clean` 对"reset 刚把它变成已跟踪"那几条沉默，
+  仍然按 Success 加一句实话（那棵树事后确实是平的）；进 Partial 的是另一格——承诺的路径确实还在
+  磁盘上（受保护的仓库那一格）。
+- **第二步之前那次重问是 `removal_after_reset`**：`clean -nd` 只按承诺的那批路径问一次，Git 不再
+  提供的路径不硬来（不加 `-x`、不加第二个 `-f`），只如实说没被提供。
+
+### 10.2 写这一片时发现的两件事
+
+- **reset 成功之后，任何错误都不许以"命令失败"的形式逃出**。原来 `removal_after_reset(...)?` 与
+  `step_two(...)?` 的 `ProbeError` 会一路冒到 `confirm`，于是 HEAD 已经移动的工作树被报成一条
+  什么都没做的错误。现在这一步的失败收进 `unfinished_removal`：Partial，消息里点名"恢复到了
+  目标"与"删除未完成"，事后那两条条件照读。测出来的形状是 1600 条承诺路径把那次 `clean -nd`
+  的读数顶过 64 KB 捕获上限（`clean_preview_failed`），走的就是这条收口。**这一格测的是"重问
+  答不上来"，不是真的超时**：超时在同一处收口里，但这台宿主上没有可重复注入的挂起 git，所以
+  `probe_timeout` 那一路径至今没被真跑过——它没有伪装成被验过。
+- **`clean -fd` 的退出码不说明它删了什么**。夹具里两条承诺路径（一条在未可写的目录里、一条在
+  外面）跑完是 rc=1：stdout 报了 `Removing removable.txt`，stderr 报 `failed to remove
+  locked/keep.txt: Permission denied`，于是"少删"既不是失败也不是成功——`a_restore_whose_clean_step_fails_says_which_of_the_two_ran`
+  钉住的就是这一点（跑前跑后 chmod，不留权限状态给别的用例）。探针那一格另加一条对照：同样两条
+  路径，`clean -nd` 在动手之前把两条都提供了。
+
+### 10.3 门禁与度量
+
+门禁数从 detached worktree 的 `86efc57` 上取（共享树此刻只带这一片的东西，仍在 worktree 里读，
+与上一片同一做法）：`cargo test` **398 passed / 0 failed**（`reset` 过滤器 **45 条**，这一阶段
+两次提交新增 6 条）、`cargo fmt --check` 零 diff、`cargo clippy --locked --all-targets` **0 告警**、
+`npm run build` ✓ **47 modules transformed**、`npm run test:fixture` **399 pass / 0 fail**（这一片
+只动 `types.ts` 那条 outcome 联合，没动前端用例，所以这条数不变）、`color-contrast.py` fails=0、
+`responsive-check.py` fails=0。探针同一次运行 `exit=0`、**488 行**（比上一版多 28 行：那三格
+"两条条件互相的盲区"与那条部分删除的对照），跑前跑后 `/tmp` 里都是 0 个 `guit-clean-reset-*`。
+
+事后那两条读数的代价是在 guit 外面量的（同一份 2000 文件、100 条未跟踪项的夹具，各跑七次取
+中位）：`status --porcelain -z -uall` **8.7 ms**（7.5–9.9），`diff --quiet <target>` **8.1 ms**
+（6.2–9.3）。两条都在写槽里、两步之后，所以确认那条通道的总账要在 §9.3 那个约 30 ms 之上再加
+约 17 ms——同样是同批读数的加和，不是这条通道上的一次墙钟观测。`partial` 这个词进了
+`OperationResult.outcome` 的联合，没有进 `ToolResult`：外部工具那条通道只有一条进程，没有
+"跑了一半"可说。
+
+### 10.4 这一片没做完的
+
+- **命令注册**：`reset.rs` 里 12 处 `allow(dead_code)` 数量不变（这一片的代码全在已挂着的那条
+  调用链上），它们仍须与 `main.rs` 注册表和前端两处 `invoke` 字面量同一次提交落地。
+- **预览续约的后端一侧已经天然是它**（同一张票重问即替换），但前端那条 `preview.renew()` 接线、
+  以及"这条预览在窗口里怎么说自己没守住"那一份文案在 F06。
+- **真超时没量**：见 §10.2 第一条末尾。
+- **§6.9 那一整列仍未量**，这一片新增两格也仍在同一台 Linux 宿主、同一份 Git 上：1600 条承诺路径
+  那一格的 64 KB 上限、以及那条未可写目录的 `Permission denied`，都是 POSIX 形状；Windows 上这两
+  格长什么样（`core.protectNTFS` 那一类名字、被占用文件的错误码）仍只是构建配置。
