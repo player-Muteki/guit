@@ -582,6 +582,10 @@ pub enum Outcome {
     /// conflict is progress in a sequence, not an ordinary failure; the
     /// snapshot's `operation` field drives the continue/abort affordances.
     Conflicted,
+    /// An operation that is more than one Git process, where one ran and the
+    /// promise was not kept. Neither a failure — the first step is not undone by
+    /// the second one — nor a success. Only the clean restore answers with it.
+    Partial,
 }
 
 /// Uniform answer for write operations. The embedded

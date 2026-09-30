@@ -827,14 +827,16 @@ fn recheck_restore(
     Ok(Ok(()))
 }
 
-/// The two steps a clean restore runs, inside the one held write slot. They are
-/// not atomic and nothing here pretends they are: the second step asks Git what
-/// it still agrees to remove *after* the reset, because the reset is what takes
-/// a path into the tree where `clean` then goes silent. A path Git no
-/// longer offers is reported as left where it is — not as a failure, not as a
-/// removal, and never with a second force added to make Git say yes.
+/// The two steps a clean restore runs, inside the one held write slot, and the
+/// two conditions they are judged by afterwards. They are not atomic and nothing
+/// here pretends they are: the second step asks Git what it still agrees to
+/// remove *after* the reset, because the reset is what takes a path into the tree
+/// where `clean` then goes silent. A path Git no longer offers is reported as
+/// left where it is — not as a failure, not as a removal, and never with a second
+/// force added to make Git say yes.
 fn run_restore_steps(
     state: &WriteState,
+    sessions: &session::SessionState,
     work_root: &Path,
     plan: &Restoration,
 ) -> Result<write::Ran, ProbeError> {
@@ -864,45 +866,66 @@ fn run_restore_steps(
             ..reset
         });
     }
-    if plan.removals.is_empty() {
-        return Ok(write::Ran {
-            message: format!(
-                "{} No untracked file was listed for removal.",
-                reset.message
-            ),
-            ..reset
-        });
-    }
     let promised = plan
         .removals
         .iter()
         .map(|item| item.raw.clone())
         .collect::<Vec<_>>();
-    let offered = write::clean_candidates(work_root, &promised)?;
-    let going = promised
-        .iter()
-        .filter(|raw| covered_by_clean(&offered, raw))
-        .cloned()
-        .collect::<Vec<_>>();
-    let left = promised.len() - going.len();
-    let silence = if left == 0 {
-        String::new()
-    } else {
-        format!(
-            " {left} path(s) the preview listed were not removed: git clean does not offer them."
-        )
-    };
-    if going.is_empty() {
-        return Ok(write::Ran::ok(
+    let removal = if promised.is_empty() {
+        write::Ran::ok(
             format!(
-                "{} None of the {} untracked path(s) the preview listed are removed: git clean does not offer them.",
-                reset.message, promised.len()
+                "{} No untracked file was listed for removal.",
+                reset.message
             ),
-            None,
-        ));
-    }
+            reset.exit_code,
+        )
+    } else {
+        let offered = write::clean_candidates(work_root, &promised)?;
+        let going = promised
+            .iter()
+            .filter(|raw| covered_by_clean(&offered, raw))
+            .cloned()
+            .collect::<Vec<_>>();
+        if going.is_empty() {
+            write::Ran::ok(
+                format!(
+                    "{} None of the {} untracked path(s) the preview listed are offered by git clean.",
+                    reset.message,
+                    promised.len()
+                ),
+                None,
+            )
+        } else {
+            step_two(state, work_root, &target, &reset, &going)?
+        }
+    };
+    let aftermath = read_aftermath(sessions, work_root, state.cancel_flag(), &plan.target_oid);
+    let outcome = match (removal.outcome, aftermath.clean()) {
+        (Outcome::Cancelled, _) => Outcome::Cancelled,
+        (Outcome::Success, true) => Outcome::Success,
+        // One of the two steps ran and the promise was not kept: the reset is
+        // not undone by a removal that did not happen, and a tree Git will not
+        // describe is not a clean tree either.
+        _ => Outcome::Partial,
+    };
+    Ok(write::Ran {
+        outcome,
+        message: format!("{}{}", removal.message, aftermath.sentence(&promised)),
+        ..removal
+    })
+}
+
+/// The second Git process, with the wording of a step whose result only means
+/// something next to the first one's.
+fn step_two(
+    state: &WriteState,
+    work_root: &Path,
+    target: &str,
+    reset: &write::Ran,
+    going: &[Vec<u8>],
+) -> Result<write::Ran, ProbeError> {
     let clean = write::ran_from(
-        write::run_git_paths(work_root, &["clean", "-fd"], &going, state.cancel_flag()),
+        write::run_git_paths(work_root, &["clean", "-fd"], going, state.cancel_flag()),
         write::Wording {
             ok: format!("Removed {} untracked item(s).", going.len()),
             failed: "git clean reported a failure.".to_owned(),
@@ -910,13 +933,129 @@ fn run_restore_steps(
         },
     )?;
     let message = match clean.outcome {
-        Outcome::Success => format!("{} {}{}", reset.message, clean.message, silence),
+        Outcome::Success => format!("{} {}", reset.message, clean.message),
         _ => format!(
-            "{} The working copy reached {target}; the untracked files were not all removed.{silence}",
+            "{} The working copy reached {target}; the untracked files were not all removed.",
             clean.message
         ),
     };
     Ok(write::Ran { message, ..clean })
+}
+
+/// How many leftover paths the aftermath names before summarising the residue.
+const AFTERMATH_DISPLAY_LIMIT: usize = 8;
+
+/// The two conditions a clean restore is judged by, read apart because they
+/// answer different questions and can disagree: the working copy's own state
+/// says what is still there, `diff --quiet <target>` says whether the tracked
+/// content is the target's. A restore that leaves somebody else's repository
+/// where it stands passes the second and fails the first; a repository written
+/// to during the two steps fails the second while the first has nothing new to
+/// say. Neither answer implies the other, and a read that will not answer is
+/// never read as a clean repository.
+struct Aftermath {
+    leftovers: Vec<Vec<u8>>,
+    status_answered: bool,
+    matches_target: Option<bool>,
+}
+
+impl Aftermath {
+    fn clean(&self) -> bool {
+        self.status_answered && self.leftovers.is_empty() && self.matches_target == Some(true)
+    }
+
+    /// Which path is still standing, by Git's own later answer rather than by
+    /// what this program handed to `clean` a moment ago — including the case
+    /// where a folded directory is listed instead of the file inside it.
+    fn still_there(&self, raw: &[u8]) -> bool {
+        self.leftovers
+            .iter()
+            .any(|left| left.as_slice() == raw || is_ancestor_dir(left, raw))
+    }
+
+    /// The sentence the operation owes after the two steps: which condition
+    /// holds, what is outside it, and how many of the promised paths are still
+    /// there. It never says "restored" by itself.
+    fn sentence(&self, promised: &[Vec<u8>]) -> String {
+        if !self.status_answered || self.matches_target.is_none() {
+            return " Git would not answer both conditions afterwards, so this is not reported as a clean restore."
+                .to_owned();
+        }
+        if self.clean() {
+            return " The working copy is clean and matches the target.".to_owned();
+        }
+        let mut parts = Vec::new();
+        if !self.leftovers.is_empty() {
+            let named = self
+                .leftovers
+                .iter()
+                .take(AFTERMATH_DISPLAY_LIMIT)
+                .map(|raw| model::display_name(raw))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = self.leftovers.len() - AFTERMATH_DISPLAY_LIMIT.min(self.leftovers.len());
+            let list = if more == 0 {
+                named
+            } else {
+                format!("{named}, and {more} more")
+            };
+            parts.push(format!(
+                "{} path(s) are still there: {list}",
+                self.leftovers.len()
+            ));
+        }
+        if self.matches_target == Some(false) {
+            parts.push("the tracked content is not the target's".to_owned());
+        }
+        let removal = if promised.is_empty() {
+            String::new()
+        } else {
+            let unremoved = promised.iter().filter(|raw| self.still_there(raw)).count();
+            if unremoved == 0 {
+                format!(
+                    " All {} path(s) promised for removal are gone.",
+                    promised.len()
+                )
+            } else {
+                format!(
+                    " {unremoved} of the {} path(s) promised for removal are not.",
+                    promised.len()
+                )
+            }
+        };
+        format!(
+            " It is not a clean restore: {}.{}",
+            parts.join("; "),
+            removal
+        )
+    }
+}
+
+/// Both reads happen inside the held write slot, after the two steps: the
+/// answer is about the tree this operation just made, and a snapshot taken
+/// before it would describe a tree somebody else may have left.
+fn read_aftermath(
+    sessions: &session::SessionState,
+    work_root: &Path,
+    cancelled: &AtomicBool,
+    target_oid: &str,
+) -> Aftermath {
+    let (leftovers, status_answered) = match write::status_index(sessions) {
+        Ok(entries) => (entries.keys().cloned().collect::<Vec<_>>(), true),
+        Err(_) => (Vec::new(), false),
+    };
+    let matches_target = repo::git(
+        work_root,
+        repo::GitRun::read(&["diff", "--quiet", target_oid], cancelled),
+    )
+    .ok()
+    .filter(|output| !output.truncated)
+    .map(|output| output.status.success());
+    Aftermath {
+        leftovers,
+        status_answered,
+        matches_target,
+    }
 }
 
 /// The clean restore's confirmation: the ticket goes first, the whole plan is
@@ -957,7 +1096,7 @@ fn run_restore(
             _ => None,
         },
         |work_root, plan| recheck_restore(sessions, work_root, plan),
-        |work_root, plan| run_restore_steps(state, work_root, plan),
+        |work_root, plan| run_restore_steps(state, sessions, work_root, plan),
     )
 }
 
@@ -2467,6 +2606,124 @@ mod tests {
         );
         assert!(dir.join("plain.txt").exists(), "the clean never ran");
         assert_eq!(read(dir, &["rev-parse", "HEAD"]), before);
+    }
+
+    /// Both steps ran, the tree reached the target, and the result is still not
+    /// a clean restore: a repository that `clean` will not list without a second
+    /// force stays where it stands. That is reported as what it is — one promise
+    /// kept, the other not — rather than as a success with a longer sentence.
+    #[test]
+    fn a_restore_that_leaves_a_protected_repository_reports_a_partial_result() {
+        let (root, target) = restore_repo();
+        let dir = root.path();
+        repository_in(dir, "nested");
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        assert_eq!(preview.removed, ["plain.txt"]);
+        assert_eq!(preview.left_behind, ["nested (repository)"]);
+
+        let result = restore_clean(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Partial, "{}", result.message);
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), target, "the reset ran");
+        assert!(!dir.join("plain.txt").exists(), "the removal ran too");
+        assert!(
+            dir.join("nested/own.txt").exists(),
+            "the protected one stays"
+        );
+        assert!(
+            result.message.contains("nested")
+                && result
+                    .message
+                    .contains("All 1 path(s) promised for removal are gone."),
+            "{}",
+            result.message
+        );
+    }
+
+    /// `reset` succeeded and `clean` did not, which is the case a single
+    /// success-or-failure bool cannot carry: HEAD moved and nothing undoes that,
+    /// while the file the preview promised is still on disk.
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_whose_clean_step_fails_says_which_of_the_two_ran() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, target) = restore_repo();
+        let dir = root.path();
+        write_at(
+            dir,
+            "locked/keep.txt",
+            "untracked, behind a directory that will not open\n",
+        );
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        assert_eq!(preview.removed, ["locked/keep.txt", "plain.txt"]);
+
+        let locked = dir.join("locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = restore_clean(&writes, &sessions, preview.nonce).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(result.outcome, Outcome::Partial, "{}", result.message);
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), target, "the reset ran");
+        assert!(!dir.join("plain.txt").exists(), "the removal started");
+        assert!(
+            dir.join("locked/keep.txt").exists(),
+            "and did not finish with this path"
+        );
+        assert!(
+            result.message.contains("The working copy reached")
+                && result.message.contains("were not all removed")
+                && result
+                    .message
+                    .contains("1 of the 2 path(s) promised for removal are not."),
+            "{}",
+            result.message
+        );
+    }
+
+    /// The two conditions answer different questions and can point opposite
+    /// ways: the comparison against the target is silent about an untracked file,
+    /// and the working copy can be perfectly clean against a commit it was never
+    /// restored to. Neither one alone is the answer to "is it clean now".
+    #[test]
+    fn the_aftermath_answers_the_two_conditions_apart() {
+        let (root, target) = restore_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let work_root = sessions.commit_context(version).unwrap().0;
+        let stepped_over = head(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        let result = restore_clean(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+
+        let cancelled = AtomicBool::new(false);
+        let settled = read_aftermath(&sessions, &work_root, &cancelled, &target);
+        assert!(settled.clean(), "{}", settled.sentence(&[]));
+
+        write_at(dir, "late.txt", "written after the restore\n");
+        let left = read_aftermath(&sessions, &work_root, &cancelled, &target);
+        assert!(!left.clean());
+        assert_eq!(left.matches_target, Some(true), "diff is silent about it");
+        assert_eq!(names(&left.leftovers), ["late.txt"]);
+        assert!(
+            left.sentence(&[b"late.txt".to_vec()])
+                .contains("1 of the 1 path(s) promised for removal are not."),
+            "{}",
+            left.sentence(&[b"late.txt".to_vec()])
+        );
+
+        std::fs::remove_file(dir.join("late.txt")).unwrap();
+        let apart = read_aftermath(&sessions, &work_root, &cancelled, &stepped_over);
+        assert_eq!(apart.matches_target, Some(false));
+        assert!(apart.leftovers.is_empty(), "the working copy is clean");
+        assert!(
+            apart
+                .sentence(&[])
+                .contains("the tracked content is not the target's"),
+            "{}",
+            apart.sentence(&[])
+        );
     }
 
     /// A cancel that arrives before the ticket is confirmed stops both steps

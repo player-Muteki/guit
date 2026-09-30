@@ -158,7 +158,7 @@ export type OperationResult = {
     | "worktreeadd"
     | "worktreeremove"
     | "worktreeprune";
-  outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted";
+  outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted" | "partial";
   exitCode: number | null;
   message: string;
   details: string | null;
