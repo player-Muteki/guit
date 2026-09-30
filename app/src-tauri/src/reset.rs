@@ -1,8 +1,10 @@
 //! Reset: three modes at two risk levels. Soft and mixed moves
 //! HEAD (and the index) but never touches file contents, so they ride the
-//! ordinary write queue with the same target discipline as the sequencer:
-//! a full commit id or one exact local branch name, never a revspec
-//! string. `--hard` additionally overwrites the working copy and drops
+//! ordinary write queue. Both modes take their target the same way: the text
+//! is refused by shape unless it could be a commit id, and what is acted on is
+//! the full commit id Git resolves it to — a branch name, a tag name and every
+//! revspec are rejected before Git is asked, because Git would accept them.
+//! `--hard` additionally overwrites the working copy and drops
 //! commits; it has its own command that only consumes a single-use
 //! preview ticket, and the ticket's whole promise is re-checked at
 //! confirm time — the tracked-dirty file set, HEAD and the target commit.
@@ -63,6 +65,255 @@ fn resolve_commit(work_root: &Path, spec: &str) -> Option<String> {
         ],
     )
     .filter(|oid| history::valid_oid(oid))
+}
+
+/// The shortest abbreviation Git still reads, measured rather than configured:
+/// `core.abbrev` sets the width Git *writes* out, and the same four hex
+/// resolved in a store of 124 objects and in one of 40,083 alike. Below four,
+/// Git reports no candidates at all — not "nothing bears this prefix" but "too
+/// short to look" — so the floor is guit's own line to draw.
+const MIN_TARGET_LEN: usize = 4;
+
+/// The widest object id any supported format writes.
+const MAX_TARGET_LEN: usize = 64;
+
+/// How many candidates the triage asks about one by one. Past this the answer
+/// stays "not exactly one commit", which is all a person can act on, and the
+/// count stops being worth that many short reads.
+const TRIAGE_CANDIDATE_LIMIT: usize = 16;
+
+/// Whether the typed text could be a commit id at all, decided before Git is
+/// asked anything. Git resolves `main`, `v1`, `HEAD~1`, `@{0}` and a working
+/// file path happily, so "a reset goes to a commit id" is a rule guit enforces
+/// and Git never will. Upper case passes because Git reads an upper case id as
+/// the same id; what reaches argv is never the typed string but the id Git
+/// answers with, which is lowercase and full-width by construction.
+#[derive(Debug, PartialEq)]
+enum Shape {
+    /// Hexadecimal, within the lengths an id can have.
+    Hex(String),
+    /// Nothing left once the surrounding spaces are dropped.
+    Empty,
+    /// Not hexadecimal: a name, a revspec, a path, an option-looking string.
+    Noise,
+    /// Hexadecimal, but shorter than Git reads.
+    TooShort,
+    /// Hexadecimal, but longer than any format writes.
+    TooLong,
+}
+
+fn shape_of(target: &str) -> Shape {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return Shape::Empty;
+    }
+    if !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Shape::Noise;
+    }
+    match trimmed.len() {
+        0..MIN_TARGET_LEN => Shape::TooShort,
+        MIN_TARGET_LEN..=MAX_TARGET_LEN => Shape::Hex(trimmed.to_ascii_lowercase()),
+        _ => Shape::TooLong,
+    }
+}
+
+/// What asking Git for one commit answered. The three answers are not two: a
+/// process that could not be asked, a process that answered no, and a commit.
+/// Only the middle one is a fact about the repository, and the first must never
+/// be reported as the second — a read failure is not an absent commit.
+enum Peel {
+    Commit(String),
+    No,
+    Unaskable,
+}
+
+/// `rev-parse --verify --quiet <spec>^{commit}`: Git's own answer to "does this
+/// name exactly one commit", including through a tag object, and including for
+/// an abbreviation that names a commit alongside a blob.
+fn peel_commit(work_root: &Path, spec: &str) -> Peel {
+    let output = match branches::run_git(
+        work_root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{spec}^{{commit}}"),
+        ],
+        &AtomicBool::new(false),
+    ) {
+        Ok(output) => output,
+        Err(_) => return Peel::Unaskable,
+    };
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if output.status.success() {
+        return if !output.truncated && history::valid_oid(&text) {
+            Peel::Commit(text)
+        } else {
+            Peel::Unaskable
+        };
+    }
+    // `--verify --quiet` says "not exactly one commit" with 1 and nothing else.
+    // Any other code is Git failing to read the repository, which is not an
+    // answer about the target.
+    if output.status.code() == Some(1) && !output.truncated {
+        Peel::No
+    } else {
+        Peel::Unaskable
+    }
+}
+
+/// Every object whose id starts with these characters, of any type: a listing
+/// Git exits `0` for whether or not the prefix means anything, printing one
+/// full id per line and nothing else. It is the only way to tell "no commit has
+/// this id" from "this id is not a commit" from "two commits have it", all of
+/// which peel answers with the same rc.
+fn candidate_oids(work_root: &Path, hex: &str) -> Result<Vec<String>, ProbeError> {
+    let output = branches::run_git(
+        work_root,
+        &["rev-parse", &format!("--disambiguate={hex}")],
+        &AtomicBool::new(false),
+    )?;
+    if !output.status.success() || output.truncated {
+        return Err(ProbeError::new(
+            "reset_target_unreadable",
+            "Git would not list the objects that bear that id; nothing was changed.",
+        ));
+    }
+    let mut found = Vec::new();
+    for line in output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let name = String::from_utf8_lossy(line).trim().to_owned();
+        // A listing that is not full lowercase ids is not the listing this was
+        // written for, and guessing from it would be a rule of ours, not Git's.
+        if !history::valid_oid(&name) {
+            return Err(ProbeError::new(
+                "reset_target_unreadable",
+                "Git listed an object id it does not normally write; nothing was changed.",
+            ));
+        }
+        found.push(name);
+    }
+    Ok(found)
+}
+
+/// Why a shape-correct id is still not a place to reset to, in Git's own
+/// answers rather than in a rule invented here.
+enum Absent {
+    /// Nothing in this repository bears that id.
+    Nothing,
+    /// Something bears it, and it is not a commit.
+    NotCommit,
+    /// Several commits bear it.
+    Ambiguous(usize),
+    /// More objects bear it than the triage will ask about one by one. After a
+    /// failed peel the one fact left is that this is not exactly one commit, and
+    /// that is what gets said — without a count it did not earn.
+    Crowded,
+}
+
+/// Triage of a failed peel: how many commits this id names, asked one candidate
+/// at a time because `rev-parse` has no type filter of its own (`--type` comes
+/// back as an argument, measured) and the batched type query reads stdin, which
+/// the process seam closes before anything is written.
+fn why_absent(work_root: &Path, hex: &str) -> Result<Absent, ProbeError> {
+    let candidates = candidate_oids(work_root, hex)?;
+    if candidates.is_empty() {
+        return Ok(Absent::Nothing);
+    }
+    if candidates.len() > TRIAGE_CANDIDATE_LIMIT {
+        return Ok(Absent::Crowded);
+    }
+    let mut commits = 0;
+    for candidate in candidates.iter() {
+        match peel_commit(work_root, candidate) {
+            Peel::Commit(_) => commits += 1,
+            Peel::No => {}
+            Peel::Unaskable => {
+                return Err(ProbeError::new(
+                    "reset_target_unreadable",
+                    "Git could not be asked about every object that bears that id; nothing was changed.",
+                ))
+            }
+        }
+    }
+    match commits {
+        0 => Ok(Absent::NotCommit),
+        // One commit among the candidates is not a possible answer: peel names
+        // exactly one commit and succeeds. Getting it means the two reads
+        // disagree, which is a read failure, not a fact about the id.
+        1 => Err(ProbeError::new(
+            "reset_target_unreadable",
+            "Git's two answers about that commit id did not fit together; nothing was changed.",
+        )),
+        count => Ok(Absent::Ambiguous(count)),
+    }
+}
+
+/// The target a reset will actually use: the full commit id Git itself names,
+/// or a refusal that says which of the three ways "no" this is. Everything
+/// downstream — argv, the ticket, the recheck at confirm time — consumes only
+/// what this returns, so a typed string can never reach a Git command line.
+pub(crate) fn resolve_target(work_root: &Path, target: &str) -> Result<String, ProbeError> {
+    let hex = match shape_of(target) {
+        Shape::Hex(hex) => hex,
+        Shape::Empty => {
+            return Err(ProbeError::new(
+                "reset_target_shape",
+                "A reset needs a commit to go to.",
+            ))
+        }
+        Shape::Noise => {
+            return Err(ProbeError::new(
+                "reset_target_shape",
+                "A reset target is written as a commit id, in hexadecimal — not as a branch name or a revision like HEAD~1.",
+            ))
+        }
+        Shape::TooShort => {
+            return Err(ProbeError::new(
+                "reset_target_shape",
+                "That is shorter than any commit id: at least four hexadecimal characters are needed.",
+            ))
+        }
+        Shape::TooLong => {
+            return Err(ProbeError::new(
+                "reset_target_shape",
+                "That is longer than a commit id can be.",
+            ))
+        }
+    };
+    match peel_commit(work_root, &hex) {
+        Peel::Commit(oid) => return Ok(oid),
+        Peel::Unaskable => {
+            return Err(ProbeError::new(
+                "reset_target_unreadable",
+                "Git could not be asked about that commit id; nothing was changed.",
+            ))
+        }
+        Peel::No => {}
+    }
+    match why_absent(work_root, &hex)? {
+        Absent::Nothing => Err(ProbeError::new(
+            "reset_target_absent",
+            "No object in this repository has that commit id.",
+        )),
+        Absent::NotCommit => Err(ProbeError::new(
+            "reset_target_not_commit",
+            "That commit id names something that is not a commit.",
+        )),
+        Absent::Ambiguous(count) => Err(ProbeError::new(
+            "reset_target_ambiguous",
+            format!(
+                "That abbreviation names {count} commits; give more of the id so one is meant."
+            ),
+        )),
+        Absent::Crowded => Err(ProbeError::new(
+            "reset_target_ambiguous",
+            "That abbreviation names many objects and not exactly one commit; give more of the id.",
+        )),
+    }
 }
 
 /// Files a hard reset would overwrite: every tracked change (staged or
@@ -126,14 +377,6 @@ fn run_reset(
     if let Some(refusal) = in_progress {
         return write::plain(sessions, kind, Outcome::Rejected, &refusal);
     }
-    if !sequencer::validate_target(&work_root, target) {
-        return write::plain(
-            sessions,
-            kind,
-            Outcome::Rejected,
-            "The target must be a full commit id or an existing local branch name.",
-        );
-    }
     if state.cancel_flag().load(Ordering::SeqCst) {
         return write::plain(
             sessions,
@@ -142,13 +385,19 @@ fn run_reset(
             "Cancelled before Git ran.",
         );
     }
-    let args = ["reset", mode.flag(), target];
+    let target_oid = match resolve_target(&work_root, target) {
+        Ok(oid) => oid,
+        Err(refusal) => {
+            return write::plain(sessions, kind, Outcome::Rejected, &refusal.message);
+        }
+    };
+    let args = ["reset", mode.flag(), target_oid.as_str()];
     write::run_and_report(
         sessions,
         kind,
         sequencer::run_git(&work_root, false, &args, state),
         write::Wording {
-            ok: format!("Reset ({}) to {}.", mode.label(), target),
+            ok: format!("Reset ({}) to {}.", mode.label(), short(&target_oid)),
             failed: format!("git reset {} reported a failure.", mode.flag()),
             cancelled: "Cancelled while the Git process was running.".to_owned(),
         },
@@ -179,18 +428,10 @@ pub(crate) fn preview_reset_hard(
     if let Some(refusal) = sequencer::in_progress_message(sessions)? {
         return Err(ProbeError::new("reset_in_progress", refusal));
     }
-    if !sequencer::validate_target(&work_root, target) {
-        return Err(ProbeError::new(
-            "reset_target",
-            "The target must be a full commit id or an existing local branch name.",
-        ));
-    }
-    let target_oid = resolve_commit(&work_root, target).ok_or_else(|| {
-        ProbeError::new(
-            "reset_target_missing",
-            "That commit does not exist in this repository; refresh the history.",
-        )
-    })?;
+    // Everything the ticket binds and every id the preview lists come from this
+    // one resolution, so a hard reset's target is Git's own full commit id and
+    // never the string that was typed.
+    let target_oid = resolve_target(&work_root, target)?;
     let head_oid = resolve_commit(&work_root, "HEAD")
         .ok_or_else(|| ProbeError::new("reset_head", "HEAD does not name a commit."))?;
     let dirty = tracked_dirty_set(sessions)?;
@@ -525,25 +766,225 @@ mod tests {
         let dir = root.path();
         let (writes, sessions, version) = state_and_session(dir);
         let mut version = version;
-        // Revspec strings and unknown names never reach git, in either
-        // direction of the mode split.
-        for bad in ["HEAD~1", "@{u}", "nosuchbranch", "main extra", ""] {
+        // Names, revspecs and shorthands never reach git, in either direction
+        // of the mode split. Git resolves every one of them; refusing them is
+        // the panel's rule, applied to the shape of the text.
+        for bad in [
+            "HEAD~1",
+            "@{u}",
+            "nosuchbranch",
+            "main extra",
+            "HEAD",
+            "main",
+            "v1",
+            "",
+            "   ",
+        ] {
             let result = reset(&writes, &sessions, version, ModeArg::Soft, bad).unwrap();
             assert_eq!(result.outcome, Outcome::Rejected, "{bad:?} accepted");
             assert_eq!(result.exit_code, None, "{bad:?} reached git");
             // Each refusal re-read state, so the next attempt needs its version.
             version = result.snapshot.expect("re-read").version;
         }
-        // A well-formed but nonexistent commit is caught at hard preview
+        // A well-formed but nonexistent commit is caught at hard preview too
         // (soft/mixed leave it to Git's own failure reporting).
         let ghost = "deadbeef".repeat(5);
         let error = preview_reset_hard(&writes, &sessions, version, &ghost).unwrap_err();
-        assert_eq!(error.code.as_str(), "reset_target_missing");
-        // But a branch name is a legitimate hard target.
-        let preview = preview_reset_hard(&writes, &sessions, version, "main").unwrap();
+        assert_eq!(error.code.as_str(), "reset_target_absent");
+        // And a branch name is not a legitimate hard target either: the ticket
+        // would bind the commit it points at today and a different one later.
+        let error = preview_reset_hard(&writes, &sessions, version, "main").unwrap_err();
+        assert_eq!(error.code.as_str(), "reset_target_shape");
+    }
+
+    #[test]
+    fn a_shape_gate_needs_no_git_to_answer() {
+        // The gate is the whole reason a revspec cannot reach a command line,
+        // so it is checked without a repository: what passes is hexadecimal of a
+        // length an id can have, in either case, and nothing else.
+        assert!(matches!(shape_of(""), Shape::Empty));
+        assert!(matches!(shape_of(" \t\n "), Shape::Empty));
+        for noise in [
+            "main",
+            "HEAD~1",
+            "@{0}",
+            "--help",
+            "-deadbeef",
+            "de adbeef",
+            "deadbeeg",
+        ] {
+            assert!(matches!(shape_of(noise), Shape::Noise), "{noise:?} passed");
+        }
+        assert!(matches!(shape_of("abc"), Shape::TooShort));
+        assert!(matches!(shape_of("abcd"), Shape::Hex(_)));
+        assert!(matches!(shape_of(&"a".repeat(64)), Shape::Hex(_)));
+        assert!(matches!(shape_of(&"a".repeat(65)), Shape::TooLong));
+        // Surrounding spaces are dropped, and the case is normalised into the
+        // text that is asked about — never into the text that is acted on.
+        assert_eq!(shape_of(" 0F44 "), shape_of("0f44"));
+        assert_eq!(shape_of("0F44"), Shape::Hex("0f44".to_owned()));
+    }
+
+    #[test]
+    fn an_abbreviation_names_the_commit_it_uniquely_names() {
+        let root = dirty_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let c1 = read(dir, &["rev-parse", "HEAD~1"]);
+        // Four hex is where Git stops resolving, measured: the same four
+        // resolved in a store of 124 objects and one of 40,083. This repository
+        // holds five objects, so a four-digit prefix names one commit uniquely.
+        let abbreviation = &c1[..4];
+        let preview = preview_reset_hard(&writes, &sessions, version, abbreviation).unwrap();
+        assert_eq!(preview.target_oid.as_deref(), Some(c1.as_str()));
+        // What a soft reset acts on is the id Git answered, and what its
+        // sentence reports is that id rather than the four characters typed.
+        // The preview re-read the repository, so the write takes that snapshot.
+        let version = preview.snapshot.version;
+        let result = reset(&writes, &sessions, version, ModeArg::Soft, abbreviation).unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert!(result.message.contains(&c1[..10]), "{}", result.message);
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), c1);
+    }
+
+    #[test]
+    fn an_id_copied_in_upper_case_is_the_same_commit() {
+        let root = dirty_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let c1 = read(dir, &["rev-parse", "HEAD~1"]);
+        let preview = preview_reset_hard(&writes, &sessions, version, &c1.to_uppercase()).unwrap();
+        assert_eq!(preview.target_oid.as_deref(), Some(c1.as_str()));
+    }
+
+    #[test]
+    fn the_id_of_a_thing_that_is_not_a_commit_is_named_as_one() {
+        let root = dirty_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        // A blob's full id resolves perfectly well as an object, and a bare id
+        // is what Git would accept: only the peel to a commit rules it out, so
+        // this is the refusal that has to say "not a commit" and not "missing".
+        let blob = read(dir, &["rev-parse", "HEAD:a.txt"]);
+        let error = preview_reset_hard(&writes, &sessions, version, &blob).unwrap_err();
+        assert_eq!(error.code.as_str(), "reset_target_not_commit");
+        assert!(
+            !error.message.contains("does not exist"),
+            "{}",
+            error.message
+        );
+        // And the same text asked by a soft reset is refused without a run.
+        let refused = reset(&writes, &sessions, version, ModeArg::Soft, &blob).unwrap();
+        assert_eq!(refused.outcome, Outcome::Rejected);
         assert_eq!(
-            preview.target_oid.as_deref(),
-            Some(read(dir, &["rev-parse", "main"]).as_str())
+            refused.exit_code, None,
+            "a refused target must not reach git"
+        );
+    }
+
+    /// Four hex digits shared by two of the commits written into `dir`, with a
+    /// candidate list short enough for the triage to count — or `None` when the
+    /// search found no such prefix.
+    ///
+    /// Ambiguity cannot be waited for: the repository the other tests build has
+    /// no two objects sharing four hex, and four is where Git stops resolving.
+    /// So the objects are made to collide. A commit is just text, so the
+    /// payloads are written by hand and handed to `hash-object -t commit -w`,
+    /// which answers with the id of each one; a timestamp per payload is what
+    /// makes the ids differ. The birthday arithmetic says a few hundred commits
+    /// make a pair likely, so the search goes in batches and stops at the first
+    /// prefix two of them share.
+    fn colliding_commit_prefix(dir: &Path) -> Option<String> {
+        let head = read(dir, &["rev-parse", "HEAD"]);
+        let tree = read(dir, &["rev-parse", "HEAD^{tree}"]);
+        let payloads = tempfile::tempdir().unwrap();
+        for batch in 0..2 {
+            let mut paths = Vec::new();
+            for index in 0..1500u32 {
+                let number = batch * 1500 + index;
+                let payload = format!(
+                    "tree {tree}\nparent {head}\nauthor probe <probe@example.invalid> {} +0000\n\
+                     committer probe <probe@example.invalid> {} +0000\n\nambiguous {number}",
+                    1_600_000_000 + number,
+                    1_600_000_000 + number,
+                );
+                let path = payloads.path().join(format!("c{number}"));
+                std::fs::write(&path, payload).unwrap();
+                paths.push(path);
+            }
+            let mut argv: Vec<&str> = vec!["hash-object", "-t", "commit", "-w", "--"];
+            argv.extend(paths.iter().map(|path| path.to_str().unwrap()));
+            let listed = read(dir, &argv);
+            for path in &paths {
+                std::fs::remove_file(path).ok();
+            }
+            let ids = listed.lines().collect::<Vec<_>>();
+            assert_eq!(
+                ids.len(),
+                1500,
+                "hash-object did not report every commit it was handed"
+            );
+            // Two commits sharing a prefix is the fact; the listing Git itself
+            // reports is what the triage has to stay inside of.
+            let mut shared: Vec<&str> = Vec::new();
+            for (left, left_id) in ids.iter().enumerate() {
+                if ids[left + 1..]
+                    .iter()
+                    .any(|other| other[..4] == left_id[..4])
+                {
+                    shared.push(&left_id[..4]);
+                }
+            }
+            for prefix in shared {
+                let candidates = read(dir, &["rev-parse", &format!("--disambiguate={prefix}")]);
+                if candidates.lines().count() <= TRIAGE_CANDIDATE_LIMIT {
+                    return Some(prefix.to_owned());
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn an_abbreviation_that_names_two_commits_says_so_with_their_count() {
+        let root = dirty_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let Some(prefix) = colliding_commit_prefix(dir) else {
+            panic!(
+                "3000 commits written two batches at a time produced no countable colliding prefix"
+            );
+        };
+        // Git's peel answers "not exactly one" for both an absent id and an
+        // ambiguous one; the count of commits is what makes these two different
+        // sentences, and it comes from asking every candidate separately.
+        let error = preview_reset_hard(&writes, &sessions, version, &prefix).unwrap_err();
+        assert_eq!(error.code.as_str(), "reset_target_ambiguous");
+        let count: String = error
+            .message
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let named: usize = count
+            .parse()
+            .unwrap_or_else(|_| panic!("no count in the refusal: {}", error.message));
+        assert!(
+            named >= 2,
+            "{named} commits is not ambiguous: {}",
+            error.message
+        );
+        let head = read(dir, &["rev-parse", "HEAD"]);
+        let refused = reset(&writes, &sessions, version, ModeArg::Soft, &prefix).unwrap();
+        assert_eq!(refused.outcome, Outcome::Rejected);
+        assert_eq!(
+            refused.exit_code, None,
+            "an ambiguous target must not reach git"
+        );
+        assert_eq!(
+            read(dir, &["rev-parse", "HEAD"]),
+            head,
+            "HEAD must not move"
         );
     }
 
