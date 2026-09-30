@@ -174,6 +174,29 @@ export type PreviewResult = {
   targetOid: string | null;
 };
 
+// A clean restore is two Git processes, so its preview cannot be one candidate
+// list: it names each class of path the two steps touch under its own verb. See
+// `restoreModel.ts` for how these lists are read out.
+export type RestorePreviewResult = {
+  nonce: string;
+  /** Both ids as Git resolved them, never the text that was typed. */
+  targetOid: string;
+  headOid: string;
+  /** Tracked paths the current commit and the target disagree about. */
+  changed: string[];
+  /** Local edits the restore drops. */
+  discarded: string[];
+  /** Untracked paths the restore writes. */
+  overwritten: string[];
+  /** Ignored paths the target holds anyway — the one class a rule does not set aside. */
+  ignoredWritten: string[];
+  /** Untracked paths the second step removes. */
+  removed: string[];
+  /** Untracked paths neither step touches. */
+  leftBehind: string[];
+  snapshot: SnapshotView;
+};
+
 export type ToolPurpose = "openFile" | "diffWorktree" | "diffStaged" | "diffCommit" | "mergeFile";
 
 export type ToolResult = {
