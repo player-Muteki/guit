@@ -18,6 +18,7 @@
 10. [B05 会话身份与请求代次](14-session-identity-b05.md)：身份为什么只能由后端铸造、回声为什么是闭合的一半，以及命令面按“绑定什么”四分。
 11. [B06 布局与无障碍探针更新](15-two-tab-panel-b06.md)：遮挡为什么不能交给 AT-SPI、裁剪后可见矩形与自身布局盒的分工，以及桩为什么要像后端那样发布快照。
 12. [阶段 D 契约依据](16-graph-contract-d.md)：历史双读今天核对到哪一步、pin 为什么只能来自会话、图侧读取与 optional lock 的实测关系，以及 D02–D05 各自动手前要先拿到的那条事实。
+13. [阶段 E 契约依据与记录](17-search-contract-e.md)：折叠口径为什么只有一套答案、命中地址为什么要给两种偏移、排序键停在键而不判胜负，以及 E02 动手前要先量出来的那五条事实。
 
 ## 改造方向
 
@@ -77,6 +78,8 @@ flowchart LR
 | 阶段 D：D03c 跨页检查点与有界深页缓存 | 已实施（同文 §10，代码与本节同一次提交：跨页只传按列算的边界，键是会话+代次+pin 的 OID+视图，顶行没有列在等它就不续；6,337 提交夹具上 127 页一轮点完，只有第一页付图读（16.3 ms），其余 126 页 0.1 ms，基线是 §6.1 的每页 20.3 ms 中位，runner 每次发射一条 mark 因此"一页一个 Git 进程"是数出来的。未闭合：乱序翻页那条路走没走到没量过，约十万提交深度碰捕获上界那条仍是算术，`git.*` 诊断标签分不清子命令，Windows/macOS 仍只是构建配置） |
 | 阶段 D：D04 提交气泡 | 已实施（同文 §12，代码与探针同一次提交：光标与打开的面板分成两根指针，气泡只说这页已经载着的事实，`Included in` 从节点的 `title` 迁进气泡；250 ms 只给鼠标，键盘当下就答。`tools/bench/commit-bubble-engine-probe.ts` 在真实 WebKitGTK 里量了 25 条（走 20 行 `commit_files` 零次、一次点击一次、340 CSS px 下气泡 300 px 宽仍贴着自己的行）。未闭合：§11.7 那句"报告压住了锚行"落地时改成探针里的不变式（同文 §12.3），`coversRow` 那条退路与 `blur` 那条收起的路都没被测过，长消息的内滚动没量过，`layout-probe.mjs` 本轮没有检查端点因此没跑，Windows/macOS 仍只是构建配置） |
 | 阶段 D：D05 图头的分支选择器 | 待实施 |
+| 阶段 E：E01 折叠口径、命中地址与纯 matcher | 已实施（见 [阶段 E 契约依据与记录](17-search-contract-e.md) §1–§5，代码与本文同一次提交：`app/src-tauri/src/fuzzy.rs` 一套折叠、四档排序、片段同时给字节与 UTF-16 两种偏移且恒落在整簇边界。14 个 Rust 单元测试钉住中文非连续、中英混排不误命中、两种重音写法、ß 与词尾 ς、ZWJ 家庭 emoji、`🔥` 的字节/单元差、等键稳定序。折叠吞吐在本宿主 20 次 warm 量到 10,000 行 79–92 ms，是 debug 档，release 档没量过。两个依赖都已在构建图里，`icu_normalizer` 取 `default-features = false` 后 Cargo.lock 包图零增长。未闭合：matcher 今天没有调用者（`main.rs` 只有一个模块声明，靠模块级 `allow(dead_code)` 承接，E02 接上时必须撤掉）；正文/refs 的读取、批次与取消属于 E02，`queryId` 与旧结果不覆盖新结果属于 E03，IME 与图定位属于 E04；输入到候选反馈那条预算要到 E04 才有可量对象；CaseFolding.txt 的分岔只补了读者会当 bug 的那两条；Windows/macOS 仍只是构建配置） |
+| 阶段 E：E02–E04 搜索通道、查询协议与顶栏浮层 | 待实施（动手前先读 [同文 §6](17-search-contract-e.md) 那五条事实） |
 | 阶段 G：W01 版本化外观记录 | 已实施（`app/src/preferencesModel.ts` 与 `appearanceStore.ts`，读不懂的记录拒绝改写；规则由 `app/tests/preferences-model.mjs`、`app/tests/preferences-store.mjs` 钉住）。同一份隔离 HOME 上的第二次启动已经跑过：`tools/bench/restart-persistence-check.py` 用面板自己的关闭钮结束第一个窗口，再启动一次，量到方案、界面缩放和窗口尺寸都按记录读回（关闭时 340，重开 340；记的是 18px，屏幕上也写 18px，默认那 16px 不在页面上）。读不懂的**偏好**记录只在纯模型层被拒（`app/tests/preferences-model.mjs`），真实窗口里那一眼要手写 WebKit 自己的存储文件格式，harness 不做，因此“坏配置可恢复”这一条对偏好记录仍未闭合。要打字的三类字段——两个文字字体、代码字体、那行年龄的秒数、自定义片段——这台宿主没有可写的通道，留在 `tools/bench/recovery-checks.sh` 尾部 manual 4 由人跑；跨比例因子与第二块显示器的钳位同上 manual 3，本宿主只有一块显示器，因此没有运行时证据 |
 | 阶段 G：W02 三类字体与回退 | 已实施（三个名字一行一条，样本行用面板自己的两个字体属性绘制；等宽是否真对齐问过引擎，见 `tools/bench/font-engine-probe.ts` 与 `app/tests/font-stack.mjs`。该问题只朝 WebKitGTK 问过，其他引擎从未运行） |
 | 阶段 G：W03 自定义 CSS 主题 | 已实施（子集逐条审阅、预览、应用、`Ctrl/Cmd+Shift+T` 与页面按钮同一条出路、崩溃后用留下的标记恢复）；未验证部分是事后那一眼只看控件有没有盒子（`app/tests/theme-apply.mjs` 与 `tools/bench/theme-check.py` 的口径），子集也只对 WebKitGTK 这一个引擎固定（`tools/bench/webkit-engine-probe.py`） |

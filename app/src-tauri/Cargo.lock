@@ -1219,6 +1219,7 @@ dependencies = [
 name = "guit"
 version = "0.0.1"
 dependencies = [
+ "icu_normalizer",
  "libc",
  "notify",
  "serde",
@@ -1227,6 +1228,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tempfile",
+ "unicode-segmentation",
 ]
 
 [[package]]

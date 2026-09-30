@@ -4,6 +4,7 @@ mod activity;
 mod branches;
 mod diagnostics;
 mod extools;
+mod fuzzy;
 mod history;
 mod inflight;
 mod model;

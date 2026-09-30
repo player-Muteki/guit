@@ -27,6 +27,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 notify = "8"
+# Both crates already reach the build graph transitively (through `url` and
+# `tauri`), so naming them here adds no new package and compiles no code the
+# release binary was not already carrying. That holds only because the
+# normalizer is taken with the same features its transitive requester enables:
+# its default features would add the UTF-16 and UTF-8 iterator adapters, which
+# nothing in this crate uses. The search matcher needs canonical composition
+# and grapheme boundaries; nothing else in this crate should reach for either,
+# because only search folds text and keeps the original addressable.
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
+unicode-segmentation = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
