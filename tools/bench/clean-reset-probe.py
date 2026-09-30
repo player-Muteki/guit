@@ -541,6 +541,56 @@ def scenario_aftermath() -> None:
           f"still there = {fingerprint(root, 'nested')}")
 
 
+def scenario_aftermath_apart() -> None:
+    """The two conditions, and the shapes where only one of them answers.
+
+    A restore is judged by `status -z -uall` being empty and by `diff --quiet
+    <target>` returning success. They are two different questions — one about the
+    working copy and its index, one about content against one tree — so a verdict
+    built from either alone is a guess about the other.
+    """
+    print("== the two conditions point opposite ways ==")
+    root, later, target = protected_repo()
+    ask(root, "git reset --hard <target>", ["reset", "--hard", target], ["tracked.txt", "gone.txt"])
+    git(root, "clean", "-fdx")
+
+    print("  --- both answered, in each other's blind spot ---")
+    ask(root, "git clean -fdff -- mod nested plain.txt", ["clean", "-fdff", "--", "mod", "nested", "plain.txt"],
+        ["mod", "nested", "plain.txt"])
+    rc, out, _ = git(root, "status", "--porcelain", "-z", "-uall")
+    print(f"    right after both steps: `status -z -uall` rc={rc} empty={not out}; "
+          f"`diff --quiet <target>` rc={git(root, 'diff', '--quiet', target)[0]}")
+    write(root, "fresh.txt", "written after the restore\n")
+    rc, out, _ = git(root, "status", "--porcelain", "-z", "-uall")
+    print(f"    with one new untracked file: `status -z -uall` rc={rc} empty={not out} "
+          f"({one_line(out)}); `diff --quiet <target>` rc={git(root, 'diff', '--quiet', target)[0]} "
+          f"— the content comparison is silent about a path the target does not hold")
+    os.remove(Path(root, "fresh.txt"))
+
+    print("  --- which of the two commits the clean tree is judged against ---")
+    rc, out, _ = git(root, "status", "--porcelain", "-z", "-uall")
+    print(f"    against the commit it stepped over ({later[:8]}): `status -z -uall` rc={rc} "
+          f"empty={not out}; `diff --quiet` rc={git(root, 'diff', '--quiet', later)[0]} "
+          "— the same tree answers both questions differently")
+
+    print("  --- one promised path it cannot remove, next to one it can ---")
+    root, _, target = protected_repo()
+    ask(root, "git reset --hard <target>", ["reset", "--hard", target], ["tracked.txt", "gone.txt"])
+    os.mkdir(Path(root, "locked"))
+    write(root, "locked/keep.txt", "inside a directory that will not be written to\n")
+    write(root, "removable.txt", "outside it\n")
+    Path(root, "locked").chmod(0o500)
+    rc, out, err = git(root, "clean", "-fd", "--", "locked/keep.txt", "removable.txt")
+    Path(root, "locked").chmod(0o700)
+    print(f"    one clean over both promises: rc={rc} stdout=[{one_line(out)}] stderr=[{one_line(err)}]")
+    print(f"    locked/keep.txt = {fingerprint(root, 'locked/keep.txt')}; "
+          f"removable.txt = {fingerprint(root, 'removable.txt')} "
+          "— a nonzero exit is not 'nothing was removed'")
+    rc, out, _ = git(root, "clean", "-nd", "--", "locked/keep.txt", "removable.txt")
+    print(f"    the dry run over the same two: rc={rc} [{one_line(out)}] "
+          "— it offers both before either is attempted")
+
+
 def measure_cost() -> None:
     print("== cost of the reads a preview is built from ==")
     root = scratch("large")
@@ -595,6 +645,7 @@ def main() -> int:
             scenario_repository_in_the_way,
             scenario_protected,
             scenario_aftermath,
+            scenario_aftermath_apart,
             measure_cost,
         ):
             scenario()
