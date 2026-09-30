@@ -707,6 +707,76 @@ F03 的落地要动 `main.rs` 的命令注册表与 `write.rs` 的 `Bound`；写
 本节两次落地（`7e5d5a1` 与紧接着的这一次）的证据都只有探针本身那几次运行：`exit=0`、
 430 行、跑完在 `/tmp` 里不留一个目录，同一份量连跑两遍只差毫秒与一个 commit id。
 Rust 与前端一行未动，所以这里不引用任何 build／fixture 数——写这段时共享树正被阶段 E 的
-E04b 占着（`npm run build` 停在 `src/views/history.ts` 那五处还不存在的名字上，那是他们工作
+E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存在的名字上，那是他们工作
 树上未提交的改动，不是 HEAD 的红），而本节没有任何需要那条通道来证明的断言。等 §7 的规则
 变成代码时，门禁数按 AGENTS.md 从独立 worktree 的已提交状态上取，并写进那一节的落地记录。
+
+## 8. F03 的预览构造落地
+
+`41639c8` 把 §7 的规则落成 `reset.rs` 里的 `plan_restore`：五个名单读取、六个集合、一条
+写前拒绝，加 6 条跑真实 Git 并在事后读磁盘的用例。**命令未注册**，所以这一片没有前端一行、
+没有渲染证据，也没有新的探针——它还没有可画的界面。
+
+### 8.1 §7 那十四条各自落在哪一处
+
+| §7 的那一条 | 代码里的落点 |
+| --- | --- |
+| 第 1 条（并，不是子集） | `plan_restore` 依次走 `tree_differences`、`target_paths`、`tracked_dirty_set`（即 `write::status_index`）、`untracked_paths`、`write::clean_candidates` |
+| 第 2、14 条（保护必须自己算；写前拒绝只有一条判据） | `Restoration::guard()` → `reset_preview_repository`，一句里带那个路径的名字 |
+| 第 3 条（目录前缀规则） | `claimed_by_target` 除完整名字相等外，逐 `/` 试前缀；`is_ancestor_dir` 要求第一个差异就是 `/` |
+| 第 4 条（覆盖是范围，不是内容变化） | `overwritten` 只按名单算；整个构造一次都没读文件字节 |
+| 第 5 条（丢弃 = status ∩ diff） | `discarded` |
+| 第 6 条（删除承诺只绑 `clean` 自己的答案） | `removals` 只从 `clean_candidates` 那份名单里来；没被列出的落进 `left_behind`，`!item.repository` 那一格就是这条 |
+| 第 7 条（折叠不自己展开；`--exclude-standard` 不可省） | 粒度取 `ls-files --others --exclude-standard -z` 那一条，选项写死在 argv 里 |
+| 第 12 条（预算） | 七条进程；`ls-tree` 的代价先量了再采用（§6.6 重测那一版） |
+| 第 13 条（逐文件粒度 + 第二步之前重问 `clean`） | 粒度已落；**重问归 F04**，构造里只有一次 `clean -nd` |
+| 第 8 条（忽略 ∩ 目标那一个例外） | **未落**：要第六条读取 `status --porcelain -z -uall --ignored` |
+| 第 9、10 条（残留怎么陈述；事后两条条件） | 未落，归 F05 |
+| 第 11 条（复用 `resolve_target`） | `plan_restore` 第一行；`sequencer::validate_target` 仍未动 |
+
+`write::clean_candidates` 从私有变成 `pub(crate)`，为的是删除承诺只有一个来源——reset 不另
+写一份 `clean -nd` 的解析，两份解析会在同一天各自漂移。
+
+### 8.2 三条动手时才定下来的判断
+
+- **`ls-tree` 是不可省的那一条读取**：覆盖判定问的是"磁盘上这个未跟踪路径在不在目标里"，
+  而 `diff HEAD <target>` 恰好**不列**两棵树都持有且一致的那条路径——索引里被撤过、磁盘上
+  又躺着同一个名字时，差里看不见它。§6.3 的 `predict()` 一直用它，这一版才把它的代价量出来
+  （2,001 条 2.2 ms），§7 第 1 条因此从四次读取改成五次。
+- **读取失败的三条分支都拒绝**：起不来的进程交回 `runner` 自己的码，Git 说不是
+  `reset_preview_failed`，装不下是 `reset_preview_too_large`；没有一条走"于是这份名单是空的"。
+  bound 跟 `status` 同一条（`runner::STATUS_OUTPUT_LIMIT`），理由写在 `submodules.rs:41`：约一千
+  个文件就超 64 KB，那种仓库会整片报成"什么都没挡着"。
+- **不认识 diff 的字母就整份拒绝**，而不是跳过那一项：`--no-renames` 已经把 `R`/`C` 挡在外面
+  （pair 记录是另一种 `-z` 形状），真出现别的字母说明 Git 与这段解析对不上，而那个字母正是
+  "目标里有没有这条路径"的判断依据，跳过它就是猜操作会做什么。
+
+### 8.3 门禁与度量
+
+门禁数从 detached worktree 的 `41639c8` 上取（共享树当时带着在飞的
+`app/src/views/history.ts`，`npx tsc --noEmit` 在共享树里报的每一行都出自那一个文件——那是
+他们工作树上的改动，不是 HEAD 的红，所以那一条通道只在 worktree 里读）：`cargo test`
+**379 passed / 0 failed**（`reset` 26 条，其中新增 6 条）、`cargo fmt --check` 零 diff、
+`cargo clippy --locked --all-targets` **0 告警**、`npm run build` ✓ **47 modules
+transformed**、`npm run test:fixture` **402 pass / 0 fail**（含 shipped-copy 与
+ipc-surface 两道门）、`color-contrast.py` fails=0、`responsive-check.py` fails=0。
+探针在同一次运行里 `exit=0`、**432 行**，跑前跑后 `/tmp` 里都是 0 个 `guit-clean-reset-*`。
+
+`plan_restore` 自己的墙钟**没量**：到这一片为止没有任何调用方起过它一次。§6.6 那句"约 18 ms"
+是那七条读取各自中位数的加和，不是这条通道上的一次读数——它要在 F04 把预览接进 `write.rs`
+之后才有可量的对象。
+
+### 8.4 这一片没做完的
+
+- **命令注册**：`preview_restore` 与它的确认必须与前端 `invoke` 字面量同一次提交落地
+  （`ipc-surface.mjs` 那条门），`reset.rs` 里六处 `allow(dead_code)` 因此还挂着——四个字段、
+  `guard()`、`plan_restore`。
+- **F04**：`Bound` 的新变体要绑 §7 第 11 条列的那几样（会话、解析后的目标 oid、观测到的
+  HEAD、路径差、脏路径、计划删除的未跟踪路径、覆盖名单、受保护名单），动词序列
+  `reset --hard` + 有界 `clean`，**第二步之前重问一次 `clean -nd`**，同路径变化重查。
+- **F05**：事后两条条件（`status -z -uall` 空 **且** `diff --quiet <target>` rc=0）、
+  取消／超时／部分完成的如实报告、预览续约。
+- **F06**：更改区的提交号输入、预览分组、确认文案与焦点，以及这份预览的渲染证据。
+- **第 8 条那个"忽略 ∩ 目标"的例外**仍未读；§6.9 那一整列（不区分大小写的宿主、符号链接、
+  稀疏检出与 `skip-worktree`、`core.protectNTFS` 那一类名字、可执行位、未跟踪空目录、
+  目标是 gitlink 而磁盘是未跟踪目录那一反向格）仍未量；Windows/macOS 仍只是构建配置。
