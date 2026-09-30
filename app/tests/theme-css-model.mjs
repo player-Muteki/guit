@@ -246,6 +246,24 @@ test("every protected token is one the stylesheet defines", () => {
   }
 });
 
+test("a shipped stylesheet comments the only way CSS reads a comment", () => {
+  // `//` is not a comment in CSS. The parser folds those lines into the selector of
+  // whatever rule comes next, so the next rule is dropped — silently, because vite
+  // copies the sheet untouched and both CSS gates read tokens and colours, not
+  // braces. The engine probe that measures a computed `max-height` is what notices;
+  // this is the guard that does not need a display.
+  for (const name of ["../src/style.css", "../src/style/tokens.css"]) {
+    const css = readFileSync(new URL(name, import.meta.url), "utf8");
+    css.split("\n").forEach((line, at) => {
+      assert.equal(
+        /^\s*\/\//.test(line),
+        false,
+        `${name} line ${at + 1} starts with "//", which CSS reads as part of the next selector`,
+      );
+    });
+  }
+});
+
 test("the one-declaration question has the same answer as the whole review", () => {
   // The caller holding real stylesheet objects asks this question per declaration,
   // because it has to edit the rule it parsed. If that answer differed from the
