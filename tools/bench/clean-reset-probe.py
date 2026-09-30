@@ -21,6 +21,11 @@ answer are:
     identical to the target's, and when the names differ only by case;
   * what a path that is a file in HEAD and a directory in the target does to each
     command, and the reverse;
+  * what happens when the folded directory `clean -nd` offers contains a file the restore is
+    about to write: whether a clean naming the folded entry removes the restored file with
+    it, and what each way of naming paths to clean leaves the tree as;
+  * whether any of the five refuses to destroy a nested repository sitting at a path the
+    target holds as a file, with a file that repository itself tracks inside it;
   * whether a file the repository ignores is still overwritten by the target, and
     whether any listing of "what would be removed" ever offers to remove it;
   * which paths each listing shows and hides: `status --porcelain` with and without
@@ -379,6 +384,88 @@ def scenario_protected() -> None:
     print(f"    the same path is tracked now: check-ignore -v rc={rc} {one_line(out)}")
 
 
+def folded_repo() -> tuple[str, str]:
+    """The target tracks one file inside a directory HEAD does not know at all.
+
+    `clean -nd` reports that directory as a single folded entry while
+    `ls-files --others` reports its files one by one, so the removal promise and the
+    overwrite list arrive at different granularity — and the folded entry covers a
+    path the restore is about to write.
+    """
+    root = scratch("folded")
+    write(root, "keep.txt", "keep\n")
+    write(root, "extra/wanted.txt", "the target's own bytes\n")
+    target = commit(root, "extra/wanted.txt tracked")
+    git(root, "rm", "-q", "-r", "--", "extra")
+    commit(root, "the whole directory dropped")
+    write(root, "extra/wanted.txt", "written again by hand\n")
+    write(root, "extra/other.txt", "and a sibling nobody tracked\n")
+    return root, target
+
+
+def scenario_folded_directory() -> None:
+    print("== a folded untracked directory, half of it written by the restore ==")
+    watched = ["extra", "extra/wanted.txt", "extra/other.txt"]
+    for label, args in (
+        ("git clean -fd -- extra", ["clean", "-fd", "--", "extra"]),
+        (
+            "git clean -fd -- extra/wanted.txt extra/other.txt",
+            ["clean", "-fd", "--", "extra/wanted.txt", "extra/other.txt"],
+        ),
+        (
+            "git clean -fd -- extra/other.txt",
+            ["clean", "-fd", "--", "extra/other.txt"],
+        ),
+    ):
+        root, target = folded_repo()
+        listing(root, "before: clean -nd", ["clean", "-nd"])
+        listing(
+            root,
+            "before: ls-files --others --exclude-standard -z",
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        ask(root, f"git reset --hard {target[:8]}", ["reset", "--hard", target], watched)
+        listing(root, "between: clean -nd after the reset", ["clean", "-nd"])
+        ask(root, label, args, watched)
+        print(
+            f"    {'':46} status now={one_line(git(root, 'status', '--porcelain', '-uall')[1]) or '-'}"
+        )
+        print(
+            f"    {'':46} matches the target? rc={git(root, 'diff', '--quiet', target)[0]}"
+        )
+        print()
+
+
+def repo_in_the_way_repo() -> tuple[str, str]:
+    """HEAD holds nothing where the target has a file, and a repository lives there."""
+    root = scratch("repoaway")
+    write(root, "keep.txt", "keep\n")
+    write(root, "y", "the target's own bytes\n")
+    target = commit(root, "y is a file")
+    git(root, "rm", "-q", "--", "y")
+    commit(root, "y dropped from the tree")
+    nested = Path(root, "y")
+    nested.mkdir()
+    git(str(nested), "init", "-q")
+    git(str(nested), "config", "user.email", "probe@example.invalid")
+    git(str(nested), "config", "user.name", "probe")
+    write(str(nested), "own.txt", "tracked inside another repository\n")
+    commit(str(nested), "the nested head")
+    return root, target
+
+
+def scenario_repository_in_the_way() -> None:
+    print("== a nested repository sits where the target wants a file ==")
+    watched = ["y", "y/own.txt"]
+    for label, build in MOVES:
+        root, target = repo_in_the_way_repo()
+        print(
+            f"    before: y = {fingerprint(root, 'y')}, "
+            f"y/own.txt = {fingerprint(root, 'y/own.txt')}"
+        )
+        ask(root, label.replace("<target>", target[:8]), build(target), watched)
+
+
 def scenario_aftermath() -> None:
     print("== after both steps, what still keeps the tree from being clean ==")
     root, _, target = protected_repo()
@@ -451,6 +538,8 @@ def main() -> int:
             scenario_obstruction,
             scenario_type_change,
             scenario_prediction,
+            scenario_folded_directory,
+            scenario_repository_in_the_way,
             scenario_protected,
             scenario_aftermath,
             measure_cost,
