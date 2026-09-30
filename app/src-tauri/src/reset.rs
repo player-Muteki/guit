@@ -880,39 +880,77 @@ fn run_restore_steps(
             reset.exit_code,
         )
     } else {
-        let offered = write::clean_candidates(work_root, &promised)?;
-        let going = promised
-            .iter()
-            .filter(|raw| covered_by_clean(&offered, raw))
-            .cloned()
-            .collect::<Vec<_>>();
-        if going.is_empty() {
-            write::Ran::ok(
-                format!(
-                    "{} None of the {} untracked path(s) the preview listed are offered by git clean.",
-                    reset.message,
-                    promised.len()
-                ),
-                None,
-            )
-        } else {
-            step_two(state, work_root, &target, &reset, &going)?
+        match removal_after_reset(state, work_root, &target, &reset, &promised) {
+            Ok(ran) => ran,
+            Err(error) => unfinished_removal(&reset, &error),
         }
     };
     let aftermath = read_aftermath(sessions, work_root, state.cancel_flag(), &plan.target_oid);
-    let outcome = match (removal.outcome, aftermath.clean()) {
-        (Outcome::Cancelled, _) => Outcome::Cancelled,
-        (Outcome::Success, true) => Outcome::Success,
-        // One of the two steps ran and the promise was not kept: the reset is
-        // not undone by a removal that did not happen, and a tree Git will not
-        // describe is not a clean tree either.
-        _ => Outcome::Partial,
-    };
+    let outcome = restore_verdict(removal.outcome, aftermath.clean());
     Ok(write::Ran {
         outcome,
         message: format!("{}{}", removal.message, aftermath.sentence(&promised)),
         ..removal
     })
+}
+
+/// The one rule deciding what a finished restore is allowed to claim. A
+/// cancellation stays the cancellation the user asked for even if the tree
+/// happens to settle afterwards, and nothing is called clean unless Git
+/// answered both conditions yes: one step ran and the promise was not kept is
+/// its own answer, because the reset is not undone by a removal that failed.
+fn restore_verdict(removal: Outcome, settled: bool) -> Outcome {
+    match (removal, settled) {
+        (Outcome::Cancelled, _) => Outcome::Cancelled,
+        (Outcome::Success, true) => Outcome::Success,
+        _ => Outcome::Partial,
+    }
+}
+
+/// The removal, asked the way a destructive step may be asked only once the
+/// first one has succeeded: `clean -nd` is re-run over exactly the promised
+/// paths, and only what it still offers is handed to `clean -fd`. A promise Git
+/// has taken back is reported as left where it is rather than forced.
+fn removal_after_reset(
+    state: &WriteState,
+    work_root: &Path,
+    target: &str,
+    reset: &write::Ran,
+    promised: &[Vec<u8>],
+) -> Result<write::Ran, ProbeError> {
+    let offered = write::clean_candidates(work_root, promised)?;
+    let going = promised
+        .iter()
+        .filter(|raw| covered_by_clean(&offered, raw))
+        .cloned()
+        .collect::<Vec<_>>();
+    if going.is_empty() {
+        return Ok(write::Ran::ok(
+            format!(
+                "{} None of the {} untracked path(s) the preview listed are offered by git clean.",
+                reset.message,
+                promised.len()
+            ),
+            None,
+        ));
+    }
+    step_two(state, work_root, target, reset, &going)
+}
+
+/// The answer when the removal cannot even be asked: the reset is a fact the
+/// reader has to be told, and an error escaping here would report a command
+/// that did nothing over a working copy that already moved.
+fn unfinished_removal(reset: &write::Ran, error: &ProbeError) -> write::Ran {
+    write::Ran {
+        outcome: Outcome::Partial,
+        message: format!(
+            "{} The removal did not complete: {}.",
+            reset.message, error.message
+        ),
+        details: None,
+        exit_code: None,
+        suggestion: None,
+    }
 }
 
 /// The second Git process, with the wording of a step whose result only means
@@ -2752,6 +2790,120 @@ mod tests {
         assert_eq!(result.exit_code, None);
         assert_eq!(read(dir, &["rev-parse", "HEAD"]), before);
         assert!(dir.join("plain.txt").exists());
+    }
+
+    /// The second step is asked by a process of its own, and that process can
+    /// fail to answer at all: a promised set whose listing no longer fits the
+    /// capture is `clean_preview_failed`, not an empty list. Before this, the
+    /// error left the operation as a command error — which reports nothing over
+    /// a working copy whose head the first step had already moved. The reset is
+    /// named as done, the removal as unfinished, and the tree is described by
+    /// what Git says about it afterwards.
+    #[test]
+    fn a_removal_that_cannot_be_listed_reports_the_reset_that_already_ran() {
+        let (root, target) = restore_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let work_root = sessions.commit_context(version).unwrap().0;
+        let mut plan = plan_restore(&work_root, &sessions, &target).unwrap();
+        let names = (0..1600)
+            .map(|i| format!("untracked-bulk-file-number-{i:04}.txt"))
+            .collect::<Vec<_>>();
+        for name in &names {
+            write_at(dir, name, "untracked\n");
+        }
+        plan.removals = names
+            .iter()
+            .map(|name| Untracked {
+                raw: name.as_bytes().to_vec(),
+                repository: false,
+            })
+            .collect();
+
+        writes.begin().unwrap();
+        let ran = run_restore_steps(&writes, &sessions, &work_root, &plan).unwrap();
+        writes.finish();
+
+        assert_eq!(ran.outcome, Outcome::Partial, "{}", ran.message);
+        assert!(
+            ran.message.contains("Restored the working copy")
+                && ran.message.contains(
+                    "The removal did not complete: git clean could not list the untracked files."
+                ),
+            "{}",
+            ran.message
+        );
+        assert!(
+            !ran.message.contains("is clean and matches the target"),
+            "an unasked removal is never a clean restore: {}",
+            ran.message
+        );
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), target, "the reset ran");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("keep.txt")).unwrap(),
+            "the target's own bytes\n",
+            "and its write stands"
+        );
+        assert!(dir.join("plain.txt").exists(), "nothing was removed");
+    }
+
+    /// The verdict rule, in the four shapes it has to answer for: a cancel the
+    /// user asked for is still a cancel when the tree happens to look settled,
+    /// and a step that did not succeed never becomes a clean restore because the
+    /// two readings agree.
+    #[test]
+    fn only_a_finished_removal_and_a_settled_tree_are_a_clean_restore() {
+        assert_eq!(restore_verdict(Outcome::Success, true), Outcome::Success);
+        assert_eq!(restore_verdict(Outcome::Success, false), Outcome::Partial);
+        assert_eq!(restore_verdict(Outcome::Failed, true), Outcome::Partial);
+        assert_eq!(
+            restore_verdict(Outcome::Cancelled, true),
+            Outcome::Cancelled
+        );
+        assert_eq!(
+            restore_verdict(Outcome::Cancelled, false),
+            Outcome::Cancelled,
+            "a cancel is not downgraded by a tree that looks clean"
+        );
+    }
+
+    /// A cancel that lands on the removal stops a process that was started and
+    /// never reported back. The first step is not undone by it, so the answer
+    /// names the target the working copy reached and refuses to call the
+    /// removal finished.
+    #[test]
+    fn a_cancel_on_the_removal_names_the_reset_it_follows() {
+        let (root, target) = restore_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let work_root = sessions.commit_context(version).unwrap().0;
+        let short_target = short(&target);
+        let reset = write::Ran::ok(
+            format!("Restored the working copy to {short_target}."),
+            Some(0),
+        );
+
+        writes.begin().unwrap();
+        writes.cancel();
+        let ran = step_two(
+            &writes,
+            &work_root,
+            &short_target,
+            &reset,
+            &[b"plain.txt".to_vec()],
+        )
+        .unwrap();
+        writes.finish();
+
+        assert_eq!(ran.outcome, Outcome::Cancelled, "{}", ran.message);
+        assert!(
+            ran.message.contains(&format!(
+                "The working copy reached {short_target}; the untracked files were not all removed."
+            )),
+            "{}",
+            ran.message
+        );
+        assert_eq!(ran.exit_code, None, "a killed process has no status");
     }
 
     /// A repository put where the target writes after the preview is refused by
