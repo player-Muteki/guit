@@ -3,16 +3,24 @@
 实施日期：2026-09-30。基线提交：`e9c5a1a`（阶段 D 的 D05 收口之后）。本文既固定
 F01–F06 必须遵守的口径，也是它们各自的实施记录。§1–§3 是动手前先拿到的事实，
 §4 是 F01 的落地（`9e3cac4` 后端、`29be513` 前端、`a20a0e4` 收口），§5 是 F02 的落地
-（`67cdd7a` 测量、`12a718b` 实现、本次收口）；F03 之后的落地各起一节，
+（`67cdd7a` 测量、`12a718b` 实现、本次收口），§6–§7 是 F03 动手前先拿到的测量与由它们
+倒推出的构造规则（`tools/bench/clean-reset-probe.py` 复现 §6）；F03 之后的落地各起一节，
 写到时才存在，不要按编号去找还没有的小节。
 
 主机条件同 [A01 基线](05-baseline-a01.md)：Linux x86_64、Git 2.53、WebKitGTK、
 Node 26、rustc 1.96.1。**本文没有 Windows/macOS 证据**，那两个平台仍只是构建配置。
 
-并行开发状态：阶段 E 在同一棵共享工作树上推进，E03 已落在 HEAD（`0295068`），在飞的是
+并行开发状态：阶段 E 在同一棵共享工作树上推进。收口 F02 时 E03 已落（`0295068`），在飞的是
 `app/src-tauri/src/{fuzzy,main,search}.rs`、`app/src/searchModel.ts`、`app/src/views/history.ts`
-与 `app/tests/ipc-surface.mjs`。本文的所有度量只针对**已经提交**的状态，阶段 F 的每次落地只
-`git add` 自己改过的那些路径。
+与 `app/tests/ipc-surface.mjs`；§6 这一轮量完之后他们落了 E04a（`988bc5e`：新增
+`app/src/views/search.ts` 与 `app/tests/search-wiring.mjs`，改了 `main.rs` 的注册表、
+`main.ts`、`style.css`、`style/tokens.css`、`views/{history,mainPanel}.ts`、
+`tests/{ipc-surface,search-model}.mjs` 与 `tools/bench/responsive-check.py`），下一刀 E04b
+要动的就是 `views/history.ts` 上 `/` 挂着的那一处。本文的所有度量只针对**已经提交**的状态，
+阶段 F 的每次落地只 `git add` 自己改过的那些路径。
+本节的量完之时那张交付表也是共享的：属于阶段 F 的索引行先被他们那次提交（`988bc5e`）连着
+他们自己的两行一起带进了历史，表里剩下的两处阶段 F 改动由本次提交写下——共享文件上的顺序
+不是谁的失误，但它意味着 `git add` 之前先看一眼 `git status`。
 
 一次记录在这里，因为它改变的是整棵树的门禁读数：收口 F01 时 `npm run test:fixture` 是红的，
 红的不是阶段 F 的用例——`tests/search-model.mjs` 从 `searchModel.ts` 导入了一个当时还没有的
@@ -333,3 +341,284 @@ payload 交给 `hash-object -t commit -w`，两批各 1500 个、共两条进程
   也没量过。
 - §3 第 6 条（票据绑定解析后的 oid）今天只对**已存在**的 `Bound::ResetHard` 成立；F04 那
   个新变体落地时必须照同一口径，这一条在这里只是被引用，没有被验证。
+
+## 6. 干净重置要动的每一类路径，Git 自己怎么答
+
+F03 之后那几格要造的预览，比已有的硬重置多出的部分全是磁盘上的事：目标树和当前工作树
+哪里不同、哪些未跟踪的东西挡在那里、哪些东西受保护不能碰、两步走完凭什么说"干净了"。
+这些口径不能自己定，因为**同一个仓库上五条命令给的是相反的答案**：`git reset --hard`
+会覆盖一个未跟踪文件，`git checkout` 为同一个文件拒绝。所以先把"每条命令 × 每类路径"
+的量下来。
+
+`tools/bench/clean-reset-probe.py`（本节随此新增）干这件事：它在 `/tmp` 下造临时仓库，
+只打印 Git 自己的 rc / stdout / stderr，外加事后每个被盯路径的**字节指纹**
+（`absent`、`dir:成员`、或那串字节的 sha1 前十位），**不断言任何东西**，跑完把创建的目录
+全部删掉。没有 Git 就带着理由退出。本节是 Git 2.53、Linux x86_64、区分大小写的 ext4 上
+的一次运行。
+
+    python3 ../tools/bench/clean-reset-probe.py   # 从 app/ 起，或按仓库根路径起
+
+被量的五条（同一个目标、同一份初始状态，每次都新建仓库）：
+
+| 记号 | argv | 动 HEAD 吗 | 动索引吗 |
+| --- | --- | --- | --- |
+| `reset --hard <t>` | `reset --hard <t>` | 动，**当前分支的指针跟着移到目标** | 重置到目标 |
+| `checkout <t>` | `checkout <t>` | 动，**分离** | 重置到目标 |
+| `switch --detach <t>` | `switch --detach <t>` | 动，**分离** | 重置到目标 |
+| `checkout <t> -- .` | pathspec 形式 | **不动** | **写进去** |
+| `restore --source <t> --staged --worktree -- .` | | **不动** | **写进去** |
+
+### 6.1 一个未跟踪文件，目标树里也跟踪它
+
+仓库：`target` 同时跟踪 `gone.txt` 与 `keep.txt`；后来 `gone.txt` 从树里被删掉（HEAD 到
+此不含它），磁盘上又出现一个未跟踪的 `gone.txt`。目标是回到那个 `target`。
+
+| 磁盘上那个文件是什么 | `reset --hard` | `checkout <t>` | `switch --detach <t>` | `checkout <t> -- .` | `restore --source …` |
+| --- | --- | --- | --- | --- | --- |
+| 字节与目标不同（手写的一份） | **rc=0，覆盖**（指纹从 `242c990fca` 变成目标的 `6d914deaa8`），status 空 | **rc=1 拒绝**，什么都没动 | 同左，rc=1 | rc=0，覆盖**并且索引里多一条 `A  gone.txt`**，HEAD 不动 | 同左 |
+| 字节**与目标完全一致** | rc=0，覆盖（无从可见） | **仍然 rc=1 拒绝** | 仍然 rc=1 | rc=0，同上 `A` | 同上 |
+| 名字只差大小写（`GONE.txt`） | rc=0，写出 `gone.txt`，`GONE.txt` 原样留着成 `?? GONE.txt` | **rc=0 成功**，`GONE.txt` 同样留着 | rc=0 | rc=0，`A  gone.txt / ?? GONE.txt` | 同上 |
+
+三条结论，按危险程度排：
+
+1. **`reset --hard` 不会替 guit 拒绝。** 目标树跟踪的名字撞上一个未跟踪文件，它直接覆盖，
+   rc=0，无警告。那个手写的字节就是"确认什么就动什么"里必须点名的一类，Git 不点名。
+2. **拒绝只看名字，不看内容。** 字节和目标一模一样的时候 `checkout` 照样 rc=1（stderr
+   是 `error: The following untracked working tree files would be overwritten by
+   checkout`）。反过来这也定下了 guit 的口径：**"会不会被覆盖"是关于范围的判断，不是关于
+   内容是否变化的判断**（§6.3 第二次量到同一件事）。
+3. **只差大小写在这块盘上不是同一名字**，因此不构成障碍。这条只在区分大小写的文件系统上
+   成立；不区分的那类宿主（§6.7）没量，别把这条当通用规则写进代码。
+
+后两条 pathspec 形式各留一个额外的坑：它们覆盖并且**把那个文件当作新增写进索引**，而
+HEAD 原地不动。预览里如果只说"工作树回到目标"，那一条 `A` 是它没说的话。
+
+### 6.2 同一个路径，一边是文件、一边是目录
+
+| 情形 | `reset --hard` | `checkout <t>` / `switch --detach <t>` | 两条 pathspec 形式 |
+| --- | --- | --- | --- |
+| `x` 是**已跟踪且干净**的文件，目标里 `x` 是目录（`x/a`） | rc=0，`x` 成 `dir:a` | rc=0，同样成功 | rc=0，`D  x / A  x/a`，HEAD 不动 |
+| `y/` 里有一个未跟踪目录（`y/nested`），目标里 `y` 是文件 | **rc=0，`y/nested` 变成 `absent`——整个未跟踪目录被销毁** | **rc=1**，stderr `error: Updating the following directories would lose untracked files in some of them`，`y/nested` 原样还在 | rc=0，同样销毁 `y/nested`，并把 `y` 记成 `A` |
+
+第二行是这一节最该记住的一条：**销毁发生在目录这一层，而任何按路径列的名单只会给你
+`?? y/nested`**。谁要按"未跟踪文件逐个和目标的文件比对"算名单，就会算出"没有障碍"，而
+真正没的是那整个目录。所以名单的构造必须带一条目录前缀规则（§6.3、§7 第 3 条）。
+
+### 6.3 覆盖名单能不能在写之前算出来
+
+探针里那段 `predict()` 就是候选规则的全部：**目标路径 ∩ 未跟踪路径**（按完整名字），
+加上**"目标的某个路径是某条未跟踪路径的目录前缀"**。三次实测：
+
+| 情形 | 未跟踪（`ls-files --others`） | 规则预测会被覆盖 | 事后字节真的变了 |
+| --- | --- | --- | --- |
+| 未跟踪文件，目标也跟踪，字节不同 | `gone.txt` | `gone.txt` | `gone.txt` |
+| 未跟踪文件，目标也跟踪，**字节一致** | `gone.txt` | `gone.txt` | **`-`** |
+| 未跟踪目录 `y/nested`，目标把 `y` 当文件 | `y/nested` | `y/nested` | `y/nested`（absent） |
+
+第二行不是失败，是这一条规则的语义：**预测说的是范围，不是内容变化**。字节一致那次，
+Git 仍然把目标字节写了一遍（无人能看见），名单里必须留着它——否则承诺就漏了一个 Git
+认为"被我写过"的路径。反过来，事后"字节没变"绝不能被讲成"什么都没被覆盖"。
+
+同一节里另外一次对照，问的是"本地改动落在目标要动的路径上，哪份名单说得出"：
+`HEAD` 已经删掉 `doomed.txt`，目标还留着它，而 `doomed.txt` 与 `keep.txt` 各有一处没人
+暂存的本地改动。
+
+    status --porcelain             : M doomed.txt |  M keep.txt
+    diff --name-only HEAD <target> : doomed.txt, keep.txt
+
+两条读取说的是两件不同的事：status 说"工作树现在哪里不干净"，diff 说"目标与 HEAD 哪里
+不同"。**"会被丢弃的本地改动"是这两条的交集，任何一条单独都不说这件事**（这次夹具里
+两者恰好重合，重合不是规则，是巧合）。
+
+### 6.4 受保护的东西，每一份名单各报什么
+
+一份仓库里各放一样：一个脏的已跟踪文件、一个普通未跟踪文件、一个目标树跟踪的未跟踪文件、
+一个被忽略的目录（`ign/`，里面两层深还有一个文件）、一个被忽略的名字（`secret.txt`）、
+一个**嵌套仓库**（`nested/`，自己的 `.git`）、一个**子模块**（`mod`，里面还写了东西）。
+15 次读取的答案：
+
+| 一次读取 | rc | 条目 | 内容 |
+| --- | --- | --- | --- |
+| `status --porcelain` | 0 | 5 | `M mod`、` M tracked.txt`、`?? gone.txt`、`?? nested/`、`?? plain.txt` |
+| `status --porcelain -uall` | 0 | 5 | 同上——`nested/` **在这一条里也不展开**，里面有一个 `.git`，Git 不往别人的仓库里列文件（对照 §6.6：一个普通未跟踪目录 `-uall` 会展开成 100 条） |
+| `status --porcelain -uall --ignored` | 0 | 7 | 上述 5 条 + **逐文件**的 `!! ign/nested/deep.txt`、`!! secret.txt`（`ign/` 不是仓库，所以 `-uall` 展开了它） |
+| `status --porcelain -z -uall` | 0 | 5 | 同上，NUL 分隔 |
+| `clean -nd` | 0 | 2 | `gone.txt`、`plain.txt` |
+| `clean -ndx` | 0 | 4 | 上述 2 条 + **折叠成目录的** `ign/` + `secret.txt` |
+| `clean -ndff` | 0 | 3 | 上述 2 条 + `nested/` |
+| `clean -ndffx` | 0 | 5 | `-ndx` 那 4 条 + `nested/` |
+| `clean -nd -- plain.txt`（scoped） | 0 | 1 | `plain.txt` |
+| `clean -nd -- nested`（scoped，那是个仓库） | 0 | **0** | — |
+| `clean -nd -- mod`（scoped，那是个子模块） | 0 | **0** | — |
+| `diff --name-only HEAD <target>` | 0 | 3 | `.gitmodules`、`gone.txt`、`mod` |
+| `ls-files --others` | 0 | 5 | 两条未跟踪文件 + **折叠的** `nested/` + 两条被忽略 |
+| `ls-files --others --exclude-standard` | 0 | 3 | `gone.txt`、`plain.txt`、`nested/` |
+| `submodule status` | 0 | 1 | `mod (heads/main)` |
+
+这张表里四条"每一类名单各说各话"是 F03 的全部难点：
+
+- **`clean` 才是删除承诺的唯一来源。** 它不加 `-ff` 就不列嵌套仓库，**加了 `-ff` 也永远
+  不列子模块**（`clean -nd -- mod` 甚至报 0 条）。`status` 会报 `?? nested/`，`ls-files`
+  也会。谁拿 status 的名单去删，就会承诺一件 Git 不肯做的事；谁为了兑现那句承诺去加第二个
+  force，就越过了 F01 立下的"永不加第二个 force"。
+- **折叠的目录不能自己展开。** `clean -ndx` 给 `ign/`，`status --ignored` 给
+  `ign/nested/deep.txt`。要算"目标跟踪了某个被忽略的路径"这个交集，必须从**逐文件**那一条
+  读起；从折叠那条读会算不出来（`ign/` 不是目标树里的路径）。
+- **`--exclude-standard` 不是可选的。** 少它一次，`secret.txt` 和 `ign/…` 就以"未跟踪"的
+  身份进名单（5 vs 3）。
+- **gitlink 会在恢复之后变成未跟踪的残留。** `diff --name-only HEAD <target>` 里有
+  `.gitmodules` 与 `mod`：目标比那次"加子模块"的提交更早，回到它就把 gitlink 和
+  `.gitmodules` 一起拿掉。
+
+于是紧接着问了那一句：硬重置会不会伸进子模块或嵌套仓库里去？
+
+    git reset --hard <target>   rc=0   err=warning: unable to rmdir 'mod': Directory not empty
+    before: mod/dirty.txt = 40c7aceaee, nested/README.md = 6a447dedf2
+    after:  mod/dirty.txt = 40c7aceaee, nested/README.md = 6a447dedf2
+    after:  status = ?? mod/ / ?? nested/ / ?? plain.txt
+    after:  clean -nd 仍然只说 Would remove plain.txt
+
+两处字节纹丝不动——**Git 不进子模块，也不进别人的仓库**，它只是把索引里的 gitlink 撤了，
+留下一句 warning，然后那两个目录以 `??` 的身份挡在"干净"的路上，而 `clean` 从此不再列出
+其中任何一个（`plain.txt` 之外它什么都不说）。
+
+最后一类，是"忽略"和"目标要跟踪"同时成立：`.gitignore` 里写着 `built.txt`，目标树跟踪
+`built.txt`。
+
+    check-ignore -v                        rc=0  .gitignore:1:built.txt   built.txt
+    status --porcelain -uall --ignored     rc=0  !! built.txt
+    clean -ndx                             rc=0  Would remove built.txt
+    git reset --hard <target>              rc=0  built.txt 变成目标的字节；status 变空
+    之后再看同一条规则                      rc=0  check-ignore 仍然报 .gitignore:1:built.txt
+
+也就是说：**被忽略的路径如果目标要跟踪它，恢复会写它**，而"它被忽略了"这件事在写完之后
+仍然被 `check-ignore` 肯定。**`check-ignore` 答的是模式，不是跟踪状态**，拿它判"这个路径
+不受保护"或"这个路径不是被跟踪的"都会答错。
+
+### 6.5 两步走完，凭什么说"干净了"
+
+同一份受保护夹具：先 `reset --hard <target>`，再 `clean -fd` 并把预览里承诺过的那几个名字
+逐个交给它。
+
+    git reset --hard <target>                        rc=0（同 §6.4 那句 warning）
+    git clean -fd -- plain.txt gone.txt ign secret.txt
+                                                     rc=0  out=Removing plain.txt
+    plain.txt absent / gone.txt 还在（目标的字节）/ ign/ 还在 / secret.txt 还在
+    残留：?? mod/ / ?? nested/
+    工作树与目标树一致吗？ diff --quiet <target>     rc=0
+    跟踪与未跟踪都清干净了吗？ status -uall 为空       False
+    git clean -fd -- nested                          rc=0，无输出，nested/ 原样还在
+
+四条事实：
+
+1. **一次 scoped `clean` 会沉默地什么都不做。** `gone.txt` 在预览里是未跟踪、被列进删除
+   名单；`reset` 之后它已被目标树跟踪，于是 `clean` 不再认为它是候选，rc=0、无输出。
+   `ign/` 与 `secret.txt` 同理（`-fd` 不带 `-x` 不碰忽略）。**逐路径的"移除/未移除"只能照
+   Git 事后的答案说**——这正是 F01 定下的口径在两步组合下仍然要守的那一条。
+2. **两个"干净"条件可以相反。** 上面这份夹具最后：与目标树一致（`diff --quiet` rc=0），
+   但 `status -uall` 不空（`mod/`、`nested/`）。所以"恢复到干净"不能是一个 bool，必须说
+   按哪一条成立、哪些路径留在外面、以及为什么留在外面（一句 Git 的拒绝，或一条受保护的
+   边界，或用户自己选的"忽略的东西不动"）。
+3. **对未跟踪的把关条件是**`status --porcelain -z -uall` 为空 **且** `diff --quiet <target>`
+   rc=0，两条都要读；缺前一条会把 `?? mod/` 说成干净，缺后一条会把"根本没回到目标"说成
+   干净。
+4. **`clean -fd` 删不掉嵌套仓库**，即便明确点名（第 4 行）。这一句是"永不加第二个 force"
+   要付的代价，代价的样子现在量出来了：预览里必须把 `nested/` 写成"留下"，而不是删了它。
+
+### 6.6 造这份预览要起几条进程、花多少毫秒
+
+2,000 个已跟踪文件、其中 200 个与目标不同、100 个未跟踪（都在一个 `extra/` 目录里）、
+外加一个被忽略的 `node_modules/`：
+
+| 一次读取 | rc | 条目 | 本宿主 |
+| --- | --- | --- | --- |
+| `rev-parse HEAD` | 0 | 1 | 1.1 ms |
+| `diff --name-only HEAD <target>` | 0 | 200 | 2.8 ms |
+| `diff --name-status HEAD <target>` | 0 | 200 | 2.9 ms |
+| `status --porcelain -z -uall` | 0 | 100 | 9.1 ms |
+| `status --porcelain -z -uall --ignored` | 0 | 101 | 8.9 ms |
+| `ls-files --others --exclude-standard -z` | 0 | 100 | 1.8 ms |
+| `clean -nd` | 0 | 1（折叠成 `extra/`） | 2.0 ms |
+| `clean -ndx` | 0 | 2 | 2.4 ms |
+
+两条能省的地方都在这张表上：**未跟踪的名单从 `ls-files --others --exclude-standard -z`
+拿**（1.8 ms，逐文件、NUL 安全），`status` 只留给"工作树哪里不干净"那一问（9 ms）；
+`--ignored` 那一条只在要算"忽略 ∩ 目标"的交集时才读。按 §7 的构造，一次预览是 5–6 条
+进程，这一份夹具上约 17–26 ms 的量级（取决于要不要那一条 `--ignored`）——**没有新增的读
+放大**，它就是这几条读取本身。`clean -nd` 会把 100 个未跟踪折叠成一条 `extra/`，这份名单
+不能拿去和目标的逐路径名单做交集（§6.4 第二条）。
+
+### 6.7 这一节没量到的
+
+- **不区分大小写的文件系统**：`GONE.txt` 那一例在那类宿主上是障碍还是不是，没问过一次。
+  本宿主只有一块区分大小写的 ext4；Windows/macOS 上的 case-only、以及 `core.ignorecase`
+  的影响，全无证据。
+- **符号链接**：未跟踪的 symlink 挡住一个目标要写的路径、或 symlink 指向一个目录而目标
+  要在里面放文件——一次都没造过。
+- **稀疏检出、`skip-worktree`、`assume-unchanged`**：那三种索引状态下 `diff` 与 `status`
+  各报什么，没问过。F03 若在它们之上照 §7 的并集算名单，算出来的是什么并不自知。
+- **Git 自己保护的名字**：`core.protectNTFS` / `protectHFS` 那一类（`.git`、`HEAD`、
+  保留设备名）没造过夹具。
+- **模式位**：目标与磁盘只有可执行位不同时算不算覆盖，没问。
+- **一个未跟踪的空目录**、以及**目标把某路径当 gitlink、磁盘上那里是个未跟踪目录**——
+  两类都还没量过。
+- **`clean -ndffx` 在大夹具上的耗时**没量（§6.6 只量了 `-nd` / `-ndx`）。
+- **一次都没渲染**：本节全是 Git 侧的答案。这份预览在真实窗口里长什么样、名单分组读不读
+  得动，是 F05/F06 的事。
+
+## 7. 这些事实决定了 F03 的预览怎么构造
+
+§6 是测量，本节把测量变成规则。F03 动手前先读这一节；它自己的落地在实现时另起一节。
+
+1. **受影响集合是四次读取的并，不是任何一次读取的子集**：
+   `diff --name-status HEAD <target>`（目标与当前的路径差，含 file↔dir 那种类型变化）、
+   `ls-files --others --exclude-standard -z`（未跟踪，逐文件）、
+   `status --porcelain -z -uall`（工作树哪里不干净）、
+   `clean -nd`（Git 同意删的是哪些）。少前一条会漏掉"本地改动正被丢弃"，少第二条会漏掉
+   障碍，少第三条会把脏的说成干净的，少第四条会承诺一件 Git 不肯做的事。
+2. **保护不能指望 Git 拒绝**：只有 `checkout <t>` 与 `switch --detach <t>` 会挡（§6.1、
+   §6.2），而那两条把 HEAD 分离、且兑现不了"留在当前分支上回到目标树"。所以 F03 的动词
+   只能是 `reset --hard` + 一次有界 `clean`，**保护必须是 guit 自己在写之前算出来的拒绝**。
+   覆盖名单就是"目标树里的路径"与"磁盘上的未跟踪"这两个集合的相交，按第 3 条那条目录前缀
+   规则放大；名单不为空就先说清，再问要不要继续。
+3. **目录前缀规则是必需的**：目标的 `y` 对上磁盘上的 `y/nested`，`reset` 会销毁整个目录
+   （§6.2 第二行），而任何按路径列的名单只会报 `?? y/nested`。名单必须按"完整名字相等，
+   或目标的某条路径是它的目录前缀"来算。
+4. **覆盖是范围，不是内容变化**：字节和目标一致的那个文件仍在名单上（§6.1 第 2 条、
+   §6.3 第二行）；事后"字节没变"不许被写成"什么都没被覆盖"。
+5. **"会被丢弃的本地改动"是 `status` 与 `diff` 的交集**（§6.3 末）；两份名单各说一件事，
+   谁也不能单独充当这一问的答案。
+6. **删除承诺只绑 `clean` 自己的答案**，并且**永远不加第二个 force**：嵌套仓库要 `-ff`
+   才被列出、子模块在任何一档都不被列出、点名去删一个嵌套仓库时 `clean` rc=0 而什么都不做
+   （§6.4、§6.5 第 4 条）。Git 不列的路径就写成"留下"，并说为什么留下。这条与 F01 同口径。
+7. **折叠的目录不自己展开**，`--exclude-standard` 不可省：前者让交集算不出来
+   （`ign/` 不是目标里的路径），后者让被忽略的东西混进删除名单（5 vs 3，§6.4）。
+   需要逐文件时用逐文件那一条读取（`status --porcelain -z -uall --ignored`），只在要算
+   "忽略 ∩ 目标"时才读它。
+8. **默认保护忽略的东西，但要先算出那一个例外**：目标树跟踪了一个被 `.gitignore` 盖住的
+   路径时，恢复会写它，而 `check-ignore` 在写完之后仍然报那条规则（§6.4 末）——
+   **`check-ignore` 答模式，不答跟踪状态**，不能用它判跟踪与否。忽略 ∩ 目标从逐文件名单
+   里算，算出来就要在写之前说：这一条路径既被忽略又将被写入。
+9. **边界不是路径级的**：gitlink 撤掉之后 `mod/` 会以 `??` 留下，`reset` 给它一句
+   `warning: unable to rmdir`，而 `clean` 从此不列它（§6.4 末）。这类残留要按"留下，
+   因为 guit 不进别人的仓库"来陈述，不能按失败来陈述。
+10. **事后条件读两次，不是一个 bool**：`status --porcelain -z -uall` 为空 **且**
+    `diff --quiet <target>` rc=0（§6.5）。两者可以相反，所以"恢复到干净"这句话要说按哪条
+    成立、什么留在外面。逐路径的删除结果照 Git 事后的答案报"移除/未移除"——预览里承诺过的
+    路径可能已经被目标树跟踪，那时 `clean` 沉默地不做任何事（§6.5 第 1 条）。
+11. **目标解析复用 `resolve_target`**（§3、§5），`sequencer::validate_target` 仍然不动。
+    票据绑定的事实同 [设计文档 §7.2/§7.3](02-design.md)：会话、解析后的 target oid、观测到
+    的 HEAD、索引状态、目标与当前的路径差、脏路径、计划删除的未跟踪路径、覆盖名单、受保护
+    名单。**`reset` 与 `clean` 不是原子的一步**，中间那一段必须被承认为一段并如实报告；
+    这一步的动词序列与有界性归 F04，事后校验与部分执行归 F05。
+12. **预算不是新的读放大**：一次预览 5–6 条进程，§6.6 那份夹具上约 17–26 ms；贵的只有
+    `status`（9 ms），而未跟踪名单可以用 1.8 ms 那条拿到。
+
+F03 的落地要动 `main.rs` 的命令注册表与 `write.rs` 的 `Bound`；写这些之前本节是依据，
+写完之后本节不补记实现——实现另起一节，像 §4 与 §5 那样。
+
+本次落地的证据只有那一次探针运行：`exit=0`、332 行、跑完在 `/tmp` 里不留一个目录。
+Rust 与前端一行未动，所以这里不引用任何 build／fixture 数——写这段时共享树正被阶段 E 的
+E04b 占着（`npm run build` 停在 `src/views/history.ts` 那五处还不存在的名字上，那是他们工作
+树上未提交的改动，不是 HEAD 的红），而本切片没有任何需要那条通道来证明的断言。等 §7 的规则
+变成代码时，门禁数按 AGENTS.md 从独立 worktree 的已提交状态上取，并写进那一节的落地记录。
