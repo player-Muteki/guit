@@ -100,6 +100,7 @@ them (`/usr/bin/python3`); it refuses with a reason when any of the three is mis
 
 ```sh
 /usr/bin/python3 ../tools/bench/webkit-engine-probe.py appearance-engine-probe.ts src/style.css src/style/tokens.css
+/usr/bin/python3 ../tools/bench/webkit-engine-probe.py search-layer-engine-probe.ts src/style.css src/style/tokens.css
 ```
 
 A probe that builds a *view* rather than a document has to answer for the runtime the

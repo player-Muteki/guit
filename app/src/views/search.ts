@@ -351,7 +351,10 @@ export function createSearchView(deps: SearchDeps): SearchView {
     else {
       parts.push(`${plural(held.commits.length, "commit")} matched`);
       const left = hiddenCommits(held);
-      if (left > 0) parts.push(`${plural(left, "more")} not listed`);
+      // "more" is not a countable thing, so this one does not go through `plural`:
+      // the sentence the reader gets is "60 more not listed", not a plural of a
+      // word that has no plural.
+      if (left > 0) parts.push(`${left} more not listed`);
       if (held.refs.length > 0) {
         parts.push(namesOnScreen(held) ? `${plural(held.refs.length, "name")} matched` : "the names changed mid-search, so none are listed");
       }

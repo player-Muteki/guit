@@ -228,10 +228,21 @@ release it belongs to did not measure.
   with the arrow keys, Home, End and Enter. What each of those sentences may claim, and
   which answer belongs to the question on screen, are pinned by the search model's
   tests; that the field asks one read, sits in the panel and never filters the graph is
-  pinned as a claim about the sources. The layer itself has not yet been measured in a
-  drawn page, and no number for its read budget has been taken — the host and Git
-  version behind every measurement here are the ones the rest of this record comes
-  from.
+  pinned as a claim about the sources. The layer has now been drawn and measured in the
+  engine the panel displays through: opening a search moved neither the changes area nor
+  the graph, drew its 40 commit rows and 3 name rows over them inside the panel, and
+  left the commits underneath in the graph's own order and at their own height. A result
+  the loaded page already carried cost no read, flashed the one row it landed on and
+  changed no other row; one it did not carry cost exactly one read, asked for the page
+  that starts at that commit, and said so on the head line — which stays standing until
+  the rows it describes have arrived, rather than retiring a claim about rows still on
+  screen. Drawing that full window costs 0.55 ms per draw, measured as twenty draws in
+  one interval. Two things this channel cannot see are still unmeasured: the budget from
+  the keystroke to the candidate, because it contains the Git read behind the answer,
+  and which shorter cap a real 340x400 window selects, because that harness answers a
+  viewport unit for its own window rather than for the frame a page is built in. The
+  host and Git version behind every measurement here are the ones the rest of this
+  record comes from.
 
 ### Changed
 

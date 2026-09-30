@@ -590,3 +590,96 @@ import `search_repository` 与 `history_page` 两条读"来担保，而 `history
 结论：完成（"一个输入框"与"原图拓扑不被过滤破坏"在本阶段之后是同一件事的两个说法；阶段退出
   门槛仍差 E04c 的渲染证据与读预算）
 ```
+
+## 14. E04c 落地记录（前半：结果层第一次在渲染器里被量）
+
+```text
+任务：E04c 的第一半——给统一搜索的结果层补渲染证据。§12 与 §13 各留了一句"本轮没有任何
+  渲染度量"，本阶段把那一句换成数字；同一行的另一半（要真浏览器的 layout 证据与"输入到
+  候选"那个数）仍开着，见下面"未解决限制"。
+对应产品目标：G03 统一模糊搜索，也是阶段 E 退出门槛里"渲染证据"那一格。这一格要回答的不是
+  "代码形状对不对"（源码 gate 已经答过）也不是"判断对不对"（模型夹具已经答过），而是浮层
+  在真的画出来的页上到底做了什么：它有没有挪动下面两个区域、有没有换掉它们的行、它在短
+  窗口里装不装得下、一次 pick 花几条读、锚页那句话什么时候说、说完之后什么时候撤。
+起止提交与变更文件：起始代码基线 `d06e019`（上一行把两处指向已删之物的注释改掉的那次），
+  收尾基线 `03e23f4`（他这一轮把 F04 的三步落了：`3d4b772` 绑住整份计划、`dd605a0` 量那份
+  会被丢掉的本地改动、`03e23f4` 把一次干净还原跑成 Git 自己的两步，动的是
+  `app/src-tauri/src/reset.rs`、`write.rs`、`app/src/types.ts` 与
+  `tools/bench/clean-reset-probe.py`——没有一份是这一刀的落点，所以两边各改各的）。本文与
+  代码同一次提交。变更文件：tools/bench/search-layer-engine-probe.ts（新增：五页夹具
+  + 26 条引擎 claim）、app/src/views/search.ts（页脚那句从 `plural(left, "more")` 改成
+  `${left} more not listed`，见下一段）、CLAUDE.md（引擎探针那条命令块加了这第二支——这一
+  通道今天已经跑到第三支 view 级探针，例子里只有一支会让人以为它只能量文档）、
+  CHANGELOG.md（搜索那条末尾"层还没在画出来的页上量过、也没有任何读预算的数"换成量到的与
+  量不到的两串）、本文 §14、plan/README.md（E04c 行拆成已量/仍欠）。无 `Cargo.toml`、无
+  Rust 变更，所以 cargo 三条没跑：不写源码的 gate 也不该去碰别人的文件，而本轮确实没有 Rust
+  侧事实要它回答。
+一处只在渲染时才露出来的缺陷：探针第一次跑，页脚那句整串被读回来是
+  `100 commits matched; 60 mores not listed; …`。`plural(count, one)` 会补一个 `s`，而
+  "more" 不是可数名词——那句写在视图里、由夹具钉住的"页脚可以主张什么"全都对，只有渲染出来
+  的这一个词是错的。这一版还没进任何发布，所以它是本轮内部的一次修正而不是 `### Fixed`
+  的一条；改法是那一处不走 `plural`，因为需要复数的词只有一个，就是数词本身。
+探针的构造，以及三件由通道形状决定的事：(1) harness 只在加载后 250 ms 同步跑一次
+  `__probe()`，promise 结果它读不出来（`Unsupported result type (601)`），所以每个"要等答案"
+  的触发都放在 module 作用域，`__probe()` 只断言同步可得的事实与被数的命令；(2) 五页共用一
+  个 `window.setTimeout`，所以谁被驱动谁先把自己的队列装回去——第一次跑就是因为这条红了：
+  最后一次 install 的页替全页吃了 drain，"这一键还什么都没问"量到的是别人的等待；(3) 一次
+  页外的点击由每个 view 自己的 document 级监听回答，所以对 body 点一下就同时关掉五页的层，
+  窄页的几何因此必须在那之前取。这不是缺陷而是"字段被页外的一击关掉"那句验收的代价，探针
+  按顺序把这件事写成注释。
+一次选择器撞名（记下来，不在本阶段动）：`.commit-row` 同时是更改区那个提交框的行
+  （`views/changes.ts:122`）与图里的提交行（`views/history.ts:1035`），于是
+  `.commit-row:hover { background: --surface-hover }` 也落在那个框上。探针第一次读
+  `drawnOids()` 就因此读回一串空字符串——列出的第一个"行"是提交框。修法是把选择器收到
+  `.history-list .commit-row`（本轮这么做了，并在文件注释里写明为什么限定），改名要动另一个
+  view 的标记与它的 CSS，不属于这一刀。
+运行命令、退出码、日志位置：`npm run build` 退出 0（47 modules，产物 `index-DPtcP01y.js` /
+  `index-CCZkac2X.css`）；`npm run test:fixture` 399 pass / 0 fail（本轮没有新增夹具——页脚
+  那句话在视图里，夹具测不到，它的证据就是探针读回来的那整串）；
+  `responsive-check.py` 与 `color-contrast.py dist/assets` 都 fails=0；
+  `appearance-engine-probe.ts` 与 `commit-bubble-engine-probe.ts` 复跑仍各 fails=0（前者是
+  通道自检，后者因为上一行删过它一条 claim）；
+  `/usr/bin/python3 ../tools/bench/webkit-engine-probe.py -v search-layer-engine-probe.ts
+  src/style.css src/style/tokens.css` 退出 0，26 条 ok、fails=0。输出不落盘；`-v` 那份细节
+  就是下面这些数的来源。这几条命令各跑了两遍：第一遍他手上正有 `reset.rs`、`write.rs`、
+  `app/src/types.ts` 与 `clean-reset-probe.py` 在飞（共享树、未 stash，所以那一份读数含他的
+  改动），第二遍在他把这三步提交成 `03e23f4` 之后重跑，两次一字不差——`npm run build` 都是
+  47 modules 与同样的两个产物名，fixture 都是 399 pass / 0 fail，两道样式 gate 都是
+  fails=0。于是这里记的基线是 `03e23f4` 加上这一刀自己的六个文件，而不是一棵含着别人未提交
+  改动的树。
+桌面证据与环境（量到的，不是推的）：引擎 WebKitGTK（user-agent 记为
+  `AppleWebKit/605.1.15 … Safari/605.1.15`），离屏窗口 900x700。层打开时更改区顶在
+  34.59375、图列表顶在 350.359375，两个数在"层开着的那页"与"一次都没问过的那页"之间逐字节
+  相等——浮层没挪动任何东西。层的盒子 34.59→314.59，而更改区的盒子 34.59→298.78：它画在两
+  区之上而不是插在两区之间；左右方向 0..340（最小宽那页）与 0..900 都落在它自己的面板里。
+  盒子高 280，等于该页自己算出的 `max-height` 280。行数 40 提交 + 3 名字 = 43，页脚整串见
+  上一段；锚页与头页的第一行不同（`2050000` 对 `0000000`），整页 40 行被换掉而其它行的盒子
+  没动。命令计数：`list_refs` 5、`history_page` 8、`search_repository` 3（三页各问一次），
+  claim 断言出现过的键全在允许的那四条读里；pick 一个已加载的行花 0 条 `history_page`、
+  闪那一条 `.commit-row.flash`、其余 40 行的 oid 列表逐元素相同；pick 一个没有的行花恰好
+  1 条，`oid` 是完整 id、`start` 是 0；点 `Branch head` 花恰好 1 条、`oid` 是 null。头行
+  那句话在点击之后**仍然站着**——`renderAnchor` 只在读完成处调用，所以它跟着它描述的行撤，
+  而不是跟着点击撤；这一条被写成独立的 claim，因为它正是"不说自己没有的页"那一面。渲染
+  代价：20 次整窗重画在一区间里量得 11.000 ms，即每次 0.550 ms；单次的读数全是整数
+  （p50 与 p95 都是 1.000 ms），说明这引擎的时钟粒度是 1 ms，所以只报整批那个数。
+未解决限制：(1) "输入到候选 warm p95 ≤150ms" 仍没有数——这一通道里没有真的 Git 读，桩答得
+  再快也不是那把尺子；`SEARCH_DEBOUNCE_MS` 早已导出成正是为了等浏览器可用时能把 120 ms 算
+  进去而不是藏起来。(2) `layout-probe.mjs` 那九个尺寸的 overlap/overflow/invisible 三条与
+  "两区域同时有盒子"那条仍要 msedge/chromium，本宿主 `which msedge google-chrome chromium`
+  全空——装一个能被驱动的浏览器是要不要做的决定，不是本轮已经做过的事。(3) vh 那一档：本
+  harness 的窗口是 900x700，`vh` 按它回答（窄页量到的 280 就是 40vh×700），所以短窗的
+  36/30vh 那两条 restatement 只由 `responsive-check.py` 证明"存在且被重述"，没有证明"在
+  340x400 的真窗口里被选中"；同理 `--search-cap` 究竟遮住哪几行文字要的是 clip-aware 的
+  绘制矩形，那是 layout-probe 那条通道，本通道只量到盒子覆盖盒子。(4) `.history-list-head`
+  那条 `flex-wrap: wrap` 的 21px 证据仍未重测（§13 留的），它要的也是真窗口的换行行为。
+  (5) `.search-view` 这个 `flex: 0 0 auto` 兄弟在短窗装不进时按什么规则滚，同上。(6)
+  `cancel_search` 仍没有：清空字段只停止下一次提问，已开始的那一趟走到自己那一窗结束。
+  (7) `.commit-row` 撞名这条本轮只绕行、未拆。宿主：Ubuntu 26.04、Git 2.53、Node 26；
+  Windows/macOS 仍只是构建配置。
+回退方式：删 tools/bench/search-layer-engine-probe.ts、把 `views/search.ts` 那一处退回
+  `plural(left, "more")`、退回 CLAUDE.md 命令块里那一行、CHANGELOG 那段退回"还没量过"、本文
+  §14 与 plan/README.md 的 E04c 行一起退。一次 `git revert` 就够：没有新的存储格式、命令注册
+  或后端状态。要留意这条回退会把一个已经渲染出来的 "mores" 带回来。
+结论：E04c 前半完成——结果层第一次在真渲染器里被量，26 条 claim、fails=0；阶段退出门槛仍差
+  那条需要浏览器的读预算与 layout 证据
+```
