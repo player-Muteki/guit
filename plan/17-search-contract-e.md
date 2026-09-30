@@ -1,19 +1,21 @@
 # 阶段 E 契约依据与记录：匹配口径、命中地址与折叠成本
 
 实施日期：2026-09-30。基线提交：`a085b59`（阶段 D 的 D04 收口之后）。本文既固定
-E02–E04 必须遵守的匹配口径，也是 E01 的实施记录；E01 的落地见 §5（本文与代码同
-一次提交）。**§1–§4 描述的是 E01 已经实现并且只有单元测试的那一半**：matcher
-今天没有任何调用者，`app/src-tauri/src/main.rs` 里除模块声明外没有命令注册，前端
-搜索框不存在。
+E02–E04 必须遵守的匹配口径，也逐段记下已经落地的部分：E01 的纯 matcher 见 §5，E02 的
+扫描通道见 §8，E03 的读取协议与前端模型见 §10——三处都是本文与代码同一次提交。
+**§1–§4 描述的是那一半只有单元测试的实现**；到 E03 为止它的调用者仍是扫描通道自己，
+`app/src-tauri/src/main.rs` 里除模块声明外没有命令注册，前端搜索框要到 E04 才存在。
 
 主机条件同 [A01 基线](05-baseline-a01.md)：Linux x86_64、Git 2.53、WebKitGTK、
 Node 26、rustc 1.96.1。**本文没有 Windows/macOS 证据**，那两个平台仍只是构建配置。
 
-并行开发状态：阶段 D 的 D05 正在 `app/src/` 的图表侧推进（`headModel.ts`、
+并行开发状态：写 §1–§5 时阶段 D 的 D05 正在 `app/src/` 的图表侧推进（`headModel.ts`、
 `shell.ts`、`dom.ts`、`views/branches.ts`、`views/history.ts` 与其夹具），E01 只新增
-`app/src-tauri/src/fuzzy.rs`，与他的在飞文件无交集；共享树里唯一在飞的 Rust 改动是
-`main.rs` 中本文作者加的那一行模块声明。E04 会和他相遇在 `shell.ts` 的顶栏与
-`views/history.ts` 的行定位，届时按仓库规则从独立 worktree 度量已提交状态。
+`app/src-tauri/src/fuzzy.rs`，与他的在飞文件无交集。到 E03 为止这个交集依然为空：D 已
+收口，他在做阶段 F，在飞与刚落地的是 `views/changes.ts`、`dialogs/preview.ts`、
+`fileModel.ts`、`state.ts` 与其夹具，本文这四份文件没有一个和他重叠。E04 会和他相遇在
+`shell.ts` 的顶栏与 `views/history.ts` 的行定位，届时按仓库规则从独立 worktree 度量已
+提交状态——E03 的度量已经在那么做了，见 §10。
 
 ## 1. 三件事必须只有一个答案，否则搜索不成立
 
@@ -257,5 +259,121 @@ CaseFolding.txt 的全部差异：`ÿ`、`ſ`、兼容区的那些分岔没有�
   没有 Cargo 变更，回退不改变发布产物。
 结论：完成（E02 的交付物与验收条件由测试与测量支撑：未加载的旧提交在第 1,050 条被
   找到并带偏移；完整扫描之前没有任何窗口能说"无结果"。阶段退出门槛仍差 E03–E04）
+```
+
+## 9. E03 动手前要先拿到的事实
+
+E03 的验收是"旧 query/旧仓库的结果不覆盖新结果；超限有原因，不能解析截断流"。后半句
+E02 已经落地（异常一律整窗拒绝），前半句要先问清四件事，每件都决定一个接口而不是实现细节：
+
+1. **一次读取只绑一个域，而一个答案同时带两个域的东西**。`session::bind_read` 收单个
+   `ReadDomain`；搜索绑的是图域（偏移是图的语言），可它的答案里还有名字。名字的新鲜度
+   因此不能塞进 context，只能作为**值**报出，并且要在列出名字*之前*读
+   `refs_generation`：如果扫描途中一次 refresh 动了名字，这个答案就故意显得比它实际的
+   更旧，前端据此丢掉名字而不是合进一条已经改名的分支。丢掉名字是安全的方向，把已经
+   改名的分支留在屏上不是。→ 接口：`SearchPage.refs_generation`。
+2. **裸仓库没有 branch 快照**。`capture_inner` 对 bare 直接返回
+   `(PathTable::default(), None, Vec::new(), None)`——Git 拒绝在 bare 里跑 status，于是视图
+   里根本没有分支名，`pinned_head()` 也就是 None。但历史确实在那儿，且面板必须能搜。
+   实测口径照 `history::pinned_rev`：`rev-parse --verify HEAD` 非零退出就是没有提交可走。
+   → 接口：锚点回落为"HEAD 解析出的完整 id"，它同时就是 `SearchPage.head`；解析不出提交
+   是 `search_head_unresolved` 这句原因，绝不是一窗"没搜到"。
+3. **session id 在同一个 `SessionState` 内单调，换仓库不回零**。queryId 是前端自己的计数，
+   新会话从 1 起。若通道只按 queryId 判新旧，第二个仓库的第一次按键会被上一个仓库还在
+   跑的第 9 次判为"已被压过"而永远搜不了。→ 接口：`SearchState` 的槽位按
+   `(session_id, query_id)` 二元组判，跨会话直接占位并把旧旗标置真；同一 query 的两个窗口
+   共用一面旗标（续窗若换新旗标就会取消它自己正在走的那趟）。测试
+   `a_second_repository_starts_its_own_count`。
+4. **扫描序不是图形序**。搜索的 `log` 不带 `--topo-order`（E02 的量得结果：全仓排序另付
+   代价，而结果列表没有沟槽要对齐），图的那页带。两条序只在"新→旧"这一个方向上重合，
+   `offset` 数的是扫描走过的记录，不是屏上的行。→ 接口：命中定位只按身份，
+   `history_page(oid, start = 0)` 从那个提交自己起读一页，前端模型因此根本不收 offset。
+
+另外两条是约束而非未知，写在这里是为了让"为什么 E03 到此为止"有一个交代：取消旗标必须
+交给 `runner`（E02 的读窗已经收 `&AtomicBool`）；命令注册必须与它的前端调用者同一次提交
+落地，因为 `app/tests/ipc-surface.mjs` 要求每条 bound read 都有对应的 `invoke` 字面量——
+这就是 E03 不碰 `main.rs`、`search.rs` 与 `fuzzy.rs` 的两个模块级 `allow(dead_code)` 还要
+活到 E04 的原因。
+
+## 10. E03 实施记录
+
+```text
+任务：E03 搜索读取协议——session 绑定、查询通道、翻页合并与纯前端模型（不含命令注册，
+  不含任何界面）
+对应产品目标：G03 统一模糊搜索。本阶段的验收句是"旧 query/旧仓库的结果不得覆盖新结果；
+  超限有原因，不能解析截断流"。后半句 E02 已经落地，本阶段做的是前半句。
+起止提交与变更文件：起始代码基线 `e62e90d`（E02 落地）→ 本文与代码同一次提交。测量点是
+  `29be513` 加这四份文件，并且在独立 worktree `/tmp/guit-e03`（`git worktree add --detach`
+  + 私有 `CARGO_TARGET_DIR`）里度量：共享树当时带着并行开发者的 F 阶段在飞前端改动，
+  `cargo fmt` 一旦需要就地改写就会碰到他的文件。变更文件：app/src-tauri/src/search.rs
+  （E03 块：`SearchPage`、`Claim`、`SearchState`、`Ticket`、`search_rev`、`page`、
+  `page_inner`，加 9 个单元测试，模块内 28 个）、app/src-tauri/src/fuzzy.rs（`Tier` 加
+  `Serialize` 与 camelCase，删掉只服务本地打印的 `tier_name`）、app/src/searchModel.ts
+  （新增纯模型）、app/tests/search-model.mjs（新增 20 条夹具）、本文 §9–§10。不碰
+  `main.rs`、不碰 `app/tests/ipc-surface.mjs`、不碰任何 view 与样式，因此没有新增命令、
+  没有新增 DOM；Cargo 无变更。
+输入条件及 fixture：9 个新 Rust 单元测试加 20 条夹具测试。Rust 侧沿用 E02 的
+  fast-import 线性历史，新加两种会话形状：`open_session(Fixture)`（有 work tree，快照
+  pin 住 head，锚点因此是一个已经持有的数而不是一个进程）与 `bare_fixture`
+  （`init --bare`：Git 拒绝在裸仓库里跑 status，快照没有 branch，锚点必须回落成一次
+  rev-parse）。取消那条是真起了一个 Git 进程再置旗标
+  （`a_newer_query_stops_the_scan_under_way_at_the_process_boundary`），不是原地读一个
+  bool。夹具测试的输入全是 wire 形状的镜像对象：`SearchPage` 由 `page()`/`read()`/
+  `window()` 三个 builder 造，head 是同一个字母重复 40 次——"一个完整的对象 id"正是这
+  个模型收到的唯一身份形式。
+实现行为与异常路径：后端一次窗口 = `bind_read(Graph)` → `lane.begin` → `page_inner` →
+  `ticket.finish`。绑定失败时 Git 一次都不问（`read_no_session`、`read_stale_context`，
+  两条都沿用 session.rs 已有的话）。通道按 `(session_id, query_id)` 二元组判：同会话里
+  更小的 query 是 `search_superseded`，相等的续窗共用同一面旗标（换新旗标就会取消它自己
+  正在走的那趟），更大的或另一个会话的先置真旧旗标再占位；`finish` 只在槽位仍是自己那次
+  claim 时清空，否则第三个搜索会在第二个还在走的时候拿到空槽。锚点：快照 pin 住 head 就
+  用它，pin 不住就问一次 `rev-parse --verify HEAD`，非零退出是 `search_head_unresolved`
+  这句原因、读回来的不是完整 id 是 `search_protocol_error`，两条都不是"没搜到"；那一次
+  进程吃的是同一面取消旗标，所以一次按键压过查询之后没人等它。`refs_generation` 是**值**
+  而不是 context 的一部分：它在列名字之前读，扫描途中一次改名只会让这份答案显得更旧。
+  前端模型只做四件不碰 DOM 的事：数 query（`nextQueryId` 按 session 分别计数）、判一条
+  答案该丢该留（`dropReason` 依次问 session、query、generation）、把窗口拼成结果
+  （`mergePage`：`scanned` 累加，`complete`/`stoppedBy`/`nextCursor` 一律取最新那窗，
+  head 与 refsGeneration 取第一窗——续窗若换了 head，generation 那一维先把它拒了；
+  `hitsTruncated` 是粘性或；名字只在游标 0 那一窗有；属于另一个 query 的续窗拒收为
+  `window`）、把三种拒绝和"无结果"分开（`outcomeOf` 的 overtaken/closed/refused，
+  与 `nothingMatched` 互不越权）。定位只按身份：`locateCommit` 在这一页里有它就是行号，
+  没有就交给 `history_page(oid, start=0)`，因为扫描序与拓扑序只在"新→旧"上重合。高亮按
+  UTF-16 单元切、按簇边界收，`segments` 丢掉越界与倒置的片段而不是画半截。
+运行命令、退出码、日志位置：全部在 `/tmp/guit-e03/app` 与 `/tmp/guit-e03/app/src-tauri`
+  （`CARGO_TARGET_DIR=/tmp/guit-e03-target`）执行，退出码都是 0，输出不落盘（终端即日志）。
+  计数：cargo test 368 passed（其中 search::tests 28）、`cargo fmt -- --check` 零 diff、
+  clippy `--locked --all-targets` 0 条告警、npm run build 45 modules
+  （`index-cbBH50LX.js` / `index-C6_rx0ho.css`）、npm run test:fixture 388 pass / 0 fail
+  （其中 search-model 20 条；用户可见文案 gate 在这 388 条里，它扫 `app/src-tauri/src`
+  的注释）、两个样式 gate fails=0。fixture 比 E02 记的 375 多 13 条，全部来自测量点那个树
+  上的前端夹具，不是本阶段的数；这条数会随任何前端提交继续挪，所以它只属于它注明的那个测
+  量点。
+桌面/性能证据与环境：无桌面证据——本阶段没有任何界面，不新增 DOM、样式或交互面；
+  `searchModel.ts` 被 tsc 检查过，但没有被任何 view import，因此在产物里查不到它的任何
+  字符串（`grep -c` 在 `dist/assets/index-cbBH50LX.js` 上对 `search_scan_capped` 与
+  `outcomeOf` 都是 0）。布局探针与两个引擎探针本轮没跑：跑它们测不出新东西。度量都在
+  本宿主、release 档（E02 记的是 unoptimized 档，两个数并排是换算的出处而不是猜测的依
+  据）：首窗 warm p50 9.22 ms、2,000 条整趟 17.37 ms、首窗 99,991 字节对 8,388,608 上
+  限；`search.head` 在快照 pin 住 head 时 0.0 ms（三次，无进程），裸仓库 0.8–1.0 ms
+  （九次，中位 0.9，一次 rev-parse）。这两句是 E03 唯一新增的耗时面：一次按键最坏多付
+  一个进程。
+未解决限制：命令仍未注册——`search_repository` 的注册、`ipc-surface.mjs` 的 bound read
+  条目、前端那条 `invoke` 字面量与 `app.manage(search::SearchState)` 必须同一次提交落
+  地，所以 `search.rs` 与 `fuzzy.rs` 的两个模块级 `allow(dead_code)` 还挂着；
+  `SessionRead<SearchPage>` 今天还没有把它送出进程的 Tauri 命令，`process_cancelled`
+  在前端已被归为"被压过"，但那条路目前只有单测走过。取消仍是被动的（新 query 抢槽），
+  没有 `cancel_search` 这条命令，所以清空输入框之后已开始的那趟会走到自己那一窗结束。
+  `refs_generation` 只能让名字显得旧，不能让已经画出来的提交行显得旧——那是 refresh 的
+  事。顶栏输入、IME 组合期不发半成品查询、结果浮层、把高亮画到屏幕上、键盘导航与图定位
+  属于 E04；验证目标里"输入到候选反馈 warm p95 ≤150ms、首批 p95 ≤500ms"要到 E04 才有
+  可量对象，本节的 9.22 ms 是后端单窗，不含 IPC 与渲染。Windows/macOS 仍只是构建配置。
+  度量基线是 `29be513`：那之后共享树里又出现的在飞改动不在这组数里，也不属于它。
+回退方式：删除 app/src/searchModel.ts 与 app/tests/search-model.mjs，把
+  app/src-tauri/src/search.rs 退回 `e62e90d` 那份、fuzzy.rs 的 `Tier` 去掉 `Serialize`
+  与 camelCase 并恢复 `tier_name` 即可。不触碰任何共享模块与命令面；本轮没有 Cargo 变更，
+  前端新文件无人 import，回退不改变发布产物。
+结论：完成（验收句的两端都有钉住的数：一条答案丢不丢、丢在哪一维、三种拒绝各自说什么、
+  第二仓库从 1 开始计数、裸仓库从 HEAD 解析出的那个提交搜。阶段退出门槛仍差 E04）
 ```
 

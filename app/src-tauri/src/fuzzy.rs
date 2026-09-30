@@ -42,7 +42,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// How well a query matched a field, best first. The order is the ladder: a
 /// field that holds the query as one run is never reported as a subsequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Tier {
     /// The field is the query.
     Exact,

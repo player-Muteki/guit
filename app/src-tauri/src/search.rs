@@ -37,10 +37,12 @@ use crate::fuzzy::{self, Field, Query};
 use crate::history::valid_oid;
 use crate::perf;
 use crate::probe::{redact, ProbeError};
+use crate::session;
 use crate::{refs, repo, runner};
 use serde::Serialize;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Field separator inside one log record and record separator emitted by
@@ -125,9 +127,11 @@ pub enum HitField {
 #[serde(rename_all = "camelCase")]
 pub struct Hit {
     pub field: HitField,
-    /// `exact`, `prefix`, `contiguous` or `subsequence`, so a view can say how
-    /// good a match was without re-deriving the ladder.
-    pub tier: &'static str,
+    /// How good a match was, in the matcher's own words: the ladder serializes
+    /// to `exact`, `prefix`, `contiguous` or `subsequence`, so a view can say
+    /// that without re-deriving it, and a value that is not one of the four
+    /// cannot be built.
+    pub tier: fuzzy::Tier,
     /// Ascending, never overlapping, never adjacent.
     pub fragments: Vec<fuzzy::Fragment>,
 }
@@ -159,15 +163,23 @@ pub struct CommitHit {
     pub hits: Vec<Hit>,
 }
 
+/// Which sort of name matched. `Remote` is a remote-tracking ref: local
+/// metadata about a remote, never current remote state, and a separate value is
+/// what lets a view say that rather than imply it by showing a branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RefKind {
+    Branch,
+    Tag,
+    Remote,
+}
+
 /// A name that matched: branch, tag or remote-tracking ref. Its fragments index
 /// `name`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefHit {
-    /// `branch`, `tag` or `remote`. A remote-tracking ref is local metadata
-    /// about a remote, never current remote state, and naming the kind is what
-    /// lets a view say that rather than imply it.
-    pub kind: &'static str,
+    pub kind: RefKind,
     pub name: String,
     /// The commit this name joins a history on, when it names one: a tag on a
     /// tree or a blob has no row to sit on, which is a fact about the tag rather
@@ -179,7 +191,7 @@ pub struct RefHit {
     /// history, and it comes from a probe that ran — never from a scan that
     /// stopped early. `None` means no probe reached this name.
     pub reached_from_head: Option<bool>,
-    pub tier: &'static str,
+    pub tier: fuzzy::Tier,
     pub fragments: Vec<fuzzy::Fragment>,
 }
 
@@ -216,7 +228,7 @@ struct Record {
 /// guess a rank back out of the fragments it was built from.
 struct Match {
     field: HitField,
-    tier: &'static str,
+    tier: fuzzy::Tier,
     rank: (u8, usize, usize),
     fragments: Vec<fuzzy::Fragment>,
 }
@@ -228,15 +240,6 @@ struct Matched {
     offset: u64,
     record: Record,
     hits: Vec<Match>,
-}
-
-fn tier_name(tier: fuzzy::Tier) -> &'static str {
-    match tier {
-        fuzzy::Tier::Exact => "exact",
-        fuzzy::Tier::Prefix => "prefix",
-        fuzzy::Tier::Contiguous => "contiguous",
-        fuzzy::Tier::Subsequence => "subsequence",
-    }
 }
 
 /// The query read as an object-id prefix, when it is one: at least
@@ -293,15 +296,19 @@ fn matches_of(record: &Record, query: &Query, oid_prefix: Option<&str>) -> Vec<M
     // not, and prose never fuzzy-matches its way onto an id.
     if let Some(prefix) = oid_prefix {
         if record.oid.starts_with(prefix) {
-            let exact = prefix.len() == record.oid.len();
+            let tier = if prefix.len() == record.oid.len() {
+                fuzzy::Tier::Exact
+            } else {
+                fuzzy::Tier::Prefix
+            };
             found.push(Match {
                 field: HitField::Oid,
-                tier: if exact { "exact" } else { "prefix" },
-                rank: (
-                    if exact { 0 } else { 1 },
-                    prefix.chars().count(),
-                    prefix.chars().count(),
-                ),
+                tier,
+                // The same three-part key the matcher builds for a scored hit,
+                // so an id and a message compete on one ladder: an id match
+                // spans exactly what it matched, so both counts are the length
+                // of the prefix.
+                rank: (tier as u8, prefix.chars().count(), prefix.chars().count()),
                 fragments: vec![fuzzy::Fragment {
                     byte_start: 0,
                     byte_end: prefix.len(),
@@ -326,7 +333,7 @@ fn matches_of(record: &Record, query: &Query, oid_prefix: Option<&str>) -> Vec<M
             } else {
                 HitField::Body
             },
-            tier: tier_name(hit.tier),
+            tier: hit.tier,
             rank: hit.rank(),
             fragments: hit.fragments,
         });
@@ -335,7 +342,7 @@ fn matches_of(record: &Record, query: &Query, oid_prefix: Option<&str>) -> Vec<M
     if let Some(hit) = Field::new(&record.author_name).find(query) {
         found.push(Match {
             field: HitField::Author,
-            tier: tier_name(hit.tier),
+            tier: hit.tier,
             rank: hit.rank(),
             fragments: hit.fragments,
         });
@@ -443,38 +450,41 @@ fn ref_hits(
     // from its fragments afterwards: a name list ordered by a guess about the
     // window width would disagree with the commit list ordered by the real one.
     let mut found: Vec<((u8, usize, usize), RefHit)> = Vec::new();
-    let mut push = |kind: &'static str,
-                    name: String,
-                    commit_oid: Option<String>,
-                    head: bool,
-                    hit: fuzzy::Hit| {
-        let rank = hit.rank();
-        found.push((
-            rank,
-            RefHit {
-                kind,
-                name,
-                commit_oid,
-                head,
-                reached_from_head: None,
-                tier: tier_name(hit.tier),
-                fragments: hit.fragments,
-            },
-        ));
-    };
+    let mut push =
+        |kind: RefKind, name: String, commit_oid: Option<String>, head: bool, hit: fuzzy::Hit| {
+            let rank = hit.rank();
+            found.push((
+                rank,
+                RefHit {
+                    kind,
+                    name,
+                    commit_oid,
+                    head,
+                    reached_from_head: None,
+                    tier: hit.tier,
+                    fragments: hit.fragments,
+                },
+            ));
+        };
     for branch in listing.branches {
         if let Some(hit) = Field::new(&branch.name).find(query) {
-            push("branch", branch.name, Some(branch.oid), branch.head, hit);
+            push(
+                RefKind::Branch,
+                branch.name,
+                Some(branch.oid),
+                branch.head,
+                hit,
+            );
         }
     }
     for tag in listing.tags {
         if let Some(hit) = Field::new(&tag.name).find(query) {
-            push("tag", tag.name, tag.commit_oid, false, hit);
+            push(RefKind::Tag, tag.name, tag.commit_oid, false, hit);
         }
     }
     for remote in listing.remotes {
         if let Some(hit) = Field::new(&remote.name).find(query) {
-            push("remote", remote.name, Some(remote.oid), false, hit);
+            push(RefKind::Remote, remote.name, Some(remote.oid), false, hit);
         }
     }
     // Names have no field to break a tie, so the matcher's key alone orders
@@ -646,6 +656,250 @@ pub fn scan(
     })
 }
 
+/// Which search a window belongs to, and what the scan was standing on while it
+/// ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPage {
+    /// Echoed back, not read out of the query: a view that has moved on decides
+    /// whether this answer is about the question it still asks, and it can only
+    /// do that if the answer names the question it is an answer to.
+    pub query_id: u64,
+    /// The commit every `offset` in `window` counts back from, named rather than
+    /// implied. An offset locates a row in one history only: jumping to a hit is
+    /// a second read of that commit, and this is the number that says whether the
+    /// offset beside it still describes the graph on screen.
+    pub head: String,
+    /// The refs generation the name listing was taken under. Names are listed
+    /// during the scan, so they cannot be older than the scan — they can be
+    /// newer than the names on screen, and this is read before the listing
+    /// rather than after, so a refresh that moved the names mid-scan makes the
+    /// answer look older than it is. A view comparing it to its own screen then
+    /// drops the names it cannot confirm instead of merging in a branch that has
+    /// since been renamed.
+    pub refs_generation: u64,
+    pub window: SearchWindow,
+}
+
+/// The claim one search holds: which session asked, which query it was, and the
+/// flag its reads poll.
+struct Claim {
+    session_id: u64,
+    query_id: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// One search at a time, per application.
+///
+/// A scan of a large history is not instant, and a reader who keeps typing does
+/// not want the answer to what they typed a second ago. One slot holds the scan
+/// under way: a newer query stops it at the process boundary rather than letting
+/// it finish and throw the rows away, and an older request that arrives after the
+/// newer one has taken the slot is refused before Git is asked. There is no
+/// queue, because a queued search is a second answer to a question no view is
+/// asking any more.
+#[derive(Default)]
+pub struct SearchState {
+    lane: Mutex<Option<Claim>>,
+}
+
+/// A search's hold on the lane, given back when its window comes back — every
+/// path out of the read hands it back, including the refused ones.
+pub struct Ticket<'a> {
+    lane: &'a SearchState,
+    claim: Claim,
+}
+
+impl SearchState {
+    /// Claims the lane for one window of one query.
+    ///
+    /// `query_id` comes from the caller and only ever means "which keystroke";
+    /// what makes it safe to compare is the session it travels with, because a
+    /// second repository starts the count over while the first one's scan may
+    /// still be running.
+    pub fn begin(&self, session_id: u64, query_id: u64) -> Result<Ticket<'_>, ProbeError> {
+        let mut lane = crate::util::guard(&self.lane);
+        if let Some(claim) = lane.as_ref() {
+            if claim.session_id == session_id {
+                match query_id.cmp(&claim.query_id) {
+                    std::cmp::Ordering::Less => {
+                        return Err(ProbeError::new(
+                            "search_superseded",
+                            "A newer search is already running here, so this one's answer is not wanted.",
+                        ))
+                    }
+                    std::cmp::Ordering::Equal => {
+                        // The next window of a scan under way. It keeps the
+                        // flag already in the lane: a continuation that
+                        // cancelled the lane would cancel the scan it is
+                        // continuing.
+                        return Ok(Ticket {
+                            lane: self,
+                            claim: Claim {
+                                session_id,
+                                query_id,
+                                cancelled: claim.cancelled.clone(),
+                            },
+                        });
+                    }
+                    std::cmp::Ordering::Greater => {}
+                }
+            }
+            // A newer query in this session, or any query in a different one:
+            // what is in the lane is answering a question no view is asking, so
+            // it is stopped where it stands rather than run to the end.
+            claim.cancelled.store(true, Ordering::Relaxed);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        *lane = Some(Claim {
+            session_id,
+            query_id,
+            cancelled: cancelled.clone(),
+        });
+        Ok(Ticket {
+            lane: self,
+            claim: Claim {
+                session_id,
+                query_id,
+                cancelled,
+            },
+        })
+    }
+}
+
+impl Ticket<'_> {
+    fn cancelled(&self) -> &AtomicBool {
+        self.claim.cancelled.as_ref()
+    }
+
+    /// Frees the lane only if it still holds this claim. A newer query replaced
+    /// it mid-read, and clearing that would hand a third search a free lane
+    /// while the second is still walking the history.
+    fn finish(self) {
+        let mut lane = crate::util::guard(&self.lane.lane);
+        if lane.as_ref().is_some_and(|claim| {
+            claim.session_id == self.claim.session_id && claim.query_id == self.claim.query_id
+        }) {
+            *lane = None;
+        }
+    }
+}
+
+/// The commit a scan walks: the one the session was published with, or, when the
+/// snapshot names none — a bare repository, where Git reports no status — the
+/// one `HEAD` resolves to. `HEAD` itself never reaches argv: what does is the
+/// full object id read back from it, so a head that names no commit is refused
+/// here rather than in the log, and no revspec ever comes from a string the user
+/// typed.
+///
+/// The anchor read carries the query's own cancellation flag, so a keystroke
+/// that overtakes this query abandons the process instead of waiting for an
+/// answer nobody asked for any more.
+fn search_rev(
+    directory: &Path,
+    head: Option<&str>,
+    cancelled: &AtomicBool,
+) -> Result<String, ProbeError> {
+    if let Some(rev) = head {
+        if !valid_oid(rev) {
+            return Err(ProbeError::new(
+                "search_target_invalid",
+                "A search reads one commit's history, named by its full id.",
+            ));
+        }
+        return Ok(rev.to_owned());
+    }
+    let mut command = repo::user_git_command(directory);
+    command.args(["rev-parse", "--verify", "HEAD"]);
+    let output = runner::run_with_limit(
+        command,
+        cancelled,
+        Duration::ZERO,
+        Duration::from_secs(30),
+        SEARCH_OUTPUT_LIMIT,
+        |_, _| {},
+    )?;
+    if !output.status.success() {
+        return Err(ProbeError::new(
+            "search_head_unresolved",
+            "This repository's HEAD names no commit, so no history was searched.",
+        ));
+    }
+    // Truncation needs no branch of its own: a cut answer is not a complete
+    // object id, and the check below refuses it.
+    let rev = String::from_utf8_lossy(output.stdout.trim_ascii())
+        .trim()
+        .to_owned();
+    if !valid_oid(&rev) {
+        return Err(ProbeError::new(
+            "search_protocol_error",
+            "Git did not answer with a single commit id; refusing to search a history from it.",
+        ));
+    }
+    Ok(rev)
+}
+
+/// One window of one search, bound to the session that asked for it.
+///
+/// The context is what makes this more than [`scan`] with a `query_id` glued on:
+/// a search is bound to the history its offsets count through, so an answer from
+/// a closed session or a superseded head is refused before the walk starts, in
+/// the same words every other repository read uses. The query lane is the rest:
+/// two windows of one query share one cancellation flag, and a query that
+/// arrived after a newer one never reaches Git.
+pub fn page(
+    sessions: &session::SessionState,
+    lane: &SearchState,
+    asked: session::ReadContext,
+    query_id: u64,
+    query: &str,
+    cursor: u64,
+) -> Result<session::SessionRead<SearchPage>, ProbeError> {
+    let (identity, answered) = sessions.bind_read(asked, session::ReadDomain::Graph)?;
+    let ticket = lane.begin(answered.session_id, query_id)?;
+    let outcome = page_inner(sessions, &identity, &ticket, query, cursor, answered);
+    ticket.finish();
+    outcome
+}
+
+fn page_inner(
+    sessions: &session::SessionState,
+    identity: &repo::RepoIdentity,
+    ticket: &Ticket<'_>,
+    query: &str,
+    cursor: u64,
+    answered: session::ReadContext,
+) -> Result<session::SessionRead<SearchPage>, ProbeError> {
+    let directory = if identity.is_bare {
+        identity.git_dir.as_path()
+    } else {
+        identity
+            .work_dir()
+            .map_err(|_| ProbeError::new("repo_worktree_missing", "The work tree is gone."))?
+    };
+    let view = sessions
+        .current_view()
+        .ok_or_else(|| ProbeError::new("read_no_session", "No repository is open."))?;
+    let head = sessions.pinned_head();
+    // Timed on its own because it is the one part of a window that is a process
+    // rather than a walk: a snapshot that names no head — a bare repository —
+    // costs a `rev-parse` per window, where the normal path reads a number the
+    // session already holds.
+    let rev_start = Instant::now();
+    let rev = search_rev(directory, head.as_deref(), ticket.cancelled())?;
+    perf::mark("search.head", rev_start.elapsed());
+    let window = scan(directory, &rev, query, cursor, ticket.cancelled())?;
+    Ok(session::SessionRead::new(
+        answered,
+        SearchPage {
+            query_id: ticket.claim.query_id,
+            head: rev,
+            refs_generation: view.refs_generation,
+            window,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,7 +1040,7 @@ mod tests {
         )
     }
 
-    fn fields(window: &SearchWindow) -> Vec<(String, HitField, &'static str)> {
+    fn fields(window: &SearchWindow) -> Vec<(String, HitField, fuzzy::Tier)> {
         window
             .commits
             .iter()
@@ -833,7 +1087,7 @@ mod tests {
             vec![(
                 subject.commits[0].oid[0..7].to_owned(),
                 HitField::Subject,
-                "contiguous"
+                fuzzy::Tier::Contiguous
             )]
         );
         let body = scan_at(&fixture, "zebra", 0).expect("body");
@@ -858,11 +1112,11 @@ mod tests {
         let hit = &found.commits[0];
         assert_eq!(hit.oid, wanted);
         assert_eq!(hit.hits[0].field, HitField::Oid);
-        assert_eq!(hit.hits[0].tier, "prefix");
+        assert_eq!(hit.hits[0].tier, fuzzy::Tier::Prefix);
         assert_eq!(hit.hits[0].fragments[0].byte_end, prefix.len());
         // The full id is the field, so the whole thing is one exact fragment.
         let whole = scan_at(&fixture, &wanted, 0).expect("full id");
-        assert_eq!(whole.commits[0].hits[0].tier, "exact");
+        assert_eq!(whole.commits[0].hits[0].tier, fuzzy::Tier::Exact);
         // A run of hex that is not a prefix of anything is not an id hit; the
         // rest of the search still runs.
         let miss = "0123456789abcdef";
@@ -1027,7 +1281,7 @@ mod tests {
         let window = scan(repo, &head, "login-fix", 0, &AtomicBool::new(false)).expect("branch");
         assert_eq!(window.refs.len(), 1);
         let name = &window.refs[0];
-        assert_eq!(name.kind, "branch");
+        assert_eq!(name.kind, RefKind::Branch);
         assert_eq!(name.name, "login-fix");
         assert_eq!(name.commit_oid.as_deref(), Some(head.as_str()));
         assert_eq!(
@@ -1045,7 +1299,7 @@ mod tests {
             "a name outside this history is proved by a probe that ran"
         );
         let tag = scan(repo, &head, "v1.2", 0, &AtomicBool::new(false)).expect("tag");
-        assert_eq!(tag.refs[0].kind, "tag");
+        assert_eq!(tag.refs[0].kind, RefKind::Tag);
         assert_eq!(tag.refs[0].reached_from_head, Some(true));
     }
 
@@ -1167,7 +1421,7 @@ mod tests {
         assert_eq!(second.commits.len(), 1);
         assert_eq!(second.commits[0].offset, 1_050);
         assert!(second.complete);
-        assert_eq!(second.commits[0].hits[0].tier, "contiguous");
+        assert_eq!(second.commits[0].hits[0].tier, fuzzy::Tier::Contiguous);
         assert_offsets_index(&second.commits[0].message, &second.commits[0].hits[0]);
     }
 
@@ -1316,7 +1570,7 @@ mod tests {
             MAX_WINDOW_COMMITS,
             "and is not counted against the ceiling the commits are capped by"
         );
-        assert!(first.refs.iter().all(|name| name.kind == "branch"));
+        assert!(first.refs.iter().all(|name| name.kind == RefKind::Branch));
         let second = scan_at(&fixture, "lane", first.next_cursor.expect("cursor")).expect("second");
         assert!(
             second.refs.is_empty(),
@@ -1374,8 +1628,12 @@ mod tests {
         )
         .expect("raw window");
         println!(
-            "search E02 warm first window p50 {:?}, full {}-commit scan {:?}, first window {} bytes of an {SEARCH_OUTPUT_LIMIT}-byte bound (unoptimized build)",
-            median, 2_000, whole, bytes.len()
+            "search E02 warm first window p50 {:?}, full {}-commit scan {:?}, first window {} bytes of an {SEARCH_OUTPUT_LIMIT}-byte bound ({} build)",
+            median,
+            2_000,
+            whole,
+            bytes.len(),
+            if cfg!(debug_assertions) { "unoptimized" } else { "release" },
         );
         assert!(
             bytes.len() * 8 < SEARCH_OUTPUT_LIMIT,
@@ -1386,5 +1644,239 @@ mod tests {
             "a warm first window took {median:?} on this host"
         );
         assert!(whole.as_millis() < 4_000, "the whole scan took {whole:?}");
+    }
+
+    // --- the context a search is asked with, and the lane it runs in ----------
+
+    /// A session over a fixture, with the exact number pair its own published
+    /// snapshot ships — what a view carries, and therefore what these tests ask
+    /// with. Nothing here invents an identity out of the fields it renders.
+    struct Opened {
+        fixture: Fixture,
+        state: session::SessionState,
+        view: session::SnapshotView,
+        asked: session::ReadContext,
+    }
+
+    fn open_session(fixture: Fixture) -> Opened {
+        let state = session::SessionState::default();
+        let view = session::open(&state, fixture.dir()).expect("open");
+        let asked = context(&view);
+        Opened {
+            fixture,
+            state,
+            view,
+            asked,
+        }
+    }
+
+    /// The pair a view carries: this session, this history. A search asks with
+    /// it and answers with it, and nothing here derives it from the rows.
+    fn context(view: &session::SnapshotView) -> session::ReadContext {
+        session::ReadContext {
+            session_id: view.session_id,
+            generation: Some(view.history_generation),
+        }
+    }
+
+    /// A bare repository holding a real history: no work tree, so no snapshot
+    /// branch, and the only commit a search can stand on is the one `HEAD`
+    /// resolves to.
+    struct Bare {
+        root: tempfile::TempDir,
+        dir: std::path::PathBuf,
+        head: String,
+    }
+
+    fn bare_fixture(commits: &[(String, String)]) -> Bare {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = root.path().join("bare");
+        std::fs::create_dir(&dir).expect("mkdir");
+        git(
+            &dir,
+            &["init", "--quiet", "--bare", "--initial-branch=main"],
+        );
+        import(&dir, "main", commits);
+        let head = oid(&dir, "HEAD");
+        Bare { root, dir, head }
+    }
+
+    fn search(
+        state: &session::SessionState,
+        asked: session::ReadContext,
+        lane: &SearchState,
+        query_id: u64,
+        query: &str,
+    ) -> Result<session::SessionRead<SearchPage>, ProbeError> {
+        page(state, lane, asked, query_id, query, 0)
+    }
+
+    #[test]
+    fn a_search_answers_under_the_context_it_was_asked_with() {
+        let opened = open_session(five());
+        let lane = SearchState::default();
+        let answer = search(&opened.state, opened.asked, &lane, 1, "lane").expect("page");
+        // The echo is the whole mechanism: a reply that does not carry the
+        // context back cannot be recognised as stale by anything reading it.
+        assert_eq!(answer.context, opened.asked);
+        assert_eq!(answer.value.query_id, 1);
+        // The anchor is the commit the snapshot was published with, not the text
+        // `HEAD`, so an offset in the answer names one history and no other.
+        assert_eq!(answer.value.head, opened.fixture.head);
+        assert_eq!(answer.value.refs_generation, opened.view.refs_generation);
+        assert!(!answer.value.window.commits.is_empty());
+        // The window came back, so the lane is empty again: a search that
+        // finished leaves no claim behind to refuse the next keystroke.
+        assert!(crate::util::guard(&lane.lane).is_none());
+    }
+
+    #[test]
+    fn a_search_for_a_closed_session_is_refused_before_git_is_asked() {
+        let opened = open_session(five());
+        let lane = SearchState::default();
+        session::close(&opened.state);
+        let error = search(&opened.state, opened.asked, &lane, 1, "lane").expect_err("closed");
+        assert_eq!(error.code.as_str(), "read_no_session");
+        // A refusal is not a scan result: no rows, and the lane untouched.
+        assert!(crate::util::guard(&lane.lane).is_none());
+    }
+
+    #[test]
+    fn a_search_bound_to_a_superseded_history_is_refused() {
+        let opened = open_session(five());
+        let lane = SearchState::default();
+        // The head moves, which is the one thing that makes every offset in a
+        // search answer mean something else. An empty commit is the cheapest
+        // way to move a tip without touching what the scan reads: `fast-import`
+        // in a second run starts a fresh branch and refuses to clobber the old
+        // tip, so it is the wrong tool for "the head moved since you looked".
+        git(
+            opened.fixture.dir(),
+            &["commit", "--quiet", "--allow-empty", "-m", "a"],
+        );
+        let moved = session::refresh(&opened.state)
+            .expect("refresh")
+            .expect("session open");
+        assert!(
+            moved.history_generation > opened.view.history_generation,
+            "the head moved but the generation this search is bound to did not"
+        );
+        let error = search(&opened.state, opened.asked, &lane, 2, "lane").expect_err("stale");
+        assert_eq!(error.code.as_str(), "read_stale_context");
+        // Asking again with the live context is a search, not a retry of a
+        // failure: the new answer is anchored on the new commit.
+        let asked = context(&moved);
+        let answer = search(&opened.state, asked, &lane, 3, "lane").expect("fresh");
+        assert_eq!(answer.value.head, oid(opened.fixture.dir(), "HEAD"));
+        assert_ne!(answer.value.head, opened.fixture.head);
+    }
+
+    #[test]
+    fn a_query_that_arrived_after_a_newer_one_never_reaches_git() {
+        let opened = open_session(five());
+        let lane = SearchState::default();
+        let running = lane.begin(opened.view.session_id, 3).expect("claim");
+        let error = search(&opened.state, opened.asked, &lane, 2, "lane").expect_err("superseded");
+        assert_eq!(error.code.as_str(), "search_superseded");
+        // Refusing the late request is the cheap half. Stopping the scan that is
+        // already walking a thousand records is the part that saves the read:
+        // the running query owns the lane, and an older request cannot take its
+        // cancellation flag away from it.
+        assert!(!running.cancelled().load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_newer_query_stops_the_scan_under_way_at_the_process_boundary() {
+        let opened = open_session(five());
+        let lane = SearchState::default();
+        let first = lane.begin(opened.view.session_id, 1).expect("first");
+        let second = lane.begin(opened.view.session_id, 2).expect("second");
+        assert!(first.cancelled().load(Ordering::Relaxed));
+        // The stopped scan reports that it was stopped. It is not an empty
+        // answer, and a view rendering one would say "nothing matched" about a
+        // search that was cut off.
+        let error = scan(
+            opened.fixture.dir(),
+            &opened.fixture.head,
+            "crash",
+            0,
+            first.cancelled(),
+        )
+        .expect_err("cancelled");
+        assert_eq!(error.code.as_str(), "process_cancelled");
+        // The newer query still holds the lane, so the older window coming back
+        // late cannot free it.
+        drop(first);
+        assert!(crate::util::guard(&lane.lane)
+            .as_ref()
+            .is_some_and(|claim| claim.query_id == 2));
+        drop(second);
+    }
+
+    #[test]
+    fn two_windows_of_one_query_share_one_cancellation() {
+        let opened = open_session(five());
+        let lane = SearchState::default();
+        let first = lane.begin(opened.view.session_id, 4).expect("first window");
+        let second = lane
+            .begin(opened.view.session_id, 4)
+            .expect("second window");
+        assert!(Arc::ptr_eq(&first.claim.cancelled, &second.claim.cancelled));
+        assert!(!second.cancelled().load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_second_repository_starts_its_own_count() {
+        let first = open_session(five());
+        let second =
+            Fixture::new(&[("guit test".to_owned(), "Refactor the graph lane".to_owned())]);
+        let second_view = session::open(&first.state, second.dir()).expect("open second");
+        assert_ne!(first.view.session_id, second_view.session_id);
+        let lane = SearchState::default();
+        let old = lane.begin(first.view.session_id, 9).expect("old session");
+        // Opening a repository restarts the keystroke count at one. Read as a
+        // number on its own that is older than nine; read together with the
+        // session it belongs to, it is a different search box over a different
+        // repository, and the scan it replaces is one nothing is waiting for.
+        let fresh = lane
+            .begin(second_view.session_id, 1)
+            .expect("a new session outranks no old one");
+        assert!(old.cancelled().load(Ordering::Relaxed));
+        let asked = context(&second_view);
+        let answer = search(&first.state, asked, &lane, 1, "lane").expect("page");
+        assert_eq!(answer.context, asked);
+        assert_eq!(answer.value.head, second.head);
+        assert!(!fresh.cancelled().load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_bare_repository_is_searched_from_the_commit_its_head_names() {
+        let bare = bare_fixture(&[("guit test".to_owned(), "Refactor the graph lane".to_owned())]);
+        let state = session::SessionState::default();
+        let view = session::open(&state, &bare.dir).expect("open bare");
+        // Git reports no status in a bare repository, so the snapshot names no
+        // branch and the session pins no head. The search still has an anchor:
+        // the commit `HEAD` resolves to, read back as a full id.
+        assert!(view.branch.is_none());
+        let lane = SearchState::default();
+        let answer = search(&state, context(&view), &lane, 1, "lane").expect("bare page");
+        assert_eq!(answer.value.head, bare.head);
+        assert!(!answer.value.window.commits.is_empty());
+        assert_eq!(answer.value.window.commits[0].offset, 0);
+    }
+
+    #[test]
+    fn a_head_that_names_no_commit_is_a_refusal_with_a_reason() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = root.path().join("empty");
+        std::fs::create_dir(&dir).expect("mkdir");
+        git(
+            &dir,
+            &["init", "--quiet", "--bare", "--initial-branch=main"],
+        );
+        // The read is refused with the reason Git gave, never as a history in
+        // which nothing matched.
+        let error = search_rev(&dir, None, &AtomicBool::new(false)).expect_err("no commit");
+        assert_eq!(error.code.as_str(), "search_head_unresolved");
     }
 }
