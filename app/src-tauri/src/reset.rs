@@ -391,6 +391,14 @@ pub(crate) struct Restoration {
     /// whose contents already match is written all the same, so "nothing
     /// changed there afterwards" never means "nothing was overwritten".
     pub overwritten: Vec<Untracked>,
+    /// Ignored paths the target holds — the one exception to "the restore leaves
+    /// ignored files alone". They are not in `overwritten`, because that list is
+    /// the untracked listing taken with the ignore rules applied and Git does not
+    /// call these untracked. The restore writes them all the same, so the preview
+    /// names them before the write instead of letting the ignore rule imply they
+    /// were safe.
+    #[allow(dead_code)] // read by the ticket these sets become
+    pub ignored_written: Vec<Untracked>,
     /// Untracked paths a fresh `git clean -nd` agrees to remove, less anything
     /// the restore writes — `clean` is silent about a path the reset has just
     /// made tracked, so promising it would be promising a thing Git will not do.
@@ -408,8 +416,10 @@ impl Restoration {
     /// The refusal Git will not make on guit's behalf. `checkout` and
     /// `switch --detach` do block on this shape, but they move HEAD off the
     /// branch, so they cannot be the restore; `reset --hard` walks straight
-    /// through. An ignored path the target tracks is not here — the restore
-    /// writes it, and saying so belongs in the preview, not in a rejection.
+    /// through. An ignored plain file the target tracks is not here — the restore
+    /// writes it, and saying so belongs in the preview, not in a rejection. An
+    /// ignored *repository* is here: a rule that sets a path aside says nothing
+    /// about what a write through it destroys.
     #[allow(dead_code)] // goes away with the command that stages this preview
     pub(crate) fn guard(&self) -> Result<(), ProbeError> {
         let Some(first) = self.blocked.first() else {
@@ -555,37 +565,64 @@ fn target_paths(work_root: &Path, target: &str) -> Result<Vec<Vec<u8>>, ProbeErr
     )
 }
 
+/// Turns one NUL-separated listing into the granularity Git reported: a folded
+/// entry keeps its trailing separator as the report that this is somebody else's
+/// repository.
+fn as_untracked(raws: Vec<Vec<u8>>) -> Vec<Untracked> {
+    raws.into_iter()
+        .map(|raw| match raw.strip_suffix(b"/".as_slice()) {
+            Some(directory) => Untracked {
+                raw: directory.to_vec(),
+                repository: true,
+            },
+            None => Untracked {
+                raw,
+                repository: false,
+            },
+        })
+        .collect()
+}
+
 /// `ls-files --others --exclude-standard -z`: what is untracked, with the
 /// repository's own ignore rules applied. `--exclude-standard` is not optional —
 /// without it ignored files enter as untracked (5 entries against 3 on the same
 /// repository) and the restore would promise to remove what the default
 /// protection keeps.
 fn untracked_paths(work_root: &Path) -> Result<Vec<Untracked>, ProbeError> {
-    Ok(read_listing(
+    Ok(as_untracked(read_listing(
         work_root,
         &["ls-files", "--others", "--exclude-standard", "-z"],
         "which files are untracked",
-    )?
-    .into_iter()
-    .map(|raw| match raw.strip_suffix(b"/".as_slice()) {
-        Some(directory) => Untracked {
-            raw: directory.to_vec(),
-            repository: true,
-        },
-        None => Untracked {
-            raw,
-            repository: false,
-        },
-    })
-    .collect())
+    )?))
 }
 
-/// The affected sets a clean restore is previewed from: five listings that each
+/// `ls-files --others --ignored --exclude-standard -z`: the paths the ignore
+/// rules cover, one entry per file and nothing else. This is the listing the
+/// exception is computed from, because the default protection has exactly one
+/// hole — a path the target holds is written by the restore even while a rule
+/// covers it. `status --porcelain -z -uall --ignored` gives the same paths at the
+/// same granularity, mixed into the whole working copy (101 entries to reach 2 of
+/// them, each behind a three byte header), so the preview reads this one.
+fn ignored_paths(work_root: &Path) -> Result<Vec<Untracked>, ProbeError> {
+    Ok(as_untracked(read_listing(
+        work_root,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+        "the paths the repository's own rules set aside",
+    )?))
+}
+
+/// The affected sets a clean restore is previewed from: six listings that each
 /// answer one class of path, plus the one target resolution the ordinary reset
 /// already uses, in the order the measurements set. Resolve first, because a
 /// target that is not exactly one commit has nothing to be previewed against;
 /// then the two tree reads, then the working copy, then what `clean` itself
-/// agrees to remove.
+/// agrees to remove, then the paths the ignore rules cover.
 #[allow(dead_code)] // goes away with the command that stages this preview
 pub(crate) fn plan_restore(
     work_root: &Path,
@@ -630,6 +667,18 @@ pub(crate) fn plan_restore(
             // of what to remove, so it stays — the promise follows the listing,
             // never the directory that contains it.
             plan.left_behind.push(item);
+        }
+    }
+    for item in ignored_paths(work_root)? {
+        if claimed_by_target(&held, &item.raw) {
+            // The ignore rule says Git set this path aside; it does not say the
+            // restore leaves it alone, because the target holds it. A repository
+            // in this class is refused like any other — what gets destroyed is
+            // not a question the ignore rules answer.
+            if item.repository {
+                plan.blocked.push(item.clone());
+            }
+            plan.ignored_written.push(item);
         }
     }
     Ok(plan)
@@ -1769,8 +1818,8 @@ mod tests {
     }
 
     /// The ignore rules are applied before anything is listed, so an ignored
-    /// file enters none of the sets: the restore neither promises to remove it
-    /// nor counts it as something standing in the way.
+    /// file the target does not hold enters none of the sets: the restore neither
+    /// promises to remove it nor counts it as something standing in the way.
     #[test]
     fn an_ignored_file_is_in_none_of_the_restore_lists() {
         let root = tempfile::tempdir().unwrap();
@@ -1785,7 +1834,70 @@ mod tests {
         let plan = plan_for(dir, &target);
         assert_eq!(untracked_names(&plan.removals), ["plain.txt"]);
         assert!(plan.overwritten.is_empty());
+        assert!(plan.ignored_written.is_empty());
         assert!(plan.left_behind.is_empty());
+    }
+
+    /// The one hole in that protection: a path the ignore rules cover which the
+    /// target nevertheless holds. It is named in a set of its own rather than in
+    /// `overwritten`, because the untracked listing is taken with those same rules
+    /// applied and Git does not call this path untracked — and the restore writes
+    /// it all the same.
+    #[test]
+    fn an_ignored_path_the_target_holds_is_named_before_the_write() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, ".gitignore", "built.txt\n");
+        write_at(dir, "built.txt", "the target's own bytes\n");
+        // `add -A` skips it — the rule is already in place. The shape this test is
+        // about is a path the rules cover *and* the target tracks, so it goes in by
+        // force, and the refusal below would otherwise be built on a tree that never
+        // held the path.
+        git(dir, &["add", "-f", "--", "built.txt"]);
+        let target = commit_all(dir, "built.txt tracked despite the rule");
+        git(dir, &["rm", "--cached", "-q", "--", "built.txt"]);
+        commit_all(dir, "built.txt dropped from the tree, and ignored");
+        write_at(dir, "built.txt", "written by hand since\n");
+        write_at(dir, "plain.txt", "untracked\n");
+
+        let plan = plan_for(dir, &target);
+        assert_eq!(untracked_names(&plan.ignored_written), ["built.txt"]);
+        assert!(plan.overwritten.is_empty(), "not counted twice");
+        assert!(plan.blocked.is_empty());
+        assert_eq!(untracked_names(&plan.removals), ["plain.txt"]);
+        // Measured, not inferred: the ignore rule does not keep the file out of
+        // the write, so the sentence the preview owes is "this will be written".
+        git(dir, &["reset", "--hard", &target]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("built.txt")).unwrap(),
+            "the target's own bytes\n"
+        );
+    }
+
+    /// A repository the rules set aside is still a repository: the refusal does
+    /// not ask what the ignore file says, only what the write would destroy.
+    #[test]
+    fn an_ignored_repository_the_target_writes_is_refused_too() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, ".gitignore", "y/\n");
+        write_at(dir, "y", "the target's own bytes\n");
+        let target = commit_all(dir, "y is a file in the target");
+        git(dir, &["rm", "-q", "--", "y"]);
+        commit_all(dir, "y dropped from the tree");
+        repository_in(dir, "y");
+
+        let plan = plan_for(dir, &target);
+        assert_eq!(untracked_names(&plan.ignored_written), ["y (repository)"]);
+        let refusal = plan.guard().expect_err("the plan refuses");
+        assert_eq!(refusal.code.as_str(), "reset_preview_repository");
+        assert!(refusal.message.contains("`y`"), "{}", refusal.message);
+        assert!(
+            dir.join("y/own.txt").exists(),
+            "a refusal runs nothing, ignored or not"
+        );
     }
 
     /// The plan is built on the same target resolution the ordinary reset uses,
