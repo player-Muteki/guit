@@ -904,13 +904,16 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   .worktrees-view .ref-row .ref-name { flex: 1 1 auto; min-width: 0; }
   .worktrees-view .ref-row .ref-meta { flex: 1 1 100%; margin-left: 0; padding-left: 0; }
 
-  /* The head holds a count, a filter and the paging action, and at the minimum
-     width those three do not share a line: the button's own right edge sat 21px
-     past the viewport. A row that is not allowed to break does not lose a word,
-     it loses the box — and a paging button the pointer cannot land on is the
-     failure, not the row height it costs the list. So a break is allowed here,
-     and only where it must happen: at any width where the three fit, nothing
-     about this row moves. */
+  /* The head holds the branch it is drawn from, a count and the paging action.
+     At the minimum width those did not share a line: the button's own right
+     edge sat 21px past the viewport. That measurement was taken while the head
+     also carried the page's own find box, which is gone — the search field above
+     asks that question now — so this break is kept on a number that is one item
+     wider than the row it now guards, and re-measuring it is open work. A row
+     that is not allowed to break does not lose a word, it loses the box — and a
+     paging button the pointer cannot land on is the failure, not the row height
+     it costs the list. So a break is allowed here, and only where it must
+     happen: at any width where the parts fit, nothing about this row moves. */
   .history-list-head { flex-wrap: wrap; row-gap: 0.1rem; }
 }
 

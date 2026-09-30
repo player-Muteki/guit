@@ -164,7 +164,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
 
   // The bubble that answers the row the pointer rests on or the keyboard
   // moved to. It is a child of the view rather than of a row: the rows are
-  // replaced wholesale on every scroll, page and filter, so a layer inside one
+  // replaced wholesale on every scroll and every page, so a layer inside one
   // would be destroyed by the paint it is supposed to survive. It carries no
   // controls — only text, so that the 40-character id can be selected.
   const bubbleMessage = el("pre", { class: "bubble-message" });
