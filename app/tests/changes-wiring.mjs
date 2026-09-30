@@ -102,6 +102,18 @@ test("a clean that skips a path says why in a clean's words", () => {
   assert.doesNotMatch(label, /work-tree|working copy/i, "a clean's skip is not a work-tree statement");
 });
 
+test("a destructive ask that is refused for being busy says so", () => {
+  // A row's `⋯` menu is built when it opens, so its items outlive whatever the
+  // panel was doing at the time. A click that asks nothing must not read as a
+  // click that did nothing.
+  assert.match(preview, /if \(isWriteRunning\(\)\)\s*\{[\s\S]{0,160}setStatus\(`A write is still running/,
+    "the busy refusal has its own status line");
+  // And the two guards that a modal dialog makes unreachable stay silent, rather
+  // than inventing words for a state the user cannot be in.
+  assert.match(preview, /if \(!currentSnapshot\(\) \|\| pendingPreview\(\)\) return;/,
+    "the unreachable guards return without a message");
+});
+
 test("the verbs of one row are decided in one place", () => {
   // The menu offers a verb by a predicate and the renewal re-derives ids by the
   // same one. Two copies of that rule is how a delete starts asking about a file

@@ -155,6 +155,25 @@ release it belongs to did not measure.
   names read, a Git refusal re-reads nothing and leaves the graph on the branch
   it was drawing, and a write the backend would not start at all is said so
   rather than drawn as a repository that has not changed.
+- An untracked file can now be thrown away on its own. Its row's `⋯` menu carries a
+  Delete, and the confirmation that opens binds that one path: `git clean` is asked
+  for the named files and removes only the ones it agrees to remove, so dropping a
+  build artifact no longer costs a confirmation over every untracked thing in the
+  repository. A nested Git repository is never offered this way — Git will not list
+  one without a force guit does not apply, and a path Git would not list is reported
+  as not removed rather than quietly left in. The whole-repository clean keeps its own
+  button and its own promise, and the confirmation stores which of the two was read,
+  because a new file elsewhere in the working tree invalidates "everything untracked"
+  and is none of "these three" files' business. A confirmation whose files moved is
+  withdrawn instead of renewed against whatever survived — the list on screen is the
+  list being promised. A row menu that outlived the state it was built in is no
+  longer silent: asking for a clean while a write is running says the write is
+  running, instead of looking like a click that did nothing. The two shapes of a
+  clean and the row that may be deleted are decided in the file model and pinned by
+  its tests; that the delete sits on the row and the heading stays a whole-repository
+  clean is pinned as a claim about the sources, not measured in a drawn page — this
+  stage has no changes-area rendering probe, and the Git side is measured against the
+  one Linux host and Git version every other record here comes from.
 
 ### Changed
 
@@ -316,6 +335,18 @@ release it belongs to did not measure.
 
 ### Fixed
 
+- Discarding one changed file no longer discards the files whose names happen to fit
+  it. The path a confirmation binds comes out of Git's own listing, so it is a name
+  and never a pattern — but Git reads an unquoted pathspec as a pattern, and
+  `restore --worktree -- 's*.txt'` reverted every dirty file whose name matched. The
+  preview could not show what had been taken, because it lists the paths it was asked
+  about. Every pathspec guit sends is read as a literal now, measured against
+  `restore`, `add` and `clean`.
+- The commit draft no longer follows the panel into a second repository. Opening
+  another repository left the first one's message in the box with Amend still
+  ticked, and that amend would have been taken against the new HEAD. The draft
+  belongs to a repository session now, so a new session starts with an empty box;
+  a refresh of the repository already open still keeps what was typed.
 - The app bar no longer squeezes its own icon buttons below their declared box.
   Everything else on that row carries text that is allowed to lose a tail — the
   wordmark, the repository path and the branch chip are each capped by a

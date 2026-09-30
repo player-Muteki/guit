@@ -145,7 +145,20 @@ export function createPreviewController(
     args: Record<string, unknown>,
     currentFiles: readonly FileView[] | null,
   ): Promise<void> => {
-    if (!currentSnapshot() || isWriteRunning() || pendingPreview()) return;
+    // The one refusal that can actually be reached from outside the dialog: a
+    // row's `⋯` menu is built when it opens and stays open through a write the
+    // user started elsewhere, so its items outlive the state that made them
+    // inert. A click that asks nothing must not look like a click that did
+    // nothing.
+    if (isWriteRunning()) {
+      setStatus(`A write is still running; this ${labelFor(kind)} was not asked.`);
+      return;
+    }
+    // Both remaining guards are unreachable while the panel is on screen — the
+    // modal dialog makes the page behind it inert, and no repository means no
+    // changes area to click in — so they stay silent rather than invent words
+    // for a state the user cannot be in.
+    if (!currentSnapshot() || pendingPreview()) return;
     const snapshot = currentSnapshot();
     if (snapshot === null) return;
     setStatus(`Checking what this ${labelFor(kind)} would change…`);
