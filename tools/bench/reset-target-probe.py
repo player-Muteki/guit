@@ -170,6 +170,81 @@ def ask(repo: str, spec: str, label: str) -> None:
     )
 
 
+def triage(repo: str, spec: str, label: str) -> None:
+    """What a refusal can be told apart from, once the peel has already said no.
+
+    `rev-parse --verify --quiet X^{commit}` answers "exactly one commit" with one rc, and
+    answers "no commit", "not a commit" and "two commits" with the same rc. So a panel
+    that wants three different sentences has to ask three more questions, and the
+    questions it can ask are what this prints: the raw candidate listing, the listing
+    combined with a type requirement, one batched type query, and one peel per
+    candidate. Nothing is asserted; the cost column is the number of Git processes a
+    rule written from this answer would spend on a rejected target.
+    """
+    peel_code, peel_out, _ = run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{spec}^{{commit}}"], repo
+    )
+    _, raw, _ = run(["git", "rev-parse", f"--disambiguate={spec}"], repo)
+    combo_code, combo_out, combo_err = run(
+        ["git", "rev-parse", f"--disambiguate={spec}", "--verify", "--quiet", f"{spec}^{{commit}}"], repo
+    )
+    found = [line.split()[0] for line in raw.splitlines() if line.split()]
+    print(f"  {label:40} {spec[:18]:18}  peel rc={peel_code} -> {peel_out[:16] or '-'}")
+    print(f"  {'':40} --disambiguate alone : {len(found)} line(s) {raw.replace(chr(10), ' | ')[:96] or '-'}")
+    print(
+        f"  {'':40} --disambiguate + peel: rc={combo_code} -> {combo_out.replace(chr(10), ' | ')[:80] or '-'}"
+        f"{'  ' + combo_err[:60] if combo_err else ''}"
+    )
+    if found:
+        batch_code, batch_out, batch_err = hash_stdin(
+            repo, ["cat-file", "--batch-check"], ("\n".join(found) + "\n").encode()
+        )
+        shapes = [line.split()[1] if len(line.split()) > 1 else "-" for line in batch_out.splitlines()]
+        print(
+            f"  {'':40} one batch-check      : rc={batch_code} types={','.join(shapes) or '-'}"
+            f"{'  ' + batch_err[:60] if batch_err else ''}"
+        )
+        hits = [
+            oid
+            for oid in found
+            if run(["git", "rev-parse", "--verify", "--quiet", f"{oid}^{{commit}}"], repo)[0] == 0
+        ]
+        print(
+            f"  {'':40} peel per candidate   : {len(found)} process(es), {len(hits)} commit(s)"
+        )
+    else:
+        print(f"  {'':40} one batch-check      : no candidates to ask about")
+
+
+def type_filter(repo: str, spec: str, label: str) -> None:
+    """Whether `--type=commit` narrows the answer, so a triage needs no type query.
+
+    The candidate listing prints every object that bears the prefix, commit or not, which
+    leaves the count of *commits* to be asked somewhere else. `rev-parse` has a type
+    requirement of its own, so this asks whether it filters the listing as well as the
+    resolution — one process would then answer "how many commits" directly.
+    """
+    for pre in (
+        ["--disambiguate=" + spec, "--type=commit"],
+        ["--disambiguate=" + spec, "--disambiguate-prefix=verbatim", "--type=commit"],
+        ["--disambiguate=" + spec, "--type=commit", "--type=tree"],
+    ):
+        code, out, err = run(["git", "rev-parse", *pre, spec], repo)
+        lines = [line for line in out.splitlines() if line]
+        print(
+            f"  {'':40} {' '.join(a.split('=')[0] for a in pre):44}"
+            f": rc={code} {len(lines)} line(s) {','.join(line[:6] for line in lines)[:60] or '-'}"
+            f"{'  ' + err[:44] if err else ''}"
+        )
+    code, out, err = run(
+        ["git", "rev-parse", "--type=commit", "--verify", "--quiet", spec], repo
+    )
+    print(
+        f"  {'':40} {'--type=commit --verify --quiet':44}: rc={code} -> {out[:16] or '-'}"
+        f"{'  ' + err[:44] if err else ''}"
+    )
+
+
 def unshared_commit(store: list[tuple[str, str]]) -> str:
     """A commit no other object shares eight hex digits with.
 
@@ -307,6 +382,23 @@ def probe_format(root: str, name: str, algorithm: str | None) -> bool:
         if len(shared) >= 2:
             ask(repo, shared[1][:width], f"{width} hex, still two commits")
     ask(repo, clean, "the full id of one of them")
+
+    print("  --- telling the refusals apart ---")
+    triage(repo, prefix4, "the shared 4 hex")
+    type_filter(repo, prefix4, "the shared 4 hex")
+    triage(repo, prefix4[:3], "one hex shorter than that")
+    for kind in ("tree", "blob", "tag"):
+        found = [oid for oid, seen in store if seen == kind]
+        if found:
+            triage(repo, found[0], f"full id of a {kind}")
+    blob = [oid for oid, seen in store if seen == "blob"]
+    if blob:
+        type_filter(repo, blob[0], "full id of a blob")
+    triage(repo, "f" * hex_len, "a full-width id of nothing")
+    type_filter(repo, "f" * hex_len, "a full-width id of nothing")
+    triage(repo, "a" * (40 if hex_len == 64 else 64), "hex of the other width")
+    triage(repo, clean.upper(), "the upper case full id")
+    type_filter(repo, clean.upper(), "the upper case full id")
     return True
 
 
