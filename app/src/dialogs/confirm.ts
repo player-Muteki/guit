@@ -1,20 +1,28 @@
 // Destructive-operation confirmation as a native modal <dialog>.
 //
 // One dialog serves every ticket kind (discard, clean, branch, tag, stash
-// pop/drop, hard reset, worktree/remote removal, remote-branch delete and
-// force push). The copy table travels with each request so the wording for
-// a given kind always travels with the single-use nonce it belongs to.
+// pop/drop, hard reset, a clean restore, worktree/remote removal, remote-branch
+// delete and force push). The copy table travels with each request so the wording
+// for a given kind always travels with the single-use nonce it belongs to.
 // Escape and Cancel both take the cancel path, which consumes nothing on the
 // server; focus returns to the element that opened the dialog.
 
 import { currentActivator, el, icon } from "../dom";
+import { shortId, type RestoreSection } from "../restoreModel";
 import type { PreviewCopy } from "../types";
+
+// Every kind except a clean restore is asked about one set of paths, so it is
+// shown as one list. A restore touches six classes under six different verbs and
+// owes each one its own heading — see `restoreModel.ts` for why they cannot be
+// flattened into one promise.
+export type ConfirmNames =
+  | { candidates: string[]; targetOid: string | null }
+  | { heading: string; sections: RestoreSection[] };
 
 export type ConfirmRequest = PreviewCopy & {
   kind: string;
-  candidates: string[];
   dropped: string[];
-  targetOid: string | null;
+  names: ConfirmNames;
 };
 
 export interface ConfirmDialog {
@@ -38,14 +46,14 @@ export interface ConfirmDialog {
 export function createConfirmDialog(onFocusFallback?: () => void): ConfirmDialog {
   let opener: HTMLElement | null = null;
   const warning = el("p", { class: "dialog-warning", role: "alert" });
-  const list = el("ul", { class: "dialog-list" });
+  const names = el("div", { class: "dialog-names" });
   const dropped = el("p", { class: "dialog-note" });
   const confirmButton = el("button", { class: "btn btn-danger", type: "button" });
   const cancelButton = el("button", { class: "btn", type: "button", text: "Cancel" });
   const element = el("dialog", { class: "dialog dialog-confirm", "aria-label": "Confirm destructive operation" }, [
     el("h2", { class: "dialog-title" }, [icon("warning"), el("span", { text: "Confirm" })]),
     warning,
-    list,
+    names,
     dropped,
     el("div", { class: "dialog-actions" }, [cancelButton, confirmButton]),
   ]);
@@ -105,13 +113,7 @@ export function createConfirmDialog(onFocusFallback?: () => void): ConfirmDialog
     confirmButton.textContent = request.confirm;
     cancelButton.textContent = request.cancel;
     element.setAttribute("aria-label", `${request.confirm}: ${request.kind}`);
-    list.replaceChildren(
-      ...request.candidates.map((name) =>
-        el("li", {
-          text: request.targetOid ? `${name} · at ${request.targetOid.slice(0, 10)}` : name,
-        }),
-      ),
-    );
+    names.replaceChildren(...nameNodes(request.names));
     dropped.hidden = request.dropped.length === 0;
     dropped.textContent = `${request.droppedLabel ?? "Skipped (no work-tree changes)"}: ${request.dropped.join(", ")}`;
     if (!element.open) element.showModal();
@@ -130,4 +132,27 @@ export function createConfirmDialog(onFocusFallback?: () => void): ConfirmDialog
     onConfirm(handler) { onConfirm = handler; },
     onCancel(handler) { onCancel = handler; },
   };
+}
+
+function nameList(items: string[], annotate: (name: string) => string): HTMLElement {
+  return el("ul", { class: "dialog-list" }, items.map((item) => el("li", { text: annotate(item) })));
+}
+
+// One flat list, or one heading and a section per class of path. The dialog draws
+// whichever the ticket carries and never decides for itself which is the case.
+function nameNodes(names: ConfirmNames): Node[] {
+  if ("candidates" in names) {
+    const oid = names.targetOid;
+    return [nameList(names.candidates, (name) => (oid === null ? name : `${name} · at ${shortId(oid)}`))];
+  }
+  const nodes: Node[] = [el("p", { class: "dialog-target", text: names.heading })];
+  for (const section of names.sections) {
+    nodes.push(
+      el("section", { class: "dialog-section" }, [
+        el("h3", { class: "dialog-section-label", text: section.label }),
+        nameList(section.items, (name) => name),
+      ]),
+    );
+  }
+  return nodes;
 }

@@ -8,12 +8,15 @@
 // again. A ticket that was asked about files renews by turning the names it
 // showed back into ids of the new snapshot, which is the only handle they still
 // have; a ticket that was asked about the repository as a whole restates itself
-// the same way it was first asked. The confirm event carries the ticket's
-// `kind` and `nonce`; the owning view maps the kind to its backend command and
-// only ever sends `{ nonce }`.
+// the same way it was first asked. A clean restore is asked about a commit, so it
+// restates itself by the text that was typed and shows the six classes of path its
+// ticket binds as six sections rather than one list. The confirm event carries the
+// ticket's `kind` and `nonce`; the owning view maps the kind to its backend command
+// and only ever sends `{ nonce }`.
 
 import { invoke } from "@tauri-apps/api/core";
 import { cleanEligible, discardEligible, idsForNames } from "../fileModel";
+import { restoreReading } from "../restoreModel";
 import {
   applySnapshot,
   currentSnapshot,
@@ -23,8 +26,8 @@ import {
   setStatus,
   type PendingPreview,
 } from "../state";
-import type { FileView, PreviewCopy, PreviewKindKey, PreviewResult } from "../types";
-import { createConfirmDialog, type ConfirmDialog } from "./confirm";
+import type { FileView, PreviewCopy, PreviewKindKey, PreviewResult, RestorePreviewResult } from "../types";
+import { createConfirmDialog, type ConfirmDialog, type ConfirmNames } from "./confirm";
 
 const previewCopy: Record<PreviewKindKey, PreviewCopy> = {
   discard: {
@@ -73,6 +76,12 @@ const previewCopy: Record<PreviewKindKey, PreviewCopy> = {
     cancel: "Keep everything",
     droppedLabel: "Commits left behind",
   },
+  restore: {
+    warning:
+      "A clean restore moves this branch to the selected commit, overwrites the listed changes, and deletes the listed untracked files. Every path below is one the restore touches, each by a different step. The commits it leaves behind become unreachable and Git may garbage-collect them; a path guit does not enter stays on disk. This cannot be undone from guit.",
+    confirm: "Restore to clean state",
+    cancel: "Keep everything",
+  },
   worktreeRemove: {
     warning:
       "Removing unregisters this linked worktree and deletes its Git metadata link. guit never forces: if the worktree has uncommitted work, Git itself refuses and nothing is removed.",
@@ -117,13 +126,13 @@ export function createPreviewController(
     }
     const forced = pending.kind === "branch" && pending.branch.force;
     const copy = forced ? branchForceCopy : previewCopy[pending.kind];
-    dialog.show({
-      kind: pending.kind,
-      candidates: pending.names,
-      dropped: pending.dropped,
-      targetOid: targetOidOf(pending),
-      ...copy,
-    });
+    // A restore is the one ticket that is not asked about one set of paths, so it
+    // is the one shown as sections; every other kind shows the list Git named.
+    const names: ConfirmNames =
+      pending.kind === "restore"
+        ? restoreReading(pending.restore.preview)
+        : { candidates: pending.names, targetOid: targetOidOf(pending) };
+    dialog.show({ kind: pending.kind, dropped: pending.dropped, names, ...copy });
   };
 
   dialog.onConfirm(() => {
@@ -163,6 +172,25 @@ export function createPreviewController(
     if (snapshot === null) return;
     setStatus(`Checking what this ${labelFor(kind)} would change…`);
     try {
+      // A restore is the one kind that does not answer with a candidate list: it
+      // returns the classes of path its ticket binds. It is also the one renewed by
+      // the text that was typed rather than by the names it showed, because those
+      // names are six lists at once and none of them is a file the user clicked.
+      if (kind === "restore") {
+        const preview = await invoke<RestorePreviewResult>(commandFor(kind), {
+          snapshotVersion: snapshot.version,
+          target: args.target,
+        });
+        applySnapshot(preview.snapshot);
+        setPendingPreview({
+          kind: "restore",
+          dropped: [],
+          nonce: preview.nonce,
+          restore: { target: String(args.target), preview },
+        });
+        showPending();
+        return;
+      }
       const preview = await invoke<PreviewResult>(commandFor(kind), { snapshotVersion: snapshot.version, ...args });
       applySnapshot(preview.snapshot);
       files = currentFiles ?? [];
@@ -205,6 +233,26 @@ export function createPreviewController(
         }
         args = { fileIds: ids };
       }
+      if (pending.kind === "restore") {
+        // The renewal hands Git the text that was typed again, because that is all
+        // the ticket has: the six lists it showed are display names of paths, and a
+        // target that no longer names exactly one commit is refused below rather
+        // than carried over as the commit it named last time.
+        const preview = await invoke<RestorePreviewResult>(commandFor(pending.kind), {
+          snapshotVersion: snapshot.version,
+          ...args,
+        });
+        applySnapshot(preview.snapshot);
+        setPendingPreview({
+          kind: "restore",
+          dropped: [],
+          nonce: preview.nonce,
+          restore: { target: pending.restore.target, preview },
+        });
+        showPending();
+        setStatus("The status changed; the preview was recomputed.");
+        return;
+      }
       const preview = await invoke<PreviewResult>(commandFor(pending.kind), {
         snapshotVersion: snapshot.version,
         ...args,
@@ -245,6 +293,7 @@ function labelFor(kind: PreviewKindKey): string {
     case "stashDrop": return "stash deletion";
     case "stashPop": return "stash pop";
     case "resetHard": return "hard reset";
+    case "restore": return "clean restore";
     case "worktreeRemove": return "worktree removal";
   }
 }
@@ -258,6 +307,7 @@ function commandFor(kind: PreviewKindKey): string {
     case "stashDrop": return "preview_stash_drop";
     case "stashPop": return "preview_stash_pop";
     case "resetHard": return "preview_reset_hard";
+    case "restore": return "preview_restore";
     case "worktreeRemove": return "preview_remove_worktree";
   }
 }
@@ -269,6 +319,7 @@ function requestArgs(pending: PendingPreview): Record<string, unknown> {
     case "stashDrop":
     case "stashPop": return { index: pending.stash.index };
     case "resetHard": return { target: pending.reset.target };
+    case "restore": return { target: pending.restore.target };
     case "worktreeRemove": return { index: pending.worktree.index };
     case "discard":
     case "clean": return {};
@@ -286,7 +337,12 @@ function targetOidOf(pending: PendingPreview): string | null {
   }
 }
 
-function build(kind: PreviewKindKey, preview: PreviewResult, args: Record<string, unknown>): PendingPreview {
+// A restore is built and renewed outside these two: its preview is not a
+// `PreviewResult`, and the ticket carries it whole rather than a candidate list.
+type FlatPreviewKind = Exclude<PreviewKindKey, "restore">;
+type FlatTicket = Exclude<PendingPreview, { kind: "restore" }>;
+
+function build(kind: FlatPreviewKind, preview: PreviewResult, args: Record<string, unknown>): PendingPreview {
   const base = { names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
   switch (kind) {
     case "discard": return { kind, ...base };
@@ -306,7 +362,7 @@ function build(kind: PreviewKindKey, preview: PreviewResult, args: Record<string
 // payload) and swaps only what the fresh preview computed. The fields are
 // listed one arm at a time rather than spread from `pending`, so the
 // discriminant of the returned ticket is provably the matched arm.
-function rebuild(pending: PendingPreview, preview: PreviewResult): PendingPreview {
+function rebuild(pending: FlatTicket, preview: PreviewResult): PendingPreview {
   const names = preview.candidates;
   const dropped = preview.dropped;
   const nonce = preview.nonce;

@@ -117,6 +117,25 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   });
   const commitAmend = el("input", { id: "commit-amend", type: "checkbox" });
   const commitButton = el("button", { class: "btn btn-primary", id: "commit-button", type: "button", text: "Commit" });
+  // The clean restore is asked about a commit the panel has never read: whatever
+  // the user types is handed to Git, which decides whether it names one. The field
+  // is therefore not a picker over the graph below it, and an abbreviation is not
+  // expanded here — only Git resolves an id, and what comes back is the id it
+  // resolved, never the text.
+  const resetTarget = el("input", {
+    id: "reset-target",
+    class: "reset-input",
+    type: "text",
+    spellcheck: false,
+    placeholder: "Commit to restore to — full id or a unique abbreviation",
+    "aria-label": "Commit to restore to",
+  });
+  const resetButton = el("button", {
+    class: "btn btn-danger",
+    id: "reset-button",
+    type: "button",
+    text: "Reset to clean state…",
+  });
   const commitFooter = el("div", { class: "commit-footer" }, [
     commitMessage,
     el("div", { class: "commit-row" }, [
@@ -124,6 +143,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
       el("div", { class: "spacer" }),
       commitButton,
     ]),
+    el("div", { class: "reset-row" }, [resetTarget, resetButton]),
   ]);
 
   element.append(activityLine, operationBanner, fileList, emptyState, commitFooter);
@@ -232,6 +252,14 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   // live in the snapshot that produced them.
   const requestClean = (fileIds: number[]): void => {
     void deps.preview.request("clean", { fileIds }, currentFiles);
+  };
+
+  // The restore is the one write in this area asked about a commit rather than
+  // about the rows on screen, so it hands the preview nothing but the text — and no
+  // live file list, because its ticket is renewed by that text and not by names.
+  // Whether the text names one commit is Git's decision, never this view's.
+  const requestRestore = (): void => {
+    void deps.preview.request("restore", { target: resetTarget.value }, null);
   };
 
   const runOperationStep = async (
@@ -397,8 +425,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   };
 
   // --- rendering ---
-  const renderFiles = (files: FileView[]): void => {
-    currentFiles = files;
+  const renderFiles = (files: FileView[]): void => {    currentFiles = files;
     if (files.length === 0) {
       listRows = [];
       selectedRow = -1;
@@ -473,11 +500,18 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
       draftSession = sessionId;
       commitMessage.value = "";
       commitAmend.checked = false;
+      // A target typed for one repository is a commit in that repository, and the
+      // id means something else — or nothing — in the next one.
+      resetTarget.value = "";
     }
     const locked = snapshot === null || isWriteRunning();
     commitMessage.disabled = locked;
     commitAmend.disabled = locked;
     commitButton.disabled = locked;
+    // A dialog that is already open holds the one confirmation this button asks
+    // for; a second click cannot ask for a second one.
+    resetTarget.disabled = locked;
+    resetButton.disabled = locked || pendingPreview() !== null;
     renderOperationBanner();
     renderFiles(snapshot?.files ?? []);
     renderActivity();
@@ -488,6 +522,16 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   operationSkip.addEventListener("click", () => void runOperationStep("operation_skip", "Skipping the current step…"));
   operationAbort.addEventListener("click", () => void runOperationStep("operation_abort", "Aborting the operation…"));
   commitButton.addEventListener("click", () => void commitNow());
+  resetButton.addEventListener("click", requestRestore);
+  // Enter asks for the preview, which is the only thing Enter can honestly do
+  // here: the confirmation it opens is a separate press, and a restore that ran
+  // straight from a keystroke would be a write with nothing in front of it.
+  resetTarget.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      requestRestore();
+    }
+  });
   commitMessage.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();

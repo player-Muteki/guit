@@ -9,6 +9,7 @@
 
 import type {
   ActivityView,
+  RestorePreviewResult,
   SnapshotView,
   StatusKind,
   StatusLine,
@@ -94,6 +95,18 @@ export type PendingPreview =
       stash?: undefined;
       reset: { target: string };
       worktree?: undefined;
+    }
+  | {
+      // The restore's promise is not one list of paths: the two steps touch six
+      // classes and each carries its own verb. The ticket therefore carries the
+      // preview it was made from, so what the dialog grouped is exactly what the
+      // confirmation re-reads. `target` is the text that was typed — the renewal
+      // asks Git to resolve it again, and a target that no longer names one
+      // commit is refused rather than carried over.
+      kind: "restore";
+      dropped: string[];
+      nonce: string;
+      restore: { target: string; preview: RestorePreviewResult };
     }
   | {
       kind: "worktreeRemove";

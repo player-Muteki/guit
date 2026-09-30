@@ -60,10 +60,7 @@ pub(crate) enum Bound {
     /// paths removed and written over, and the repositories that must still
     /// not be in the way. A plan read out of a ticket can therefore never be
     /// narrower than the plan that was shown.
-    Restore {
-        #[allow(dead_code)] // read by the confirmation this ticket is staged for
-        plan: crate::reset::Restoration,
-    },
+    Restore { plan: crate::reset::Restoration },
     /// Remove a worktree bound to the HEAD it had when previewed.
     WorktreeRemove { path: String, head: String },
 }

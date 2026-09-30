@@ -339,6 +339,7 @@ const SNAPSHOT_BOUND = [
   "revert_commit",
   "reset",
   "preview_reset_hard",
+  "preview_restore",
   "add_worktree",
   "preview_remove_worktree",
   "prune_worktrees",
@@ -354,6 +355,7 @@ const TICKET_BOUND = [
   "stash_pop",
   "stash_drop",
   "reset_hard",
+  "restore_clean",
   "remove_worktree",
 ];
 

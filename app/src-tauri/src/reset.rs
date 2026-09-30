@@ -373,12 +373,9 @@ pub(crate) struct Difference {
 pub(crate) struct Restoration {
     /// The commit the restore goes to, and the one it leaves, both full ids as
     /// Git resolved them — never the text that was typed.
-    #[allow(dead_code)] // read by the ticket these sets become
     pub target_oid: String,
-    #[allow(dead_code)]
     pub head_oid: String,
     /// Every path the two trees disagree about.
-    #[allow(dead_code)]
     pub differences: Vec<Difference>,
     /// Every tracked change the working copy or the index is carrying: exactly
     /// what the restore throws away. Measured, not narrowed — a hand edit on a
@@ -386,7 +383,6 @@ pub(crate) struct Restoration {
     /// this list with `differences` would promise "nothing is dropped" and then
     /// drop a file, and a path staged but never committed is dirty in the index
     /// only, which `clean` never lists and `reset --hard` removes from disk.
-    #[allow(dead_code)]
     pub discarded: Vec<Vec<u8>>,
     /// Untracked paths the restore writes, because the target holds the path
     /// itself or a path above it. A claim about scope, not about bytes: a file
@@ -399,7 +395,6 @@ pub(crate) struct Restoration {
     /// call these untracked. The restore writes them all the same, so the preview
     /// names them before the write instead of letting the ignore rule imply they
     /// were safe.
-    #[allow(dead_code)] // read by the ticket these sets become
     pub ignored_written: Vec<Untracked>,
     /// Untracked paths a fresh `git clean -nd` agrees to remove, less anything
     /// the restore writes — `clean` is silent about a path the reset has just
@@ -422,7 +417,6 @@ impl Restoration {
     /// writes it, and saying so belongs in the preview, not in a rejection. An
     /// ignored *repository* is here: a rule that sets a path aside says nothing
     /// about what a write through it destroys.
-    #[allow(dead_code)] // goes away with the command that stages this preview
     pub(crate) fn guard(&self) -> Result<(), ProbeError> {
         let Some(first) = self.blocked.first() else {
             return Ok(());
@@ -625,7 +619,6 @@ fn ignored_paths(work_root: &Path) -> Result<Vec<Untracked>, ProbeError> {
 /// target that is not exactly one commit has nothing to be previewed against;
 /// then the two tree reads, then the working copy, then what `clean` itself
 /// agrees to remove, then the paths the ignore rules cover.
-#[allow(dead_code)] // goes away with the command that stages this preview
 pub(crate) fn plan_restore(
     work_root: &Path,
     sessions: &session::SessionState,
@@ -682,7 +675,6 @@ pub(crate) fn plan_restore(
 /// One entry of a listing as the panel shows it: the exact path Git named,
 /// plus the one fact a path cannot carry by itself — that this entry is
 /// somebody else's repository.
-#[allow(dead_code)] // one formatting place for the lists the ticket also binds
 fn untracked_name(item: &Untracked) -> String {
     let mut name = model::display_name(&item.raw);
     if item.repository {
@@ -691,7 +683,6 @@ fn untracked_name(item: &Untracked) -> String {
     name
 }
 
-#[allow(dead_code)]
 fn untracked_names(list: &[Untracked]) -> Vec<String> {
     list.iter().map(untracked_name).collect()
 }
@@ -702,7 +693,6 @@ fn untracked_names(list: &[Untracked]) -> Vec<String> {
 /// from this one computation rather than from a second, narrower one.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // goes away with the command that returns this preview
 pub(crate) struct RestorePreview {
     pub nonce: String,
     /// Both ids as Git resolved them, never the text that was typed.
@@ -732,7 +722,6 @@ pub(crate) struct RestorePreview {
 /// the target writes leaves no confirmation to click. The plan is moved into
 /// the ticket unchanged — every set the preview lists above is a set the
 /// confirmation re-reads, so a page cannot show one promise and bind another.
-#[allow(dead_code)] // goes away with the command that stages this preview
 pub(crate) fn preview_restore(
     state: &WriteState,
     sessions: &session::SessionState,
@@ -1099,7 +1088,6 @@ fn read_aftermath(
 /// The clean restore's confirmation: the ticket goes first, the whole plan is
 /// re-read against it, and only then do the two Git steps run — each recorded
 /// with what it actually did.
-#[allow(dead_code)] // goes away with the command that consumes this ticket
 pub(crate) fn restore_clean(
     state: &WriteState,
     sessions: &session::SessionState,

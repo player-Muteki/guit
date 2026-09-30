@@ -275,6 +275,7 @@ preview.onConfirm((pending) => {
       case "stashDrop": return confirmTicket("stash_drop", nonce, "Deleting stash entry…");
       case "stashPop": return confirmTicket("stash_pop", nonce, "Popping stash entry…");
       case "resetHard": return confirmTicket("reset_hard", nonce, "Hard resetting…");
+      case "restore": return confirmTicket("restore_clean", nonce, "Restoring to a clean state…");
       case "worktreeRemove": return confirmTicket("remove_worktree", nonce, "Removing worktree…");
     }
   })();

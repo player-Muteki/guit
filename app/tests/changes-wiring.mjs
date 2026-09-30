@@ -1,17 +1,21 @@
-// The changes area's two wiring promises, gated over the sources.
+// The changes area's wiring promises, gated over the sources.
 //
-// Both are facts about where code sits rather than what it computes, so they
+// These are facts about where code sits rather than what it computes, so they
 // cannot be checked where the models are pure: the commit draft is a textarea a
-// document owns, and a row's action menu is built inside a virtual list that only
-// exists on screen. Each is a way the panel could quietly start lying about what
-// it will do to your repository — a draft that survives a switch of repository is
-// a message about A that commits into B, and a "Delete" on an untracked row that
-// asks the whole-repository clean removes files nobody clicked.
+// document owns, a row's action menu is built inside a virtual list that only
+// exists on screen, and the reset row is a text input whose whole promise is that
+// nothing but a session change touches what is typed into it. Each is a way the
+// panel could quietly start lying about what it will do to your repository — a
+// draft that survives a switch of repository is a message about A that commits
+// into B, a "Delete" on an untracked row that asks the whole-repository clean
+// removes files nobody clicked, and an Enter that ran the write it was only
+// supposed to preview would move a branch past commits with nothing in between.
 //
-// The rules those two depend on are tested as computation, not as text:
+// The rules those promises rest on are tested as computation, not as text:
 // `file-model.mjs` for which row a verb may be offered for and how a renewed
-// ticket turns names back into ids, and the Rust suite for what a bound ticket
-// agrees to remove.
+// ticket turns names back into ids, `restore-model.mjs` for how a restore's six
+// classes of path are read out, and the Rust suite for what a bound ticket agrees
+// to remove.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -43,8 +47,7 @@ test("a new repository session clears the commit draft, a refresh does not", () 
     "a refused or failed commit keeps the text, which is input the user owns");
 });
 
-test("the session identity is declared as one that never moves on a refresh", () => {
-  // The clearing rule is only safe because of what `sessionId` is. If that
+test("the session identity is declared as one that never moves on a refresh", () => {  // The clearing rule is only safe because of what `sessionId` is. If that
   // promise in the type ever changed, this gate is where it has to be re-read.
   const types = source("types.ts");
   const snapshot = types.match(/export type SnapshotView = \{[\s\S]*?\n\};/);
@@ -53,8 +56,44 @@ test("the session identity is declared as one that never moves on a refresh", ()
   assert.match(snapshot[0], /never on a refresh/, "and says so where the field is declared");
 });
 
-// --- a row's removal verb ---
+// --- the clean restore's ask ---
 
+test("the reset target is cleared by a session, never by a refresh", () => {
+  // The same rule that keeps a commit draft out of the wrong repository: a typed
+  // id names a commit *in this one*, so it travels with the session that minted it
+  // and with nothing else.
+  const guard = changes.match(
+    /if \(sessionId !== draftSession\)[\s\S]*?\n\s*\}/,
+  );
+  assert.ok(guard, "render() must keep one session guard");
+  assert.match(guard[0], /resetTarget\.value = "";/, "the reset input is cleared with the draft");
+  const writes = changes.match(/resetTarget\.value\s*=/g) ?? [];
+  assert.equal(writes.length, 1, "nothing but the session guard may write the box — a refresh leaves it alone");
+});
+
+test("Enter at the reset row asks for a preview and never runs a write", () => {
+  // "直接按 Enter 不能绕过确认": the keystroke is allowed to open the confirmation,
+  // and the confirmation is the only thing that can consume a ticket.
+  const enter = changes.match(/resetTarget\.addEventListener\("keydown", \(event\) => \{[\s\S]*?\n  \}\);/);
+  assert.ok(enter, "the reset input has its own key handler");
+  assert.match(enter[0], /if \(event\.key === "Enter"\)/, "and it answers Enter");
+  assert.match(enter[0], /event\.preventDefault\(\);/, "so the page never submits a form it has no form in");
+  assert.match(enter[0], /requestRestore\(\);/, "and the one thing it does is the ask");
+  assert.doesNotMatch(enter[0], /invoke\(/, "no command leaves this handler but through the ticket flow");
+  const ask = changes.match(/const requestRestore = \(\): void => \{[\s\S]*?\};/);
+  assert.ok(ask, "the view owns one requestRestore");
+  assert.match(ask[0], /preview\.request\("restore", \{ target: resetTarget\.value \}, null\)/,
+    "it hands the preview the typed text and no file list, because that text is what renews it");
+});
+
+test("a second ask cannot be made while a ticket is open", () => {
+  // One confirmation is the whole rule; a second click that queued a second
+  // preview would be a second ticket for the same promise.
+  assert.match(changes, /resetButton\.disabled = locked \|\| pendingPreview\(\) !== null;/,
+    "the reset ask goes inert with a ticket up, the way a row's delete does");
+});
+
+// --- a row's removal verb ---
 test("an untracked row is offered a delete, and it asks for that path alone", () => {
   // `Delete` must be the scoped clean: a file ids list holding this row's id.
   const scoped = changes.match(

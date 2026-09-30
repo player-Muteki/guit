@@ -287,12 +287,15 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
   confirm.onConfirm(() => void doExport());
   const exportRequest: ConfirmRequest = {
     kind: "diagnostics",
-    candidates: [
-      "App, OS and Git versions, and the Git executable location (home folder shown as ~)",
-      "The filesystem-watch mode",
-      "Config file names, sizes and schema versions — never their contents",
-      "The 256 most recent event summaries: phase timings, error codes and messages",
-    ],
+    names: {
+      candidates: [
+        "App, OS and Git versions, and the Git executable location (home folder shown as ~)",
+        "The filesystem-watch mode",
+        "Config file names, sizes and schema versions — never their contents",
+        "The 256 most recent event summaries: phase timings, error codes and messages",
+      ],
+      targetOid: null,
+    },
     dropped: [
       "passwords",
       "tokens",
@@ -303,7 +306,6 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
       "file contents",
       "repository paths",
     ],
-    targetOid: null,
     warning: "guit will write a plain-text diagnostics report to a file you choose. It contains:",
     confirm: "Export…",
     cancel: "Cancel",
