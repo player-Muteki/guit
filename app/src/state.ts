@@ -24,10 +24,27 @@ export const VIEW_ORDER: readonly ViewId[] = ["main", "settings"];
 
 export type PendingPreview =
   | {
-      kind: "discard" | "clean";
+      kind: "discard";
       names: string[];
       dropped: string[];
       nonce: string;
+      branch?: undefined;
+      tag?: undefined;
+      stash?: undefined;
+      reset?: undefined;
+      worktree?: undefined;
+    }
+  | {
+      kind: "clean";
+      names: string[];
+      dropped: string[];
+      nonce: string;
+      // Which of the two cleans this ticket is: the whole repository's untracked
+      // set, or exactly the paths that were clicked. `names` cannot tell them
+      // apart — one untracked file reads the same either way — and the two are
+      // renewed and rechecked by different rules, so the promise that was made
+      // travels with the ticket. Mirrors the backend's `Bound::Clean`.
+      allUntracked: boolean;
       branch?: undefined;
       tag?: undefined;
       stash?: undefined;

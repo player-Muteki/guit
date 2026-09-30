@@ -4,6 +4,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   buildRows,
+  cleanEligible,
+  discardEligible,
+  idsForNames,
   listRowRole,
   nextSelectableRow,
   revealScroll,
@@ -159,4 +162,55 @@ test("scroll offsets stay consistent with the assumed height across the list", (
   assert.equal(slice.totalHeight, 1000 * height);
   assert.equal(slice.offsetY, slice.startIndex * height);
   assert.equal(slice.startIndex, 20);
+});
+
+// A destructive ticket is issued against one snapshot and its file ids die with
+// it, so a renewal can only re-address the same set by the names it showed the
+// user. These are the rules that turn a list of names back into a list of ids —
+// or refuse to, which is the same decision the backend makes when it rechecks a
+// ticket against fresh Git state.
+
+test("a name that matches one eligible row renews as that row's id", () => {
+  const files = [file(7, "worktree", "src/a.ts"), file(8, "untracked", "out.js")];
+  assert.deepEqual(idsForNames(files, ["src/a.ts"], discardEligible), [7]);
+  assert.deepEqual(idsForNames(files, ["out.js"], cleanEligible), [8]);
+});
+
+test("a renewed list keeps the order the user read", () => {
+  const files = [file(1, "untracked", "b.txt"), file(2, "untracked", "a.txt")];
+  assert.deepEqual(idsForNames(files, ["a.txt", "b.txt"], cleanEligible), [2, 1]);
+});
+
+test("a name whose row is gone refuses the renewal instead of renewing less", () => {
+  const files = [file(1, "untracked", "kept.txt")];
+  assert.equal(idsForNames(files, ["kept.txt", "gone.txt"], cleanEligible), null);
+});
+
+test("a name carried by two rows is not guessed between them", () => {
+  // A display name is lossy: two different raw paths can render the same text.
+  // The renewal cannot tell which one the user read, so it claims neither.
+  const files = [file(1, "untracked", "same.txt"), file(2, "untracked", "same.txt")];
+  assert.equal(idsForNames(files, ["same.txt"], cleanEligible), null);
+});
+
+test("a row that changed kind is not the row the ticket was shown for", () => {
+  // The discard ticket was offered for a work-tree change; the same path now
+  // reads as untracked, which is a different promise about a different verb.
+  const untracked = [file(3, "untracked", "moved.txt")];
+  assert.equal(idsForNames(untracked, ["moved.txt"], discardEligible), null);
+  // And the other way round: a clean asked about a path that has since been
+  // tracked must not stage its removal as a discard.
+  const tracked = [file(4, "worktree", "moved.txt")];
+  assert.equal(idsForNames(tracked, ["moved.txt"], cleanEligible), null);
+});
+
+test("only a work-tree change can be discarded, only an untracked path can be cleaned", () => {
+  assert.equal(discardEligible(file(1, "worktree")), true);
+  assert.equal(discardEligible(file(2, "staged")), false, "a staged change is unstaged, not discarded");
+  assert.equal(discardEligible(file(3, "untracked")), false, "an untracked file has nothing to revert to");
+  assert.equal(discardEligible(file(4, "conflict")), false, "a conflict is resolved, not discarded");
+  assert.equal(cleanEligible(file(5, "untracked")), true);
+  assert.equal(cleanEligible(file(6, "worktree")), false);
+  assert.equal(cleanEligible(file(7, "staged")), false);
+  assert.equal(cleanEligible(file(8, "conflict")), false);
 });

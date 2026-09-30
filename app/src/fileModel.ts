@@ -148,3 +148,47 @@ export function revealScroll(
   }
   return scrollTop;
 }
+
+// A discard reverts a work-tree change, so it owns only a file whose work tree
+// differs from the index. A conflict has its own verbs and an untracked file has
+// no HEAD side to revert to, so neither is discardable.
+export function discardEligible(file: FileView): boolean {
+  return file.unstaged && !file.conflict && !file.untracked;
+}
+
+// A clean removes an untracked path. Which untracked paths Git itself agrees to
+// remove — ignored files and nested repositories among them — is the backend's
+// answer, not this one; this predicate only says which row can be asked.
+export function cleanEligible(file: FileView): boolean {
+  return file.untracked;
+}
+
+// The file ids a renewed ticket has to ask for, rebuilt from the names it showed
+// the user. A ticket is issued against one snapshot and its ids die with it, so
+// a renewal can only re-address the same set by name.
+//
+// Returns null — "this ticket cannot be renewed" — when a name matches no
+// eligible row or matches more than one. Both are the same failure seen from
+// different sides: the list on the screen is no longer a list the new snapshot
+// can act on, and any subset of it would be a different promise than the one the
+// user read. A display name is lossy (it is produced from raw path bytes that
+// may not survive the round trip), so more than one row can carry the same text;
+// that is why a duplicate is checked for rather than assumed impossible.
+export function idsForNames(
+  files: readonly FileView[],
+  names: readonly string[],
+  eligible: (file: FileView) => boolean,
+): number[] | null {
+  const ids: number[] = [];
+  for (const name of names) {
+    let found: number | null = null;
+    for (const file of files) {
+      if (file.display !== name || !eligible(file)) continue;
+      if (found !== null) return null;
+      found = file.id;
+    }
+    if (found === null) return null;
+    ids.push(found);
+  }
+  return ids;
+}

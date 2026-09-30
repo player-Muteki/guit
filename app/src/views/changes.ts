@@ -2,13 +2,15 @@
 // (conflicts / staged / worktree / untracked) on the shared virtual list, and
 // the fixed commit footer. Row actions follow one density rule: Stage and
 // Unstage stay visible because they are the everyday verbs; Open, Diff,
-// Diff staged, Resolve and Discard live in a per-row `⋯` menu. Group
+// Diff staged, Resolve, Discard and Delete live in a per-row `⋯` menu. Group
 // headings keep the batch actions (Stage all / Unstage all / Discard all /
 // Clean…) because they act on a whole group, not one row.
 
 import { invoke } from "@tauri-apps/api/core";
 import {
   buildRows,
+  cleanEligible,
+  discardEligible,
   listRowRole,
   nextSelectableRow,
   revealScroll,
@@ -131,11 +133,12 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   const collapsedGroups = new Set<FileGroupKey>();
   let selectedRow = -1;
   let selectedFileId: number | null = null;
+  // The session the commit draft on screen was written for. `null` is also the
+  // value of "no repository open", so a closed session clears the draft just
+  // like switching to another repository does.
+  let draftSession: number | null = null;
 
   // --- helpers ---
-  const discardEligible = (file: FileView): boolean =>
-    file.unstaged && !file.conflict && !file.untracked;
-
   const syncSelection = (): void => {
     if (selectedFileId === null) {
       selectedRow = -1;
@@ -222,10 +225,13 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     void deps.preview.request("discard", { fileIds }, currentFiles);
   };
 
-  // The group heading's promise is "everything untracked", which is what an
-  // empty file-id list asks the backend to bind.
-  const requestClean = (): void => {
-    void deps.preview.request("clean", { fileIds: [] }, null);
+  // A clean comes in two shapes. The group heading asks for everything
+  // untracked, which is what an empty file-id list binds; a row asks for that
+  // one path. Either way the live file list travels along, because a scoped
+  // ticket is renewed by turning its names back into file ids, and those only
+  // live in the snapshot that produced them.
+  const requestClean = (fileIds: number[]): void => {
+    void deps.preview.request("clean", { fileIds }, currentFiles);
   };
 
   const runOperationStep = async (
@@ -310,7 +316,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
       }
       if (row.group === "untracked") {
         rowElement.append(
-          button("Clean…", requestClean, {
+          button("Clean…", () => requestClean([]), {
             class: "row-action danger",
             title: "Delete untracked files after confirmation",
             disabled: isWriteRunning() || pendingPreview() !== null,
@@ -352,6 +358,12 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     if (file.conflict) menuItems.push({ label: "Resolve", run: () => void runTool("mergeFile", file.id) });
     if (discardEligible(file)) {
       menuItems.push({ label: "Discard", run: () => requestDiscard([file.id]), danger: true });
+    }
+    // An untracked file has nothing to revert to, so its removal verb is the
+    // scoped clean: the ticket binds this one path, and Git answers whether it
+    // owns it at all.
+    if (cleanEligible(file)) {
+      menuItems.push({ label: "Delete", run: () => requestClean([file.id]), danger: true });
     }
     const more = el("button", {
       class: "row-more",
@@ -452,6 +464,16 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
 
   const render = (): void => {
     const snapshot = currentSnapshot();
+    // A draft belongs to the repository it was typed in. A refresh never
+    // touches it, and a refresh is exactly what never moves `sessionId`; a
+    // session that changed is a different repository, and a box still holding
+    // the previous one's half-written message would submit that message to it.
+    const sessionId = snapshot?.sessionId ?? null;
+    if (sessionId !== draftSession) {
+      draftSession = sessionId;
+      commitMessage.value = "";
+      commitAmend.checked = false;
+    }
     const locked = snapshot === null || isWriteRunning();
     commitMessage.disabled = locked;
     commitAmend.disabled = locked;

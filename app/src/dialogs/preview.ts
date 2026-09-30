@@ -5,11 +5,15 @@
 // hook. A newer snapshot invalidates file IDs, so while a ticket is open
 // every accepted snapshot re-requests the preview against fresh Git state;
 // a changed candidate set is surfaced verbatim and the user must confirm
-// again. The confirm event carries the ticket's `kind` and `nonce`; the
-// owning view maps the kind to its backend command and only ever sends
-// `{ nonce }`.
+// again. A ticket that was asked about files renews by turning the names it
+// showed back into ids of the new snapshot, which is the only handle they still
+// have; a ticket that was asked about the repository as a whole restates itself
+// the same way it was first asked. The confirm event carries the ticket's
+// `kind` and `nonce`; the owning view maps the kind to its backend command and
+// only ever sends `{ nonce }`.
 
 import { invoke } from "@tauri-apps/api/core";
+import { cleanEligible, discardEligible, idsForNames } from "../fileModel";
 import {
   applySnapshot,
   currentSnapshot,
@@ -32,6 +36,11 @@ const previewCopy: Record<PreviewKindKey, PreviewCopy> = {
     warning: "These untracked files and folders will be deleted from disk. They are not in Git and cannot be recovered.",
     confirm: "Delete untracked",
     cancel: "Keep files",
+    // A scoped clean can be handed a path Git will not remove — a tracked file,
+    // an ignored one, a repository of its own — and the fallback line in the
+    // dialog explains that as a work-tree fact, which is a discard's reason, not
+    // a clean's.
+    droppedLabel: "Not removed (a clean takes untracked files only)",
   },
   branch: {
     warning:
@@ -78,10 +87,6 @@ const branchForceCopy: PreviewCopy = {
   confirm: "Force delete branch",
   cancel: "Keep branch",
 };
-
-function discardEligible(file: FileView): boolean {
-  return file.unstaged && !file.conflict && !file.untracked;
-}
 
 export interface PreviewController {
   readonly dialog: ConfirmDialog;
@@ -156,6 +161,10 @@ export function createPreviewController(
     }
   };
 
+  // A ticket that was asked about files is renewed against the new snapshot by
+  // its names, because the ids it was built from died with the snapshot that
+  // produced them. `idsForNames` is the rule that fails that renewal rather than
+  // carry a partial list across; see `fileModel.ts` for why.
   const renew = async (): Promise<void> => {
     const pending = pendingPreview();
     if (pending === null || renewing || currentSnapshot() === null) return;
@@ -165,21 +174,24 @@ export function createPreviewController(
     try {
       let args: Record<string, unknown> = requestArgs(pending);
       if (pending.kind === "discard") {
-        const ids: number[] = [];
-        for (const name of pending.names) {
-          const matches = files.filter((file) => file.display === name && discardEligible(file));
-          if (matches.length !== 1) {
-            close("The changed files moved after the preview; ask again to confirm.");
-            return;
-          }
-          ids.push(matches[0].id);
+        const ids = idsForNames(files, pending.names, discardEligible);
+        if (ids === null) {
+          close("The changed files moved after the preview; ask again to confirm.");
+          return;
         }
         args = { fileIds: ids };
       }
-      // The whole-repository promise, restated as no file ids. Its names can
-      // include a collapsed directory that no row points at, so they cannot be
-      // turned back into ids the way a selected path's can.
-      if (pending.kind === "clean") args = { fileIds: [] };
+      if (pending.kind === "clean") {
+        // The whole-repository promise restates itself as no file ids: its names
+        // can include a collapsed directory that no row points at, so they cannot
+        // be turned back into ids the way one selected path's can.
+        const ids = pending.allUntracked ? [] : idsForNames(files, pending.names, cleanEligible);
+        if (ids === null) {
+          close("The untracked files moved after the preview; ask again to confirm.");
+          return;
+        }
+        args = { fileIds: ids };
+      }
       const preview = await invoke<PreviewResult>(commandFor(pending.kind), {
         snapshotVersion: snapshot.version,
         ...args,
@@ -265,7 +277,8 @@ function build(kind: PreviewKindKey, preview: PreviewResult, args: Record<string
   const base = { names: preview.candidates, dropped: preview.dropped, nonce: preview.nonce };
   switch (kind) {
     case "discard": return { kind, ...base };
-    case "clean": return { kind, ...base };
+    case "clean":
+      return { kind, ...base, allUntracked: !Array.isArray(args.fileIds) || args.fileIds.length === 0 };
     case "branch":
       return { kind, ...base, branch: { name: String(args.name), force: Boolean(args.force), targetOid: preview.targetOid } };
     case "tag": return { kind, ...base, tag: { name: String(args.name), targetOid: preview.targetOid } };
@@ -287,7 +300,7 @@ function rebuild(pending: PendingPreview, preview: PreviewResult): PendingPrevie
   const oid = preview.targetOid;
   switch (pending.kind) {
     case "discard": return { kind: "discard", names, dropped, nonce };
-    case "clean": return { kind: "clean", names, dropped, nonce };
+    case "clean": return { kind: "clean", names, dropped, nonce, allUntracked: pending.allUntracked };
     case "branch": return { kind: "branch", names, dropped, nonce, branch: { ...pending.branch, targetOid: oid } };
     case "tag": return { kind: "tag", names, dropped, nonce, tag: { ...pending.tag, targetOid: oid } };
     case "stashDrop":
