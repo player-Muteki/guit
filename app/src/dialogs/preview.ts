@@ -176,7 +176,10 @@ export function createPreviewController(
         }
         args = { fileIds: ids };
       }
-      if (pending.kind === "clean") args = {};
+      // The whole-repository promise, restated as no file ids. Its names can
+      // include a collapsed directory that no row points at, so they cannot be
+      // turned back into ids the way a selected path's can.
+      if (pending.kind === "clean") args = { fileIds: [] };
       const preview = await invoke<PreviewResult>(commandFor(pending.kind), {
         snapshotVersion: snapshot.version,
         ...args,

@@ -222,8 +222,10 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     void deps.preview.request("discard", { fileIds }, currentFiles);
   };
 
+  // The group heading's promise is "everything untracked", which is what an
+  // empty file-id list asks the backend to bind.
   const requestClean = (): void => {
-    void deps.preview.request("clean", {}, null);
+    void deps.preview.request("clean", { fileIds: [] }, null);
   };
 
   const runOperationStep = async (

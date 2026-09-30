@@ -17,8 +17,16 @@ use std::time::{Duration, SystemTime};
 pub(crate) enum Bound {
     /// Revert these tracked work-tree edits.
     Discard { paths: Vec<Vec<u8>> },
-    /// Remove exactly these untracked items.
-    Clean { paths: Vec<Vec<u8>> },
+    /// Remove exactly these untracked items. `all_untracked` records *which*
+    /// promise the user confirmed, and no field of `paths` can show it: an
+    /// `true` ticket promises "everything Git reports as untracked", so one
+    /// new untracked file afterwards invalidates it; a `false` ticket promises
+    /// "these paths and only these", so a file appearing elsewhere in the
+    /// repository is none of its business.
+    Clean {
+        paths: Vec<Vec<u8>>,
+        all_untracked: bool,
+    },
     /// Delete a branch or a tag. `target` keeps a branch ticket from ever
     /// authorizing a tag deletion (and vice versa): they share a shape but
     /// never a confirmation. `force` records the explicit, separately
@@ -915,9 +923,27 @@ fn worktree_dirty(entry: &StatusEntry) -> bool {
 /// in `/`, reported as the directory itself). A line that does not parse is
 /// an error, never a silently skipped item — a broken listing must not read
 /// as "nothing to clean" (AGENTS: 绝不把解析失败呈现为干净仓库).
-fn clean_candidates(work_root: &Path) -> Result<Vec<(Vec<u8>, bool)>, ProbeError> {
+///
+/// A non-empty `scope` limits the listing to those exact paths, which is also
+/// how a request for one file inside an untracked directory gets the answer
+/// `Would remove dir/a.txt` instead of the collapsed `dir/` (measured on Git
+/// 2.53). Paths quoted this way can only name themselves; Git will not list an
+/// ignored file or a nested repository through them at all, so a request for
+/// either comes back empty rather than forceful.
+fn clean_candidates(
+    work_root: &Path,
+    scope: &[Vec<u8>],
+) -> Result<Vec<(Vec<u8>, bool)>, ProbeError> {
     let mut command = repo::user_git_command(work_root);
     command.args(["clean", "-nd"]);
+    if !scope.is_empty() {
+        let specs = scope
+            .iter()
+            .map(|raw| raw_to_os(&quote_pathspec(raw)))
+            .collect::<Result<Vec<OsString>, ProbeError>>()?;
+        command.arg("--");
+        command.args(specs);
+    }
     let output = runner::run_with_limit(
         command,
         &AtomicBool::new(false),
@@ -950,23 +976,45 @@ fn clean_candidates(work_root: &Path) -> Result<Vec<(Vec<u8>, bool)>, ProbeError
     Ok(candidates)
 }
 
-/// Clean's preview: the full untracked set as reported by a fresh
-/// `git clean -nd` (ignored files excluded), stored under a one-time nonce.
+/// Clean's preview, in the two shapes the panel can ask for. With no file ids
+/// it binds everything a fresh `git clean -nd` reports (ignored files
+/// excluded). With file ids it binds only the requested paths Git itself
+/// agrees to remove and reports the rest as dropped. Either way the exact set
+/// goes under a one-time nonce, so removing one file is never the whole-repo
+/// clean wearing a shorter list.
 pub(crate) fn preview_clean(
     state: &WriteState,
     sessions: &session::SessionState,
     snapshot_version: u64,
+    file_ids: &[u32],
 ) -> Result<PreviewResult, ProbeError> {
-    let (work_root, _) = sessions.commit_context(snapshot_version)?;
-    let found = clean_candidates(&work_root)?;
+    let (work_root, scope) = if file_ids.is_empty() {
+        (sessions.commit_context(snapshot_version)?.0, Vec::new())
+    } else {
+        sessions.resolve_files(snapshot_version, file_ids)?
+    };
+    let all_untracked = scope.is_empty();
+    let found = clean_candidates(&work_root, &scope)?;
     if found.is_empty() {
         return Err(ProbeError::new(
             "clean_nothing",
-            "There are no untracked files to remove.",
+            if all_untracked {
+                "There are no untracked files to remove."
+            } else {
+                "None of the selected items can be removed: a clean takes untracked files that are not ignored and not a separate Git repository."
+            },
         ));
     }
     let snapshot = session::refresh(sessions)?
         .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
+    // A requested path Git did not list is reported as skipped rather than
+    // explained: tracked, ignored, gone and "a repository of its own" all read
+    // the same from here, and a clean cannot tell them apart.
+    let dropped = scope
+        .iter()
+        .filter(|raw| !found.iter().any(|(cleaned, _)| cleaned == *raw))
+        .map(|raw| crate::model::display_name(raw))
+        .collect();
     let mut paths = Vec::with_capacity(found.len());
     let mut candidates = Vec::with_capacity(found.len());
     for (raw, directory) in found {
@@ -979,12 +1027,15 @@ pub(crate) fn preview_clean(
     }
     let nonce = state.stage_preview(Preview {
         work_root,
-        bound: Bound::Clean { paths },
+        bound: Bound::Clean {
+            paths,
+            all_untracked,
+        },
     });
     Ok(PreviewResult {
         nonce,
         candidates,
-        dropped: Vec::new(),
+        dropped,
         snapshot,
         target_oid: None,
     })
@@ -1004,10 +1055,11 @@ pub(crate) fn clean_files(
     })
 }
 
-/// Assumes the queue slot is held; tests call this directly. The stored
-/// candidate set and a fresh `git clean -nd` must contain exactly the same
-/// paths before Git runs; a match then deletes by explicit pathspec so the
-/// execution can never touch anything the user did not confirm.
+/// Assumes the queue slot is held; tests call this directly. The paths a fresh
+/// `git clean -nd` still agrees to remove — asked the same scoped question the
+/// preview asked — must be exactly the set the ticket bound; a match then
+/// deletes by literal pathspec so the execution can never touch anything the
+/// user did not confirm.
 pub(crate) fn run_clean(
     state: &WriteState,
     sessions: &session::SessionState,
@@ -1025,11 +1077,19 @@ pub(crate) fn run_clean(
             cancelled_before_git: "Cancelled before Git ran.",
         },
         |preview| match preview.bound {
-            Bound::Clean { paths } => Some((preview.work_root, paths)),
+            Bound::Clean {
+                paths,
+                all_untracked,
+            } => Some((preview.work_root, (paths, all_untracked))),
             _ => None,
         },
-        |work_root, paths| {
-            let mut fresh = clean_candidates(work_root)?
+        |work_root, (paths, all_untracked)| {
+            let scope = if *all_untracked {
+                Vec::new()
+            } else {
+                paths.clone()
+            };
+            let mut fresh = clean_candidates(work_root, &scope)?
                 .into_iter()
                 .map(|(raw, _)| raw)
                 .collect::<Vec<_>>();
@@ -1045,7 +1105,7 @@ pub(crate) fn run_clean(
                 )
             })
         },
-        |work_root, paths| {
+        |work_root, (paths, _)| {
             ran_from(
                 run_git_paths(work_root, &["clean", "-fd"], paths, &state.cancelled),
                 Wording {
@@ -1077,9 +1137,25 @@ pub(crate) fn restore_supported(work_root: &Path) -> bool {
     }
 }
 
+/// Git reads a pathspec as a pattern unless it carries this magic prefix, so
+/// an unquoted `s*.txt` matches `s1.txt` too. Every path a ticket binds came
+/// out of Git's own listing, so it is a name, never a pattern: quoting it is
+/// what makes "the files the user confirmed" and "the files Git touches" the
+/// same set by construction. Measured on Git 2.53 with `restore`, `add` and
+/// `clean`; the prefix itself is older than every Git version guit supports.
+const PATHSPEC_LITERAL: &[u8] = b":(literal)";
+
+fn quote_pathspec(raw: &[u8]) -> Vec<u8> {
+    let mut quoted = Vec::with_capacity(PATHSPEC_LITERAL.len() + raw.len());
+    quoted.extend_from_slice(PATHSPEC_LITERAL);
+    quoted.extend_from_slice(raw);
+    quoted
+}
+
 /// `git <args…> -- <paths…>` with argument arrays only — paths arrive as the
-/// exact bytes Git reported, converted to OS arguments and placed behind a
-/// `--` separator, so no shell or display-name round trip happens.
+/// exact bytes Git reported, quoted as literal pathspecs, converted to OS
+/// arguments and placed behind a `--` separator, so no shell or display-name
+/// round trip happens and no name is read as a pattern.
 fn run_git_paths(
     work_root: &Path,
     git_prefix: &[&str],
@@ -1088,7 +1164,7 @@ fn run_git_paths(
 ) -> Result<runner::CapturedOutput, ProbeError> {
     let paths = targets
         .iter()
-        .map(|target| raw_to_os(target))
+        .map(|target| raw_to_os(&quote_pathspec(target)))
         .collect::<Result<Vec<OsString>, ProbeError>>()?;
     repo::git(
         work_root,
@@ -1886,6 +1962,16 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// The whole-repository form of the clean preview: no file ids, so every
+    /// path Git reports as untracked is bound.
+    fn preview_clean_all(
+        writes: &WriteState,
+        sessions: &session::SessionState,
+        version: u64,
+    ) -> Result<PreviewResult, ProbeError> {
+        preview_clean(writes, sessions, version, &[])
+    }
+
     #[test]
     fn discard_round_trip_restores_only_the_worktree_side() {
         let repository = repo_with_base(&[("a.txt", "one\n")]);
@@ -2031,6 +2117,47 @@ mod tests {
         );
     }
 
+    /// Git reads a bare pathspec as a pattern, so `git restore --worktree
+    /// -- 's*.txt'` reverts every dirty file whose name fits (measured on Git
+    /// 2.53). One confirmed file then discards a family nobody confirmed, and
+    /// the preview — which lists paths, never patterns — cannot show it.
+    #[test]
+    fn discarding_one_file_never_reverts_a_file_whose_name_its_pattern_matches() {
+        let repository = repo_with_base(&[("s*.txt", "star\n"), ("s1.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("s*.txt"), "star dirty\n").unwrap();
+        std::fs::write(root.join("s1.txt"), "one dirty\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let preview = preview_discard(
+            &writes,
+            &sessions,
+            view.version,
+            &[file_id(&view, "s*.txt")],
+        )
+        .unwrap();
+        assert_eq!(
+            preview.candidates,
+            vec!["s*.txt".to_string()],
+            "the ticket is bound to the one selected file"
+        );
+
+        let result = discard_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(
+            std::fs::read_to_string(root.join("s*.txt")).unwrap(),
+            "star\n",
+            "the selected file is reverted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("s1.txt")).unwrap(),
+            "one dirty\n",
+            "a file nobody selected keeps its work-tree changes"
+        );
+    }
+
     #[test]
     fn clean_preview_lists_files_and_directories_and_removes_exactly_those() {
         let repository = repo_with_base(&[("base.txt", "one\n"), (".gitignore", "i.txt\n")]);
@@ -2044,7 +2171,7 @@ mod tests {
         let sessions = session::SessionState::default();
         let view = session::open(&sessions, root).unwrap();
         let writes = WriteState::default();
-        let preview = preview_clean(&writes, &sessions, view.version).unwrap();
+        let preview = preview_clean_all(&writes, &sessions, view.version).unwrap();
         assert!(
             preview.candidates.contains(&"u1.txt".to_string()),
             "{:?}",
@@ -2097,7 +2224,7 @@ mod tests {
         let sessions = session::SessionState::default();
         let view = session::open(&sessions, root).unwrap();
         let writes = WriteState::default();
-        let preview = preview_clean(&writes, &sessions, view.version).unwrap();
+        let preview = preview_clean_all(&writes, &sessions, view.version).unwrap();
 
         // A new untracked file appears between preview and confirmation.
         std::fs::write(root.join("u2.txt"), "arrived later\n").unwrap();
@@ -2122,7 +2249,7 @@ mod tests {
         let sessions = session::SessionState::default();
         let view = session::open(&sessions, root).unwrap();
         let writes = WriteState::default();
-        let preview = preview_clean(&writes, &sessions, view.version).unwrap();
+        let preview = preview_clean_all(&writes, &sessions, view.version).unwrap();
         let first = clean_files(&writes, &sessions, preview.nonce.clone()).unwrap();
         assert_eq!(first.outcome, Outcome::Success);
 
@@ -2142,14 +2269,215 @@ mod tests {
 
         // A superseded snapshot cannot even start a preview.
         session::refresh(&sessions).unwrap().expect("fresh version");
-        let error = preview_clean(&writes, &sessions, view.version).unwrap_err();
+        let error = preview_clean_all(&writes, &sessions, view.version).unwrap_err();
         assert_eq!(error.code.as_str(), "write_stale_snapshot");
 
         // A repository without untracked files reports nothing to clean
         // instead of staging an empty confirmation.
         let live = session::refresh(&sessions).unwrap().expect("session");
         std::fs::remove_file(root.join("u1.txt")).unwrap();
-        let error = preview_clean(&writes, &sessions, live.version).unwrap_err();
+        let error = preview_clean_all(&writes, &sessions, live.version).unwrap_err();
         assert_eq!(error.code.as_str(), "clean_nothing");
+    }
+
+    /// One row's own menu asks for one path. Git decides whether that path is
+    /// something a clean can remove, and the ticket binds exactly the answer —
+    /// never the directory it would otherwise collapse into, and never the
+    /// neighbours that share a name pattern with it.
+    #[test]
+    fn scoped_clean_binds_one_file_inside_an_untracked_directory() {
+        let repository = repo_with_base(&[("base.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("u1.txt"), "untracked\n").unwrap();
+        std::fs::create_dir(root.join("nested")).unwrap();
+        std::fs::write(root.join("nested/a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("nested/b.txt"), "b\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let preview = preview_clean(
+            &writes,
+            &sessions,
+            view.version,
+            &[file_id(&view, "nested/a.txt")],
+        )
+        .unwrap();
+        assert_eq!(
+            preview.candidates,
+            vec!["nested/a.txt".to_string()],
+            "a path-scoped listing names the file rather than collapsing it into `nested/`"
+        );
+        assert!(preview.dropped.is_empty(), "{:?}", preview.dropped);
+
+        let result = clean_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success);
+        assert!(!root.join("nested/a.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("nested/b.txt")).unwrap(),
+            "b\n",
+            "the sibling nobody selected stays on disk"
+        );
+        assert!(
+            root.join("nested").is_dir(),
+            "a directory is kept while it still holds something"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("u1.txt")).unwrap(),
+            "untracked\n",
+            "an untracked file outside the selection is untouched"
+        );
+    }
+
+    /// The hazard a glob-shaped file name carries: unquoted, `clean -fd --
+    /// 's*.txt'` removes every untracked file whose name fits. Measured on Git
+    /// 2.53, and the same quoting covers `restore` and `add`.
+    #[test]
+    fn a_file_name_that_is_also_a_pattern_cleans_only_itself() {
+        let repository = repo_with_base(&[("base.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("s*.txt"), "star\n").unwrap();
+        std::fs::write(root.join("s1.txt"), "one untracked\n").unwrap();
+        std::fs::write(root.join("s2.txt"), "two untracked\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let preview = preview_clean(
+            &writes,
+            &sessions,
+            view.version,
+            &[file_id(&view, "s*.txt")],
+        )
+        .unwrap();
+        assert_eq!(preview.candidates, vec!["s*.txt".to_string()]);
+
+        let result = clean_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success);
+        assert!(!root.join("s*.txt").exists());
+        for name in ["s1.txt", "s2.txt"] {
+            assert!(
+                root.join(name).exists(),
+                "{name} matches the pattern but nobody confirmed it"
+            );
+        }
+    }
+
+    /// A ticket for one path promises only that path, so work appearing
+    /// elsewhere in the repository afterwards is none of its business — which
+    /// is the one way a scoped clean differs from a `Clean…` of the whole
+    /// untracked group, and the reason the promise is stored rather than
+    /// inferred from how many paths the ticket holds.
+    #[test]
+    fn a_scoped_clean_is_not_undone_by_an_unrelated_file_that_arrives_afterwards() {
+        let repository = repo_with_base(&[("base.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("u1.txt"), "one\n").unwrap();
+        std::fs::write(root.join("u2.txt"), "two\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let preview = preview_clean(
+            &writes,
+            &sessions,
+            view.version,
+            &[file_id(&view, "u1.txt")],
+        )
+        .unwrap();
+
+        std::fs::write(root.join("u3.txt"), "arrived later\n").unwrap();
+        let result = clean_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert!(!root.join("u1.txt").exists());
+        assert!(root.join("u2.txt").exists());
+        assert!(root.join("u3.txt").exists());
+    }
+
+    /// A selection can name things a clean does not own. Git's own listing is
+    /// the authority: whatever it refuses to report is shown as skipped and
+    /// never enters the ticket, so the confirmed list and the deleted set stay
+    /// the same set.
+    #[test]
+    fn a_scoped_clean_reports_a_path_git_will_not_remove_as_skipped() {
+        let repository = repo_with_base(&[("base.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::write(root.join("base.txt"), "dirty tracked\n").unwrap();
+        std::fs::write(root.join("u1.txt"), "untracked\n").unwrap();
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        let writes = WriteState::default();
+        let preview = preview_clean(
+            &writes,
+            &sessions,
+            view.version,
+            &[file_id(&view, "base.txt"), file_id(&view, "u1.txt")],
+        )
+        .unwrap();
+        assert_eq!(preview.candidates, vec!["u1.txt".to_string()]);
+        assert_eq!(preview.dropped, vec!["base.txt".to_string()]);
+
+        let result = clean_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success);
+        assert!(!root.join("u1.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("base.txt")).unwrap(),
+            "dirty tracked\n",
+            "a tracked file named in the selection keeps its work-tree edit"
+        );
+
+        // And when nothing in the selection is removable, there is no ticket.
+        let live = session::refresh(&sessions).unwrap().expect("session");
+        let error = preview_clean(
+            &writes,
+            &sessions,
+            live.version,
+            &[file_id(&live, "base.txt")],
+        )
+        .unwrap_err();
+        assert_eq!(error.code.as_str(), "clean_nothing");
+        assert!(writes.take_bound("any").is_none());
+    }
+
+    /// An untracked directory holding another Git repository is a row like any
+    /// other, but removing it takes Git's second force and guit never applies
+    /// it. Git will not even list such a path, so it lands in `dropped` and a
+    /// selection of nothing else is refused outright.
+    #[test]
+    fn a_nested_repository_is_never_cleaned_and_never_promised() {
+        let repository = repo_with_base(&[("base.txt", "one\n")]);
+        let root = repository.path();
+        std::fs::create_dir(root.join("inner")).unwrap();
+        std::fs::write(root.join("inner/x.txt"), "x\n").unwrap();
+        std::fs::write(root.join("u1.txt"), "untracked\n").unwrap();
+        repo::git_with(root, &[], &["init", "-q", "--initial-branch=main", "inner"]);
+
+        let sessions = session::SessionState::default();
+        let view = session::open(&sessions, root).unwrap();
+        // `file_id` panics when the display name is not in the snapshot: an
+        // untracked directory holding another repository arrives as one row.
+        let inner = file_id(&view, "inner/");
+        let writes = WriteState::default();
+        let error = preview_clean(&writes, &sessions, view.version, &[inner]).unwrap_err();
+        assert_eq!(error.code.as_str(), "clean_nothing");
+        assert!(
+            root.join("inner/x.txt").exists(),
+            "refusing a preview deletes nothing"
+        );
+
+        // The whole-repository form leaves it out of the promise too.
+        let preview = preview_clean_all(&writes, &sessions, view.version).unwrap();
+        assert!(
+            !preview.candidates.iter().any(|name| name == "inner/"),
+            "{:?}",
+            preview.candidates
+        );
+        let result = clean_files(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success);
+        assert!(
+            root.join("inner/x.txt").exists(),
+            "git clean without -ff keeps another repository"
+        );
     }
 }

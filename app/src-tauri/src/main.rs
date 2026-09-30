@@ -490,11 +490,12 @@ async fn discard_files(
 async fn preview_clean(
     app: tauri::AppHandle,
     snapshot_version: u64,
+    file_ids: Vec<u32>,
 ) -> Result<write::PreviewResult, ProbeError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<write::WriteState>();
         let sessions = app.state::<session::SessionState>();
-        write::preview_clean(&state, &sessions, snapshot_version)
+        write::preview_clean(&state, &sessions, snapshot_version, &file_ids)
     })
     .await
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
