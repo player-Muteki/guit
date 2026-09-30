@@ -435,7 +435,7 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
 一份仓库里各放一样：一个脏的已跟踪文件、一个普通未跟踪文件、一个目标树跟踪的未跟踪文件、
 一个被忽略的目录（`ign/`，里面两层深还有一个文件）、一个被忽略的名字（`secret.txt`）、
 一个**嵌套仓库**（`nested/`，自己的 `.git`）、一个**子模块**（`mod`，里面还写了东西）。
-15 次读取的答案：
+16 次读取的答案：
 
 | 一次读取 | rc | 条目 | 内容 |
 | --- | --- | --- | --- |
@@ -453,6 +453,7 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
 | `diff --name-only HEAD <target>` | 0 | 3 | `.gitmodules`、`gone.txt`、`mod` |
 | `ls-files --others` | 0 | 5 | 两条未跟踪文件 + **折叠的** `nested/` + 两条被忽略 |
 | `ls-files --others --exclude-standard` | 0 | 3 | `gone.txt`、`plain.txt`、`nested/` |
+| `ls-files --others --ignored --exclude-standard` | 0 | 2 | **只有被忽略那一类**，且逐文件：`ign/nested/deep.txt`、`secret.txt`（`ign/` 在这里也不折叠：这一条没传 `--directory`，而它折叠的只有仓库那一种目录） |
 | `submodule status` | 0 | 1 | `mod (heads/main)` |
 
 这张表里四条"每一类名单各说各话"是 F03 的全部难点：
@@ -463,7 +464,10 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
   force，就越过了 F01 立下的"永不加第二个 force"。
 - **折叠的目录不能自己展开。** `clean -ndx` 给 `ign/`，`status --ignored` 给
   `ign/nested/deep.txt`。要算"目标跟踪了某个被忽略的路径"这个交集，必须从**逐文件**那一条
-  读起；从折叠那条读会算不出来（`ign/` 不是目标树里的路径）。
+  读起；从折叠那条读会算不出来（`ign/` 不是目标树里的路径）。逐文件那一条有两个来源，这一
+  节把它们都跑了一遍：`status --porcelain -uall --ignored` 把 7 条混在一起（5 条非忽略的
+  还要先认出 `!!` 那两个字节），`ls-files --others --ignored --exclude-standard` 只给被忽略
+  的那 2 条，粒度相同。
 - **`--exclude-standard` 不是可选的。** 少它一次，`secret.txt` 和 `ign/…` 就以"未跟踪"的
   身份进名单（5 vs 3）。
 - **gitlink 会在恢复之后变成未跟踪的残留。** `diff --name-only HEAD <target>` 里有
@@ -487,6 +491,7 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
 
     check-ignore -v                        rc=0  .gitignore:1:built.txt   built.txt
     status --porcelain -uall --ignored     rc=0  !! built.txt
+    ls-files --others --ignored --exclude-standard  rc=0  built.txt
     clean -ndx                             rc=0  Would remove built.txt
     git reset --hard <target>              rc=0  built.txt 变成目标的字节；status 变空
     之后再看同一条规则                      rc=0  check-ignore 仍然报 .gitignore:1:built.txt
@@ -532,30 +537,35 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
 
 | 一次读取 | rc | 条目 | 本宿主（中位／区间） |
 | --- | --- | --- | --- |
-| `rev-parse HEAD` | 0 | 1 | 1.2 ms（1.1–1.4） |
-| `diff --name-only HEAD <target>` | 0 | 200 | 3.2 ms（2.8–3.3） |
-| `diff --name-status HEAD <target>` | 0 | 200 | 3.0 ms（2.5–3.0） |
-| `diff --name-status -z --no-renames HEAD <target>` | 0 | 400 token = 200 项 | 2.8 ms（2.2–3.0） |
-| `ls-tree -r -z --name-only <target>` | 0 | 2001 | 2.2 ms（2.2–2.2） |
-| `status --porcelain -z -uall` | 0 | 100 | 7.0 ms（4.7–8.5） |
-| `status --porcelain -z -uall --ignored` | 0 | 101 | 5.9 ms（4.6–7.6） |
-| `ls-files --others --exclude-standard -z` | 0 | 100 | 1.8 ms（1.7–1.9） |
-| `clean -nd` | 0 | 1（折叠成 `extra/`） | 2.1 ms（2.1–2.7） |
-| `clean -ndx` | 0 | 2 | 2.0 ms（2.0–2.3） |
+| `rev-parse HEAD` | 0 | 1 | 1.4 ms（1.2–1.6） |
+| `diff --name-only HEAD <target>` | 0 | 200 | 3.4 ms（2.6–3.8） |
+| `diff --name-status HEAD <target>` | 0 | 200 | 2.9 ms（2.9–3.2） |
+| `diff --name-status -z --no-renames HEAD <target>` | 0 | 400 token = 200 项 | 3.1 ms（3.1–3.1） |
+| `ls-tree -r -z --name-only <target>` | 0 | 2001 | 2.4 ms（1.9–2.4） |
+| `status --porcelain -z -uall` | 0 | 100 | 10.6 ms（9.5–10.6） |
+| `status --porcelain -z -uall --ignored` | 0 | 101 | 8.9 ms（7.2–10.0） |
+| `ls-files --others --exclude-standard -z` | 0 | 100 | 2.0 ms（1.9–2.0） |
+| `ls-files --others --ignored --exclude-standard -z` | 0 | 1 | 1.9 ms（1.9–1.9） |
+| `clean -nd` | 0 | 1（折叠成 `extra/`） | 2.2 ms（2.1–2.5） |
+| `clean -ndx` | 0 | 2 | 2.0 ms（1.9–2.2） |
 
-后两条新加的行是给构造读的，不是给上一次那张表补装饰。`-z --no-renames` 那一条是构造真正
-发出的 argv：400 个 token 就是 200 项，代价与不带 `-z` 的那条同量。`ls-tree` 那一条是覆盖
-判定要用的"目标自己持有哪些路径"（§6.3 的 `predict()` 一直用它，只是上一版没量），2,001 条
-路径 2.2 ms，比 `status` 便宜三倍——这一条读放大不亏。
+这一版连上一条新读的行一起重测，所以十一行是同一次三遍的一份读数；`status` 那两行比上一版
+（7.0／5.9）贵出一截，宿主当时正在并行编译，这不影响下面的结论，因为要比的两个数在同一列里。
+`-z --no-renames` 那一条是构造真正发出的 argv：400 个 token 就是 200 项，代价与不带 `-z`
+的那条同量。`ls-tree` 那一条是覆盖判定要用的"目标自己持有哪些路径"（§6.3 的 `predict()`
+一直用它，只是上一版没量），2,001 条路径 2.4 ms，比 `status` 便宜四倍——这一条读放大不亏。
 
-两条能省的地方都在这张表上：**未跟踪的名单从 `ls-files --others --exclude-standard -z`
-拿**（1.8 ms，逐文件、NUL 安全），`status` 只留给"工作树哪里不干净"那一问；`--ignored`
-那一条只在要算"忽略 ∩ 目标"的交集时才读。按 §7 的构造（§8 的 `plan_restore`）一次预览是
-**七条进程**：目标的一次 peel、一次 `rev-parse HEAD`、`diff`、`ls-tree`、`status`、
-`ls-files`、`clean -nd`——把表里对应那七行的中位数相加约 **18 ms**，区间 16–20 ms，几乎全部
-来自 `status` 那 4.7–8.5 的抖动。**没有新增的读放大**，那七条就是这几条读取本身；Rust 侧
-的解析开销没量。`clean -nd` 会把 100 个未跟踪折叠成一条 `extra/`，这份名单不能拿去和目标的
-逐路径名单做交集（§6.4 第二条）。
+能省的地方都在这张表上，而且**"忽略 ∩ 目标"那一问有两个可用的来源**：§7 第 7 条点名的
+`status --porcelain -z -uall --ignored`（8.9 ms，101 条里只有 1 条是 `!!`，剩下 100 条是这一问
+不需要的、还要先解析那三个字节表头的工作树状态）与同一条引擎反着用的
+`ls-files --others --ignored --exclude-standard -z`（1.9 ms，只给被忽略那一类，逐文件，粒度
+与前者相同）。§7 第 7 条点名的因此是这一条，`plan_restore` 接上它是紧接着的那一次提交。按 §7 的构造（§8 的 `plan_restore`）一次预览自己起**七条进程**：
+目标的一次 `rev-parse`、一次 `rev-parse HEAD`、`diff`、`ls-tree`、`ls-files`（未跟踪）、
+`ls-files --ignored`、`clean -nd`——把这七行对应的中位数相加约 **15 ms**。表里那两条 `status`
+**不在这七条里**：脏路径来自会话已经发布的那份索引（`write::status_index`），预览不再起一次
+`status` 进程，所以 refresh 付的 10.6 ms 不算进这次预览。**没有新增的读放大**，Rust 侧的解析
+开销没量。`clean -nd` 会把 100 个未跟踪折叠成一条 `extra/`，这份名单不能拿去和目标的逐路径
+名单做交集（§6.4 第二条）。
 
 ### 6.7 一个折叠的未跟踪目录，一半是恢复要写的那个文件
 
@@ -629,7 +639,8 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
 - **Git 自己保护的名字**：`core.protectNTFS` / `protectHFS` 那一类（`.git`、`HEAD`、
   保留设备名）没造过夹具。
 - **模式位**：目标与磁盘只有可执行位不同时算不算覆盖，没问。
-- **一个未跟踪的空目录**（两条未跟踪读取都不列它，`clean` 会不会删它没问），以及**反过来的
+- **一个未跟踪的空目录**（`ls-files` 那两条名单都不列它；新加的那条"只给被忽略那一类"的读取
+  在空目录这一格上没单独造过夹具。`clean` 会不会删它没问），以及**反过来的
   那一格**：目标把某路径当 gitlink（子模块）、而磁盘上那个位置是一个未跟踪目录——§6.8 量的
   是"目标是文件、磁盘是仓库"，那一条方向没走过。
 - **`clean -ndffx` 在大夹具上的耗时**没量（§6.6 只量了 `-nd` / `-ndx`）。
@@ -640,15 +651,18 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
 
 §6 是测量，本节把测量变成规则。F03 动手前先读这一节；它自己的落地在实现时另起一节。
 
-1. **受影响集合是五次读取的并，不是任何一次读取的子集**：
+1. **受影响集合是六次读取的并，不是任何一次读取的子集**：
    `diff --name-status -z --no-renames HEAD <target>`（目标与当前的路径差，含 file↔dir 那种
    类型变化）、`ls-tree -r -z --name-only <target>`（目标自己持有哪些路径——覆盖判定问的是
    "磁盘上这个未跟踪路径在不在目标里"，两棵树之间的差答不了"两边都有但索引里被撤过"那一格）、
    `ls-files --others --exclude-standard -z`（未跟踪，逐文件）、
-   `status --porcelain -z -uall`（工作树哪里不干净）、
-   `clean -nd`（Git 同意删的是哪些）。少前一条会漏掉"本地改动正被丢弃"，少第二条会把一个
-   已经被目标持有的路径说成没人在意，少第三条会漏掉障碍，少第四条会把脏的说成干净的，
-   少第五条会承诺一件 Git 不肯做的事。
+   `ls-files --others --ignored --exclude-standard -z`（被忽略的，逐文件；第 8 条那一个例外
+   只能从这一条算）、
+   `status --porcelain -z -uall`（工作树哪里不干净；这一问不新起进程，脏路径从会话已经发布的
+   那份索引里取）、
+   `clean -nd`（Git 同意删的是哪些）。少第一条会漏掉"本地改动正被丢弃"，少第二条会把一个
+   已经被目标持有的路径说成没人在意，少第三条会漏掉障碍，少第四条会把"既被忽略又将被写入"
+   那一句漏掉，少第五条会把脏的说成干净的，少第六条会承诺一件 Git 不肯做的事。
 2. **保护不能指望 Git 拒绝**：只有 `checkout <t>` 与 `switch --detach <t>` 会挡（§6.1、
    §6.2），而那两条把 HEAD 分离、且兑现不了"留在当前分支上回到目标树"。所以 F03 的动词
    只能是 `reset --hard` + 一次有界 `clean`，**保护必须是 guit 自己在写之前算出来的拒绝**。
@@ -666,12 +680,19 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
    （§6.4、§6.5 第 4 条）。Git 不列的路径就写成"留下"，并说为什么留下。这条与 F01 同口径。
 7. **折叠的目录不自己展开**，`--exclude-standard` 不可省：前者让交集算不出来
    （`ign/` 不是目标里的路径），后者让被忽略的东西混进删除名单（5 vs 3，§6.4）。
-   需要逐文件时用逐文件那一条读取（`status --porcelain -z -uall --ignored`），只在要算
-   "忽略 ∩ 目标"时才读它。
+   需要逐文件的被忽略名单时用
+   `ls-files --others --ignored --exclude-standard -z`，只在要算"忽略 ∩ 目标"时才读它。**这
+   是本节原先点名的 `status --porcelain -z -uall --ignored` 的一次偏离，理由量在 §6.6**：两条
+   给的粒度相同（`ign/nested/deep.txt` 逐文件，`ign/` 不折叠），但前者只回被忽略的那一类，
+   后者要先把 101 条里那三个字节的表头认出来、再丢掉 100 条这一问不需要的状态，代价 1.9 ms
+   对 8.9 ms。两条都跑过，答案在夹具上一致。
 8. **默认保护忽略的东西，但要先算出那一个例外**：目标树跟踪了一个被 `.gitignore` 盖住的
    路径时，恢复会写它，而 `check-ignore` 在写完之后仍然报那条规则（§6.4 末）——
-   **`check-ignore` 答模式，不答跟踪状态**，不能用它判跟踪与否。忽略 ∩ 目标从逐文件名单
-   里算，算出来就要在写之前说：这一条路径既被忽略又将被写入。
+   **`check-ignore` 答模式，不答跟踪状态**，不能用它判跟踪与否。忽略 ∩ 目标从第 7 条那一条
+   逐文件名单里算，算出来就要在写之前说：这一条路径既被忽略又将被写入。这一句是**说**而不是
+   **拒**：例外之所以是例外，正因为恢复确实要写它。唯一的例外之外还有第 14 条——那条路径如果
+   本身是一个仓库（在逐文件名单里以折叠的目录形式出现），被销毁的代价与忽略规则无关，仍然
+   写前拒绝。
 9. **边界不是路径级的**：gitlink 撤掉之后 `mod/` 会以 `??` 留下，`reset` 给它一句
    `warning: unable to rmdir`，而 `clean` 从此不列它（§6.4 末）。这类残留要按"留下，
    因为 guit 不进别人的仓库"来陈述，不能按失败来陈述。
@@ -684,9 +705,11 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
     的 HEAD、索引状态、目标与当前的路径差、脏路径、计划删除的未跟踪路径、覆盖名单、受保护
     名单。**`reset` 与 `clean` 不是原子的一步**，中间那一段必须被承认为一段并如实报告；
     这一步的动词序列与有界性归 F04，事后校验与部分执行归 F05。
-12. **预算不是新的读放大**：一次预览 7 条进程（§7 第 1 条那五条读取，加上目标的一次 peel
-    与一次 `rev-parse HEAD`），§6.6 那份夹具上中位相加约 18 ms、区间 16–20 ms；贵的只有
-    `status`（7.0 ms 中位，4.7–8.5 抖动），未跟踪名单用 1.8 ms 那条拿，整棵目标树 2.2 ms。
+12. **预算不是新的读放大**：一次预览自己起 7 条进程（§7 第 1 条那六次读取里除 `status` 之外的
+    五条，加上目标的一次 peel 与一次 `rev-parse HEAD`，再加 `clean -nd`），§6.6 那份夹具上
+    中位相加约 15 ms；贵的只有 `diff`/`ls-tree` 那一档（3.1／2.4 ms），两份未跟踪名单各
+    2.0／1.9 ms，`clean -nd` 2.2 ms。`status` 那 10.6 ms 属于 refresh，不属于这次预览——脏路径
+    从会话已发布的索引里取。
 13. **删除名单按逐文件的粒度给，第二步之前重问一次 `clean`**：`clean -nd` 会把整个未跟踪
     目录折成一条，而那一格里可能有一个文件是要被**写入**而不是被删除的（§6.7）。预览不能
     说"这个目录会被删掉"，要拆成"这一个会被目标写入 / 那一个会被删掉"，粒度取
@@ -721,16 +744,16 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
 
 | §7 的那一条 | 代码里的落点 |
 | --- | --- |
-| 第 1 条（并，不是子集） | `plan_restore` 依次走 `tree_differences`、`target_paths`、`tracked_dirty_set`（即 `write::status_index`）、`untracked_paths`、`write::clean_candidates` |
+| 第 1 条（并，不是子集） | `plan_restore` 依次走 `tree_differences`、`target_paths`、`tracked_dirty_set`（即 `write::status_index`，不新起进程）、`untracked_paths`、`write::clean_candidates`；那份清单上的第六次读取（只给被忽略那一类的那一条）在本片还没有落点，见 §8.4 |
 | 第 2、14 条（保护必须自己算；写前拒绝只有一条判据） | `Restoration::guard()` → `reset_preview_repository`，一句里带那个路径的名字 |
 | 第 3 条（目录前缀规则） | `claimed_by_target` 除完整名字相等外，逐 `/` 试前缀；`is_ancestor_dir` 要求第一个差异就是 `/` |
 | 第 4 条（覆盖是范围，不是内容变化） | `overwritten` 只按名单算；整个构造一次都没读文件字节 |
 | 第 5 条（丢弃 = status ∩ diff） | `discarded` |
 | 第 6 条（删除承诺只绑 `clean` 自己的答案） | `removals` 只从 `clean_candidates` 那份名单里来；没被列出的落进 `left_behind`，`!item.repository` 那一格就是这条 |
 | 第 7 条（折叠不自己展开；`--exclude-standard` 不可省） | 粒度取 `ls-files --others --exclude-standard -z` 那一条，选项写死在 argv 里 |
-| 第 12 条（预算） | 七条进程；`ls-tree` 的代价先量了再采用（§6.6 重测那一版） |
+| 第 12 条（预算） | `ls-tree` 与那一条"只给被忽略那一类"的读取都是先量了再采用（§6.6 重测那一版）；进程条数随第 1 条那份清单走 |
 | 第 13 条（逐文件粒度 + 第二步之前重问 `clean`） | 粒度已落；**重问归 F04**，构造里只有一次 `clean -nd` |
-| 第 8 条（忽略 ∩ 目标那一个例外） | **未落**：要第六条读取 `status --porcelain -z -uall --ignored` |
+| 第 8 条（忽略 ∩ 目标那一个例外） | **未落**：那条"只给被忽略那一类"的逐文件读取还没进构造；它用哪一条命令，§7 第 7 条已经量过两个来源并定了 |
 | 第 9、10 条（残留怎么陈述；事后两条条件） | 未落，归 F05 |
 | 第 11 条（复用 `resolve_target`） | `plan_restore` 第一行；`sequencer::validate_target` 仍未动 |
 
@@ -742,7 +765,7 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
 - **`ls-tree` 是不可省的那一条读取**：覆盖判定问的是"磁盘上这个未跟踪路径在不在目标里"，
   而 `diff HEAD <target>` 恰好**不列**两棵树都持有且一致的那条路径——索引里被撤过、磁盘上
   又躺着同一个名字时，差里看不见它。§6.3 的 `predict()` 一直用它，这一版才把它的代价量出来
-  （2,001 条 2.2 ms），§7 第 1 条因此从四次读取改成五次。
+  （2,001 条 2.4 ms），§7 第 1 条那份读取清单因此加了一条。
 - **读取失败的三条分支都拒绝**：起不来的进程交回 `runner` 自己的码，Git 说不是
   `reset_preview_failed`，装不下是 `reset_preview_too_large`；没有一条走"于是这份名单是空的"。
   bound 跟 `status` 同一条（`runner::STATUS_OUTPUT_LIMIT`），理由写在 `submodules.rs:41`：约一千
@@ -762,8 +785,8 @@ transformed**、`npm run test:fixture` **402 pass / 0 fail**（含 shipped-copy 
 ipc-surface 两道门）、`color-contrast.py` fails=0、`responsive-check.py` fails=0。
 探针在同一次运行里 `exit=0`、**432 行**，跑前跑后 `/tmp` 里都是 0 个 `guit-clean-reset-*`。
 
-`plan_restore` 自己的墙钟**没量**：到这一片为止没有任何调用方起过它一次。§6.6 那句"约 18 ms"
-是那七条读取各自中位数的加和，不是这条通道上的一次读数——它要在 F04 把预览接进 `write.rs`
+`plan_restore` 自己的墙钟**没量**：到这一片为止没有任何调用方起过它一次。§6.6 末那个加和是
+表里对应那几行各自中位数的相加，不是这条通道上的一次读数——它要在 F04 把预览接进 `write.rs`
 之后才有可量的对象。
 
 ### 8.4 这一片没做完的

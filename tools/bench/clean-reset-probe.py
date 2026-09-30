@@ -30,7 +30,8 @@ answer are:
     whether any listing of "what would be removed" ever offers to remove it;
   * which paths each listing shows and hides: `status --porcelain` with and without
     `-uall` and `--ignored`, `diff --name-only HEAD <target>`, `clean -nd` with and
-    without `-x`, `ls-files --others` with and without `--exclude-standard`, and a
+    without `-x`, `ls-files --others` without the ignore rules, with them, and with
+    them inverted to name only the ignored paths, and a
     nested repository or submodule in each — including which of them report an
     untracked directory folded into one entry instead of file by file;
   * whether a hard reset reaches inside a submodule's working tree at all;
@@ -359,6 +360,8 @@ def scenario_protected() -> None:
         ("diff --name-only HEAD <target>", ["diff", "--name-only", "HEAD", target]),
         ("ls-files --others", ["ls-files", "--others"]),
         ("ls-files --others --exclude-standard", ["ls-files", "--others", "--exclude-standard"]),
+        ("ls-files --others --ignored --exclude-standard",
+         ["ls-files", "--others", "--ignored", "--exclude-standard"]),
         ("submodule status", ["submodule", "status"]),
     ):
         listing(root, label.replace("<target>", target[:8]), args)
@@ -378,6 +381,8 @@ def scenario_protected() -> None:
     rc, out, _ = git(root, "check-ignore", "-v", "built.txt")
     print(f"    check-ignore -v: rc={rc} {one_line(out)}")
     listing(root, "status --porcelain -uall --ignored", ["status", "--porcelain", "-uall", "--ignored"])
+    listing(root, "ls-files --others --ignored --exclude-standard",
+            ["ls-files", "--others", "--ignored", "--exclude-standard"])
     listing(root, "clean -ndx", ["clean", "-ndx"])
     ask(root, "git reset --hard <target>", ["reset", "--hard", target], ["built.txt"])
     rc, out, _ = git(root, "check-ignore", "-v", "built.txt")
@@ -525,6 +530,8 @@ def measure_cost() -> None:
     timed("status --porcelain -z -uall", ["status", "--porcelain", "-z", "-uall"])
     timed("status --porcelain -z -uall --ignored", ["status", "--porcelain", "-z", "-uall", "--ignored"])
     timed("ls-files --others --exclude-standard -z", ["ls-files", "--others", "--exclude-standard", "-z"])
+    timed("ls-files --others --ignored --exclude-standard -z",
+          ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"])
     timed("clean -nd", ["clean", "-nd"])
     timed("clean -ndx", ["clean", "-ndx"])
 
