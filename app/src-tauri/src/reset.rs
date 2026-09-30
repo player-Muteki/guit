@@ -15,7 +15,7 @@ use crate::probe::ProbeError;
 use crate::status::StatusEntry;
 use crate::write::{self, OperationKind, OperationResult, Outcome, PreviewResult, WriteState};
 use crate::{branches, history, model, repo, runner, sequencer, session};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -682,6 +682,110 @@ pub(crate) fn plan_restore(
         }
     }
     Ok(plan)
+}
+
+/// One entry of a listing as the panel shows it: the exact path Git named,
+/// plus the one fact a path cannot carry by itself — that this entry is
+/// somebody else's repository.
+#[allow(dead_code)] // one formatting place for the lists the ticket also binds
+fn untracked_name(item: &Untracked) -> String {
+    let mut name = model::display_name(&item.raw);
+    if item.repository {
+        name.push_str(" (repository)");
+    }
+    name
+}
+
+#[allow(dead_code)]
+fn untracked_names(list: &[Untracked]) -> Vec<String> {
+    list.iter().map(untracked_name).collect()
+}
+
+/// The grouped lists a restore preview shows, each in the granularity the
+/// reading that produced it reported. Only display names cross the boundary:
+/// the paths themselves live in the ticket, and what the panel draws is built
+/// from this one computation rather than from a second, narrower one.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // goes away with the command that returns this preview
+pub(crate) struct RestorePreview {
+    pub nonce: String,
+    /// Both ids as Git resolved them, never the text that was typed.
+    pub target_oid: String,
+    pub head_oid: String,
+    /// Tracked paths the current commit and the target disagree about.
+    pub changed: Vec<String>,
+    /// Local edits on those paths: what leaving them where they are would drop.
+    pub discarded: Vec<String>,
+    /// Untracked paths the restore writes.
+    pub overwritten: Vec<String>,
+    /// Ignored paths the target holds anyway — the one class a rule does not
+    /// set aside, so the preview owes them a line before the write, not after.
+    pub ignored_written: Vec<String>,
+    /// Untracked paths the second step removes.
+    pub removed: Vec<String>,
+    /// Untracked paths neither step touches, stated as staying.
+    pub left_behind: Vec<String>,
+    pub snapshot: session::SnapshotView,
+}
+
+/// Stage a clean restore: compute the plan, refuse what Git refuses to refuse,
+/// and only then put the whole plan under a one-time nonce.
+///
+/// The refusal runs before the ticket exists, so a repository standing where
+/// the target writes leaves no confirmation to click. The plan is moved into
+/// the ticket unchanged — every set the preview lists above is a set the
+/// confirmation re-reads, so a page cannot show one promise and bind another.
+#[allow(dead_code)] // goes away with the command that stages this preview
+pub(crate) fn preview_restore(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    snapshot_version: u64,
+    target: &str,
+) -> Result<RestorePreview, ProbeError> {
+    let (work_root, unborn) = sessions.commit_context(snapshot_version)?;
+    if unborn {
+        return Err(ProbeError::new(
+            "reset_unborn",
+            "Cannot restore before the first commit.",
+        ));
+    }
+    if let Some(refusal) = sequencer::in_progress_message(sessions)? {
+        return Err(ProbeError::new("reset_in_progress", refusal));
+    }
+    let plan = plan_restore(&work_root, sessions, target)?;
+    plan.guard()?;
+    let changed = plan
+        .differences
+        .iter()
+        .map(|difference| model::display_name(&difference.raw))
+        .collect();
+    let discarded = plan
+        .discarded
+        .iter()
+        .map(|raw| model::display_name(raw))
+        .collect();
+    let overwritten = untracked_names(&plan.overwritten);
+    let ignored_written = untracked_names(&plan.ignored_written);
+    let removed = untracked_names(&plan.removals);
+    let left_behind = untracked_names(&plan.left_behind);
+    let target_oid = plan.target_oid.clone();
+    let head_oid = plan.head_oid.clone();
+    let nonce = state.stage_restore(work_root, plan);
+    let snapshot = session::refresh(sessions)?
+        .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
+    Ok(RestorePreview {
+        nonce,
+        target_oid,
+        head_oid,
+        changed,
+        discarded,
+        overwritten,
+        ignored_written,
+        removed,
+        left_behind,
+        snapshot,
+    })
 }
 
 /// The shared refusal path: everything rejected happens before Git runs,
@@ -1659,18 +1763,6 @@ mod tests {
         list.iter().map(|raw| model::display_name(raw)).collect()
     }
 
-    fn untracked_names(list: &[Untracked]) -> Vec<String> {
-        list.iter()
-            .map(|item| {
-                let mut name = model::display_name(&item.raw);
-                if item.repository {
-                    name.push_str(" (repository)");
-                }
-                name
-            })
-            .collect()
-    }
-
     /// The plan needs a session for the one read that is not a listing of the
     /// repository: which paths the working copy is dirty on.
     fn plan_for(dir: &Path, target: &str) -> Restoration {
@@ -1917,5 +2009,158 @@ mod tests {
                 .unwrap_or_else(|| panic!("{typed} was accepted as a target"));
             assert_eq!(refusal.code.as_str(), code, "{}", refusal.message);
         }
+    }
+
+    /// Every class a clean restore owes a line about, listed by the preview in
+    /// the granularity the reading that produced it reported — and with the ids
+    /// Git resolved rather than the text that was typed.
+    #[test]
+    fn a_restore_preview_names_every_class_it_binds() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, "keep.txt", "keep\n");
+        write_at(dir, "gone.txt", "the target's own bytes\n");
+        let target = commit_all(dir, "the target holds both");
+        write_at(dir, "keep.txt", "committed differently\n");
+        git(dir, &["rm", "-q", "--", "gone.txt"]);
+        let head_oid = commit_all(dir, "the tree dropped one file and rewrote the other");
+        write_at(dir, "keep.txt", "edited by hand\n");
+        write_at(dir, "gone.txt", "written again by hand\n");
+        write_at(dir, "plain.txt", "untracked\n");
+        repository_in(dir, "nested");
+
+        let (writes, sessions, version) = state_and_session(dir);
+        let typed = target.chars().take(8).collect::<String>();
+        let preview = preview_restore(&writes, &sessions, version, &typed).unwrap();
+        assert_eq!(preview.target_oid, target, "the typed text is not the id");
+        assert_eq!(preview.head_oid, head_oid);
+        assert_eq!(preview.changed, ["gone.txt", "keep.txt"]);
+        assert_eq!(preview.discarded, ["keep.txt"]);
+        assert_eq!(preview.overwritten, ["gone.txt"]);
+        assert!(preview.ignored_written.is_empty());
+        assert_eq!(preview.removed, ["plain.txt"]);
+        assert_eq!(preview.left_behind, ["nested (repository)"]);
+        assert_eq!(head(dir), head_oid, "a preview writes nothing");
+    }
+
+    /// The list the page shows and the set the confirmation re-reads are one
+    /// computation, in one order: a preview that displayed less than the ticket
+    /// binds would have to be built twice to pass this, and the double build is
+    /// what the shared `Restoration` rules out.
+    #[test]
+    fn a_restore_ticket_binds_the_very_sets_the_preview_lists() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, "keep.txt", "keep\n");
+        write_at(dir, "gone.txt", "the target's own bytes\n");
+        let target = commit_all(dir, "the target holds both");
+        git(dir, &["rm", "-q", "--", "gone.txt"]);
+        commit_all(dir, "the tree dropped one file");
+        write_at(dir, "gone.txt", "written again by hand\n");
+        write_at(dir, "plain.txt", "untracked\n");
+        repository_in(dir, "nested");
+
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        let ticket = writes
+            .take_bound(&preview.nonce)
+            .expect("the preview stages a ticket");
+        let write::Bound::Restore { plan } = ticket.bound else {
+            panic!("a restore preview staged a ticket for another operation");
+        };
+        assert_eq!(plan.target_oid, preview.target_oid);
+        assert_eq!(plan.head_oid, preview.head_oid);
+        assert_eq!(untracked_names(&plan.overwritten), preview.overwritten);
+        assert_eq!(untracked_names(&plan.removals), preview.removed);
+        assert_eq!(untracked_names(&plan.left_behind), preview.left_behind);
+        assert_eq!(names(&plan.discarded), preview.discarded);
+        assert_eq!(
+            plan.differences
+                .iter()
+                .map(|difference| model::display_name(&difference.raw))
+                .collect::<Vec<_>>(),
+            preview.changed
+        );
+    }
+
+    /// The guard runs before the ticket exists, so the one case that must not
+    /// be confirmed leaves nothing to confirm: no nonce is returned to replay,
+    /// and no repository is staged for deletion.
+    #[test]
+    fn a_refused_restore_preview_stages_no_ticket() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, "keep.txt", "keep\n");
+        write_at(dir, "y", "the target's own bytes\n");
+        let target = commit_all(dir, "y is a file in the target");
+        git(dir, &["rm", "-q", "--", "y"]);
+        commit_all(dir, "y dropped from the tree");
+        repository_in(dir, "y");
+
+        let (writes, sessions, version) = state_and_session(dir);
+        let refusal = preview_restore(&writes, &sessions, version, &target)
+            .expect_err("a repository in the way is refused");
+        assert_eq!(refusal.code.as_str(), "reset_preview_repository");
+        assert!(refusal.message.contains("`y`"), "{}", refusal.message);
+        assert!(
+            writes.take_bound("").is_none(),
+            "there is no staged restore to take"
+        );
+        assert!(
+            dir.join("y/own.txt").exists(),
+            "a refusal runs nothing, ignored or not"
+        );
+    }
+
+    /// The two refusals the ordinary hard preview already makes are the restore
+    /// preview's too: there is no tree to restore to before the first commit,
+    /// and a merge in flight is not a state a reset should overwrite.
+    #[test]
+    fn a_restore_preview_refuses_where_a_reset_would_have_no_answer() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        git(dir, &["init", "--quiet", "--initial-branch=main"]);
+        let (writes, sessions, version) = state_and_session(dir);
+        let refusal = preview_restore(&writes, &sessions, version, "0000000")
+            .expect_err("an unborn head has no restore");
+        assert_eq!(refusal.code.as_str(), "reset_unborn");
+
+        let root = crate::sequencer::tests::diverged_repo(false);
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let started = crate::sequencer::merge_start(&writes, &sessions, version, "side").unwrap();
+        let version = started.snapshot.expect("the merge is in flight").version;
+        let refusal = preview_restore(&writes, &sessions, version, &head(dir))
+            .expect_err("a merge in flight is not a preview");
+        assert_eq!(refusal.code.as_str(), "reset_in_progress");
+    }
+
+    /// The one exception to "the restore leaves ignored files alone" is not a
+    /// reason to refuse, so it has to reach the page as its own line — a list
+    /// the panel could otherwise fold into "nothing untracked was touched".
+    #[test]
+    fn a_restore_preview_says_which_ignored_path_it_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, ".gitignore", "built.txt\n");
+        write_at(dir, "built.txt", "the target's own bytes\n");
+        // `add -f` because the rule is already in place and `add -A` would skip
+        // the very path this fixture is about.
+        git(dir, &["add", "-f", "--", "built.txt"]);
+        let target = commit_all(dir, "built.txt tracked despite the rule");
+        git(dir, &["rm", "--cached", "-q", "--", "built.txt"]);
+        commit_all(dir, "built.txt dropped from the tree, and ignored");
+        write_at(dir, "built.txt", "written by hand since\n");
+        write_at(dir, "plain.txt", "untracked\n");
+
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        assert_eq!(preview.ignored_written, ["built.txt"]);
+        assert!(preview.overwritten.is_empty(), "not counted twice");
+        assert_eq!(preview.removed, ["plain.txt"]);
     }
 }

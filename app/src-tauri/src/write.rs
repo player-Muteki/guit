@@ -53,6 +53,17 @@ pub(crate) enum Bound {
         target_oid: String,
         head_oid: String,
     },
+    /// A clean restore: the whole computed plan, not a display list. The
+    /// preview may show these sets grouped and paginated, but every one of
+    /// them is a fact the confirmation re-reads — the target and HEAD, the
+    /// paths the two trees disagree about, the edits dropped, the untracked
+    /// paths removed and written over, and the repositories that must still
+    /// not be in the way. A plan read out of a ticket can therefore never be
+    /// narrower than the plan that was shown.
+    Restore {
+        #[allow(dead_code)] // read by the confirmation this ticket is staged for
+        plan: crate::reset::Restoration,
+    },
     /// Remove a worktree bound to the HEAD it had when previewed.
     WorktreeRemove { path: String, head: String },
 }
@@ -182,6 +193,20 @@ impl WriteState {
                 target_oid,
                 head_oid,
             },
+        })
+    }
+
+    /// Ticket for a clean restore, bound to the whole affected plan. Nothing is
+    /// narrowed here: the plan that was computed is the plan that is re-read,
+    /// so a preview cannot promise a set the confirmation stops checking.
+    pub(crate) fn stage_restore(
+        &self,
+        work_root: PathBuf,
+        plan: crate::reset::Restoration,
+    ) -> String {
+        self.stage_preview(Preview {
+            work_root,
+            bound: Bound::Restore { plan },
         })
     }
 
