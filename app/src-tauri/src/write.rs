@@ -522,6 +522,11 @@ pub enum OperationKind {
     Skip,
     Reset,
     ResetHard,
+    /// A clean restore: the two-step write — `reset --hard` to the target and a
+    /// bounded `clean` over the paths the ticket named. It is its own kind
+    /// rather than `ResetHard` with a longer message, because the answer it
+    /// reports is about two Git processes and not one.
+    Restore,
     WorktreeAdd,
     WorktreeRemove,
     WorktreePrune,
@@ -1181,7 +1186,7 @@ fn quote_pathspec(raw: &[u8]) -> Vec<u8> {
 /// exact bytes Git reported, quoted as literal pathspecs, converted to OS
 /// arguments and placed behind a `--` separator, so no shell or display-name
 /// round trip happens and no name is read as a pattern.
-fn run_git_paths(
+pub(crate) fn run_git_paths(
     work_root: &Path,
     git_prefix: &[&str],
     targets: &[Vec<u8>],

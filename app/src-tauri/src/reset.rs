@@ -369,7 +369,7 @@ pub(crate) struct Difference {
 /// refuse: measured on the same shapes, `reset --hard` refuses nothing at all —
 /// it overwrites an untracked file, destroys an untracked directory and destroys
 /// a nested repository with its own `.git`, each with rc 0 and no warning.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Restoration {
     /// The commit the restore goes to, and the one it leaves, both full ids as
     /// Git resolved them — never the text that was typed.
@@ -380,10 +380,12 @@ pub(crate) struct Restoration {
     /// Every path the two trees disagree about.
     #[allow(dead_code)]
     pub differences: Vec<Difference>,
-    /// Tracked changes on one of those paths: the local edits the restore throws
-    /// away. This is the intersection of two reads, because neither alone says
-    /// it — status says where the working copy is dirty, the difference says
-    /// which of those paths the target moves at all.
+    /// Every tracked change the working copy or the index is carrying: exactly
+    /// what the restore throws away. Measured, not narrowed — a hand edit on a
+    /// path the two trees agree about is discarded all the same, so intersecting
+    /// this list with `differences` would promise "nothing is dropped" and then
+    /// drop a file, and a path staged but never committed is dirty in the index
+    /// only, which `clean` never lists and `reset --hard` removes from disk.
     #[allow(dead_code)]
     pub discarded: Vec<Vec<u8>>,
     /// Untracked paths the restore writes, because the target holds the path
@@ -638,14 +640,7 @@ pub(crate) fn plan_restore(
         .iter()
         .map(Vec::as_slice)
         .collect::<BTreeSet<&[u8]>>();
-    let changed = differences
-        .iter()
-        .map(|difference| difference.raw.as_slice())
-        .collect::<BTreeSet<&[u8]>>();
-    let discarded = tracked_dirty_set(sessions)?
-        .into_iter()
-        .filter(|raw| changed.contains(raw.as_slice()))
-        .collect();
+    let discarded = tracked_dirty_set(sessions)?;
     let removal_promise = write::clean_candidates(work_root, &[])?;
     let mut plan = Restoration {
         target_oid,
@@ -715,7 +710,8 @@ pub(crate) struct RestorePreview {
     pub head_oid: String,
     /// Tracked paths the current commit and the target disagree about.
     pub changed: Vec<String>,
-    /// Local edits on those paths: what leaving them where they are would drop.
+    /// Local edits the restore drops — every dirty tracked path, whether or not
+    /// the target moves that path.
     pub discarded: Vec<String>,
     /// Untracked paths the restore writes.
     pub overwritten: Vec<String>,
@@ -786,6 +782,183 @@ pub(crate) fn preview_restore(
         left_behind,
         snapshot,
     })
+}
+
+/// What the confirmation re-reads: the whole plan, built again by the same
+/// construction that made the preview. Comparing every set rather than a
+/// chosen few is the point — the promise the user clicked is the plan, and a
+/// second, narrower re-read is the drift this module keeps refusing to create.
+fn recheck_restore(
+    sessions: &session::SessionState,
+    work_root: &Path,
+    wanted: &Restoration,
+) -> write::Recheck {
+    if let Some(refusal) = sequencer::in_progress_message(sessions)? {
+        return Ok(Err(refusal));
+    }
+    let now = plan_restore(work_root, sessions, &wanted.target_oid)?;
+    // The refusal Git will not make is made again here: anything can put a
+    // repository where the target writes between the preview and this click,
+    // and the reset walks through it with rc 0 and no warning.
+    if let Err(refusal) = now.guard() {
+        return Ok(Err(refusal.message));
+    }
+    let moved = |what: &str| {
+        Ok(Err(format!(
+            "{what} changed after the preview; nothing was restored. Preview the restore again."
+        )))
+    };
+    if now.head_oid != wanted.head_oid {
+        return moved("The branch");
+    }
+    if now.differences != wanted.differences {
+        return moved("Which paths the target disagrees about");
+    }
+    if now.discarded != wanted.discarded {
+        return moved("The local changes the restore would drop");
+    }
+    if now.overwritten != wanted.overwritten
+        || now.ignored_written != wanted.ignored_written
+        || now.removals != wanted.removals
+        || now.left_behind != wanted.left_behind
+    {
+        return moved("The untracked files");
+    }
+    Ok(Ok(()))
+}
+
+/// The two steps a clean restore runs, inside the one held write slot. They are
+/// not atomic and nothing here pretends they are: the second step asks Git what
+/// it still agrees to remove *after* the reset, because the reset is what takes
+/// a path into the tree where `clean` then goes silent. A path Git no
+/// longer offers is reported as left where it is — not as a failure, not as a
+/// removal, and never with a second force added to make Git say yes.
+fn run_restore_steps(
+    state: &WriteState,
+    work_root: &Path,
+    plan: &Restoration,
+) -> Result<write::Ran, ProbeError> {
+    let target = short(&plan.target_oid);
+    let reset = write::ran_from(
+        sequencer::run_git(
+            work_root,
+            false,
+            &["reset", "--hard", &plan.target_oid],
+            state,
+        ),
+        write::Wording {
+            ok: format!("Restored the working copy to {target}."),
+            failed: "git reset --hard reported a failure.".to_owned(),
+            cancelled: "Cancelled while the Git process was running.".to_owned(),
+        },
+    )?;
+    if reset.outcome != Outcome::Success {
+        // The removal is not attempted: the plan the user confirmed describes a
+        // tree this reset did not produce, and a half-run `clean` against it
+        // would delete files nothing was previewed for.
+        return Ok(write::Ran {
+            message: format!(
+                "{} The untracked files were not removed, so this is not a clean restore.",
+                reset.message
+            ),
+            ..reset
+        });
+    }
+    if plan.removals.is_empty() {
+        return Ok(write::Ran {
+            message: format!(
+                "{} No untracked file was listed for removal.",
+                reset.message
+            ),
+            ..reset
+        });
+    }
+    let promised = plan
+        .removals
+        .iter()
+        .map(|item| item.raw.clone())
+        .collect::<Vec<_>>();
+    let offered = write::clean_candidates(work_root, &promised)?;
+    let going = promised
+        .iter()
+        .filter(|raw| covered_by_clean(&offered, raw))
+        .cloned()
+        .collect::<Vec<_>>();
+    let left = promised.len() - going.len();
+    let silence = if left == 0 {
+        String::new()
+    } else {
+        format!(
+            " {left} path(s) the preview listed were not removed: git clean does not offer them."
+        )
+    };
+    if going.is_empty() {
+        return Ok(write::Ran::ok(
+            format!(
+                "{} None of the {} untracked path(s) the preview listed are removed: git clean does not offer them.",
+                reset.message, promised.len()
+            ),
+            None,
+        ));
+    }
+    let clean = write::ran_from(
+        write::run_git_paths(work_root, &["clean", "-fd"], &going, state.cancel_flag()),
+        write::Wording {
+            ok: format!("Removed {} untracked item(s).", going.len()),
+            failed: "git clean reported a failure.".to_owned(),
+            cancelled: "Cancelled while the Git process was running.".to_owned(),
+        },
+    )?;
+    let message = match clean.outcome {
+        Outcome::Success => format!("{} {}{}", reset.message, clean.message, silence),
+        _ => format!(
+            "{} The working copy reached {target}; the untracked files were not all removed.{silence}",
+            clean.message
+        ),
+    };
+    Ok(write::Ran { message, ..clean })
+}
+
+/// The clean restore's confirmation: the ticket goes first, the whole plan is
+/// re-read against it, and only then do the two Git steps run — each recorded
+/// with what it actually did.
+#[allow(dead_code)] // goes away with the command that consumes this ticket
+pub(crate) fn restore_clean(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    nonce: String,
+) -> Result<OperationResult, ProbeError> {
+    let operation_id = state.begin()?;
+    let result = run_restore(state, sessions, &nonce);
+    state.finish();
+    result.map(|mut result| {
+        result.operation_id = operation_id;
+        result
+    })
+}
+
+fn run_restore(
+    state: &WriteState,
+    sessions: &session::SessionState,
+    nonce: &str,
+) -> Result<OperationResult, ProbeError> {
+    write::confirm(
+        state,
+        sessions,
+        OperationKind::Restore,
+        nonce,
+        write::Refusals {
+            expired: "That confirmation has expired; preview the restore again.",
+            session_changed: "A different repository is open now; preview the restore again.",
+            cancelled_before_git: "Cancelled before Git ran; nothing was changed.",
+        },
+        |preview| match preview.bound {
+            write::Bound::Restore { plan } => Some((preview.work_root, plan)),
+            _ => None,
+        },
+        |work_root, plan| recheck_restore(sessions, work_root, plan),
+        |work_root, plan| run_restore_steps(state, work_root, plan),
+    )
 }
 
 /// The shared refusal path: everything rejected happens before Git runs,
@@ -2162,5 +2335,193 @@ mod tests {
         assert_eq!(preview.ignored_written, ["built.txt"]);
         assert!(preview.overwritten.is_empty(), "not counted twice");
         assert_eq!(preview.removed, ["plain.txt"]);
+    }
+
+    /// A fixture the two steps have something to do in: one committed edit to
+    /// drop, one local edit to throw away, one untracked file to remove.
+    fn restore_repo() -> (tempfile::TempDir, String) {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, "keep.txt", "the target's own bytes\n");
+        let target = commit_all(dir, "the restore goes here");
+        write_at(dir, "keep.txt", "committed since\n");
+        commit_all(dir, "a commit the restore steps over");
+        write_at(dir, "keep.txt", "an edit nobody committed\n");
+        write_at(dir, "plain.txt", "untracked\n");
+        (root, target)
+    }
+
+    /// Both steps, run for real: HEAD is at the target, the file holds the
+    /// target's bytes rather than the hand edit, and the named untracked file is
+    /// off the disk. The message answers for two Git processes, not one.
+    #[test]
+    fn a_confirmed_restore_runs_the_reset_and_then_the_bounded_clean() {
+        let (root, target) = restore_repo();
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        assert_eq!(preview.discarded, ["keep.txt"]);
+        assert_eq!(preview.removed, ["plain.txt"]);
+
+        let result = restore_clean(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert!(
+            result.message.contains("Restored the working copy")
+                && result.message.contains("Removed 1 untracked item(s)"),
+            "{}",
+            result.message
+        );
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), target, "the reset ran");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("keep.txt")).unwrap(),
+            "the target's own bytes\n"
+        );
+        assert!(!dir.join("plain.txt").exists(), "the clean ran");
+    }
+
+    /// Going to the commit HEAD is already on is still a restore. The tree
+    /// difference it claims is empty, yet `reset --hard` drops every local edit
+    /// anyway — including the one on a path the two trees agree about — so the
+    /// preview owes that path a line, and the removal answers for itself.
+    #[test]
+    fn a_restore_to_the_current_commit_still_discards_and_still_removes() {
+        let (root, _) = restore_repo();
+        let dir = root.path();
+        let current = head(dir);
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &current).unwrap();
+        assert!(preview.changed.is_empty());
+        assert_eq!(preview.discarded, ["keep.txt"]);
+        assert_eq!(preview.removed, ["plain.txt"]);
+
+        let result = restore_clean(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), current);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("keep.txt")).unwrap(),
+            "committed since\n",
+            "the hand edit on a path the target does not move is gone, as promised"
+        );
+        assert!(!dir.join("plain.txt").exists());
+    }
+
+    /// A file appearing after the preview is nobody's business to delete, and
+    /// the preview's business to refuse: the plan the user read no longer
+    /// describes the tree, so both steps stay unrun — and the ticket is spent
+    /// anyway, so the next answer has to come from a fresh preview.
+    #[test]
+    fn a_restore_refuses_a_tree_that_moved_after_the_preview() {
+        let (root, target) = restore_repo();
+        let dir = root.path();
+        let before = head(dir);
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        let nonce = preview.nonce;
+        write_at(dir, "arrived-later.txt", "in no preview\n");
+
+        let result = restore_clean(&writes, &sessions, nonce.clone()).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
+        assert!(
+            result.message.contains("The untracked files changed"),
+            "{}",
+            result.message
+        );
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), before, "nothing ran");
+        assert!(dir.join("plain.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("keep.txt")).unwrap(),
+            "an edit nobody committed\n"
+        );
+        let replay = restore_clean(&writes, &sessions, nonce).unwrap();
+        assert_eq!(replay.outcome, Outcome::Rejected);
+        assert!(
+            replay.message.contains("expired"),
+            "a spent ticket stays spent: {}",
+            replay.message
+        );
+    }
+
+    /// The reset is the step that decides whether the removal happens at all.
+    /// A failed `reset --hard` leaves the tree wherever Git abandoned it, and a
+    /// `clean` aimed at the confirmed list would then delete files that were
+    /// only ever previewed against a tree that does not exist.
+    #[test]
+    fn a_restore_that_cannot_reset_does_not_clean() {
+        let (root, target) = restore_repo();
+        let dir = root.path();
+        let before = head(dir);
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        let lock = dir.join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let result = restore_clean(&writes, &sessions, preview.nonce).unwrap();
+        std::fs::remove_file(&lock).unwrap();
+
+        assert_eq!(result.outcome, Outcome::Failed, "{}", result.message);
+        assert_eq!(result.exit_code, Some(128), "git's own status, not a guess");
+        assert!(
+            result.message.contains("were not removed"),
+            "the second step is named as unrun: {}",
+            result.message
+        );
+        assert!(dir.join("plain.txt").exists(), "the clean never ran");
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), before);
+    }
+
+    /// A cancel that arrives before the ticket is confirmed stops both steps
+    /// with one process unstarted: there is no half-run restore to report,
+    /// because nothing ran.
+    #[test]
+    fn a_cancel_before_git_starts_leaves_a_restore_untouched() {
+        let (root, target) = restore_repo();
+        let dir = root.path();
+        let before = head(dir);
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        // Taking the slot clears the cancel flag, so the flag is set inside a
+        // held operation — the only order a real cancellation can arrive in.
+        writes.begin().unwrap();
+        writes.cancel();
+        let result = run_restore(&writes, &sessions, &preview.nonce).unwrap();
+        writes.finish();
+
+        assert_eq!(result.outcome, Outcome::Cancelled, "{}", result.message);
+        assert!(
+            result.message.contains("before Git ran"),
+            "{}",
+            result.message
+        );
+        assert_eq!(result.exit_code, None);
+        assert_eq!(read(dir, &["rev-parse", "HEAD"]), before);
+        assert!(dir.join("plain.txt").exists());
+    }
+
+    /// A repository put where the target writes after the preview is refused by
+    /// the same sentence the preview gave — and the refusal is the point,
+    /// because the command it replaces destroys that repository silently.
+    #[test]
+    fn a_repository_put_in_the_way_after_the_preview_is_refused_at_the_gate() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        init(dir);
+        write_at(dir, "keep.txt", "keep\n");
+        write_at(dir, "y", "the target's own bytes\n");
+        let target = commit_all(dir, "y is a file in the target");
+        git(dir, &["rm", "-q", "--", "y"]);
+        commit_all(dir, "y dropped from the tree");
+
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        assert!(preview.overwritten.is_empty(), "nothing is in the way yet");
+        repository_in(dir, "y");
+
+        let result = restore_clean(&writes, &sessions, preview.nonce).unwrap();
+        assert_eq!(result.outcome, Outcome::Rejected, "{}", result.message);
+        assert!(result.message.contains("`y`"), "{}", result.message);
+        assert!(
+            dir.join("y/own.txt").exists(),
+            "the refusal is what kept a repository alive"
+        );
     }
 }

@@ -154,6 +154,7 @@ export type OperationResult = {
     | "skip"
     | "reset"
     | "resethard"
+    | "restore"
     | "worktreeadd"
     | "worktreeremove"
     | "worktreeprune";
