@@ -6,7 +6,7 @@
 // that had lost their page. Those costs are invisible to a static gate and to
 // a unit test, because they are a question about which commands the *running*
 // frontend decides to invoke. So this drives the real bundle in a renderer,
-// with the Rust side replaced by a counting stub, and asks five things of it:
+// with the Rust side replaced by a counting stub, and asks these of it:
 //
 //   boot      a repository opening reads the history it shows, and nothing else
 //   refresh   a snapshot whose content did not move, reads nothing
@@ -19,6 +19,10 @@
 //             balance of event registrations against event releases where it was
 //   interval    using the refresh-period row re-arms the one repeating timer rather
 //             than adding a second, and costs no read at all
+//   search    a keystroke asks one read for the one question it means; the wait
+//             the field keeps before asking is counted inside the measured
+//             number rather than outside it; and a move of the history re-asks
+//             the question the rows on screen already answer, once
 //   close     ending the session reads nothing and stops showing what the
 //             repository that is no longer open had on screen
 //
@@ -58,6 +62,10 @@ const CDP = `http://127.0.0.1:${PORT}`;
 const GRAPH_READS = ["history_page"];
 const REFS_READS = ["list_refs"];
 const NEVER_READ = ["stash_list", "list_worktrees", "submodule_status", "commit_files"];
+// Its own column because it belongs to no snapshot: a search read is caused by a
+// keystroke, so every case above that counts a refresh must also be able to say
+// that the field asked for nothing.
+const SEARCH_READS = ["search_repository"];
 
 const fileView = (id, group, display, extra) => ({
   id,
@@ -275,6 +283,54 @@ const STUB = `(() => {
       if (!window.__HOLD__) return answer;
       return new Promise((done) => { held.push(() => done(answer)); });
     },
+    // One window of a walk, answered the way the backend shapes it: the rows the
+    // query matched, the head the offsets count back from, and the names on the
+    // first window only. It answers in a microtask, so every number this probe
+    // reports for a keystroke is the panel's own share and the wait in front of
+    // it — never the walk, which is measured beside it and not here.
+    search_repository: (A) => {
+      const needle = String((A && A.query) || "");
+      const cursor = Number((A && A.cursor) || 0);
+      const low = needle.toLowerCase();
+      const frag = (text) => {
+        const at = text.toLowerCase().indexOf(low);
+        if (at < 0) return null;
+        return [{ byteStart: at, byteEnd: at + needle.length, unitStart: at, unitEnd: at + needle.length }];
+      };
+      const commits = [];
+      COMMITS.forEach((one, index) => {
+        const fragments = frag(one.message);
+        if (fragments === null) return;
+        commits.push({
+          oid: one.oid,
+          message: one.message,
+          subjectEndBytes: one.message.length,
+          subjectEndUnits: one.message.length,
+          authorName: one.authorName,
+          commitDate: one.commitDate,
+          offset: index,
+          hits: [{ field: "subject", tier: "contiguous", fragments }],
+        });
+      });
+      const refs = [];
+      if (cursor === 0) {
+        for (const branch of refsValue().branches) {
+          const fragments = frag(branch.name);
+          if (fragments !== null) refs.push({ kind: "branch", name: branch.name, commitOid: branch.oid,
+            head: branch.head, reachedFromHead: true, tier: "contiguous", fragments });
+        }
+        const fragments = frag("v1");
+        if (fragments !== null) refs.push({ kind: "tag", name: "v1", commitOid: window.__TAG__,
+          head: false, reachedFromHead: true, tier: "contiguous", fragments });
+      }
+      return { context: A.context, value: {
+        queryId: A.queryId,
+        head: window.__SNAPSHOT__.branch.oid,
+        refsGeneration: window.__SNAPSHOT__.refsGeneration,
+        window: { cursor, scanned: COMMITS.length, complete: false, stoppedBy: null,
+          nextCursor: COMMITS.length, hitsTruncated: false, commits, refs },
+      } };
+    },
     commit_files: (A) => ({ context: A.context, value: [] }),
     show_tag: (A) => ({ context: A.context, value: { name: "v1", oid: "c".repeat(40), targetType: "commit", commitOid: window.__TAG__, annotated: true, message: "" } }),
     stash_list: (A) => ({ context: A.context, value: [] }),
@@ -320,6 +376,44 @@ const STUB = `(() => {
     Object.assign(window.__SNAPSHOT__, patch);
     document.querySelector('.appbar [aria-label="Refresh status"]').click();
   };
+  // One keystroke, timed from the input event to the two things a reader waits
+  // for: the waiting sentence beside the field, and the first row in the layer.
+  // A MutationObserver rather than a poll — its callback is handed to the same
+  // microtask checkpoint the paint runs in, so the number is the moment the panel
+  // changed its own mind, not the granularity of whatever loop was watching.
+  window.__TIMED__ = (text) => new Promise((done) => {
+    const view = document.querySelector('.search-view');
+    const field = view.querySelector('.search-field');
+    const hint = view.querySelector('.search-hint');
+    const seen = { hint: -1, row: -1 };
+    const start = performance.now();
+    const observer = new MutationObserver(() => {
+      const at = performance.now() - start;
+      if (seen.hint < 0 && hint.textContent.indexOf('Searching') === 0) seen.hint = at;
+      if (seen.row < 0 && view.querySelector('.search-row') !== null) seen.row = at;
+      if (seen.hint < 0 || seen.row < 0) return;
+      observer.disconnect();
+      done([seen.hint, seen.row]);
+    });
+    observer.observe(view, { subtree: true, childList: true, characterData: true, attributes: true });
+    field.value = text;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  // The same question asked twenty times, with the field emptied in between so
+  // every sample starts from a closed layer and an answer already on its way
+  // cannot overlap the next one. Emptying asks for nothing; the count taken
+  // around this loop is where that is checked.
+  window.__WARM__ = (text, times) => (async () => {
+    const samples = [];
+    for (let index = 0; index < times; index += 1) {
+      const field = document.querySelector('.search-field');
+      field.value = '';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((settle) => setTimeout(settle, 40));
+      samples.push(await window.__TIMED__(text));
+    }
+    return samples;
+  })();
   window.__TAURI_INTERNALS__ = {
     invoke: (cmd, args) => {
       const A = args || {};
@@ -458,6 +552,27 @@ function openSocket(url) {
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
+// Nearest-rank: the first value at or above the fraction of samples, so a p95
+// over twenty readings is the nineteenth of them sorted rather than the largest
+// one wearing somebody else's name. Twenty is the floor a performance unit has
+// to be measured at, and it is what makes reporting a p95 here mean anything.
+const quantile = (values, fraction) => {
+  const sorted = values.slice().sort((a, b) => a - b);
+  return sorted[Math.max(0, Math.ceil(fraction * sorted.length) - 1)];
+};
+
+// The wait the field keeps before it asks, read out of the source it is exported
+// from rather than repeated here. The reason is the measurement below: a bar
+// charged from the keystroke has to be compared against a number that contains
+// the wait, and a constant held only in this file could be quietly out of date
+// with the one the panel runs on.
+const exportedDebounce = () => {
+  const source = readFileSync(join(here, "..", "..", "app", "src", "searchModel.ts"), "utf8");
+  const found = /export const SEARCH_DEBOUNCE_MS = (\d+)/.exec(source);
+  if (found === null) throw new Error("searchModel.ts no longer exports SEARCH_DEBOUNCE_MS");
+  return Number(found[1]);
+};
+
 async function main() {
   const fails = [];
   const check = (label, ok, detail) => {
@@ -507,6 +622,7 @@ async function main() {
   const boot = await calls();
   check("boot reads the history it shows, once", total(boot, GRAPH_READS) === 1, JSON.stringify(boot));
   check("boot reads the names it shows, once", total(boot, REFS_READS) === 1, JSON.stringify(boot));
+  check("boot asks the empty field nothing", total(boot, SEARCH_READS) === 0, JSON.stringify(boot));
   check("boot reads nothing that has no page", total(boot, NEVER_READ) === 0, NEVER_READ.filter((n) => boot[n]).join(","));
   // The join is by the commit each name points at, so a listing that arrived is
   // only worth having if its names sit on the right rows.
@@ -523,7 +639,7 @@ async function main() {
     document.querySelector('.appbar [aria-label="Refresh status"]').click();
     document.querySelector('.appbar [aria-label="Refresh status"]').click();
   `);
-  check("a refresh that moved nothing reads nothing", total(refreshed, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0, JSON.stringify(refreshed));
+  check("a refresh that moved nothing reads nothing", total(refreshed, [...GRAPH_READS, ...REFS_READS, ...SEARCH_READS, ...NEVER_READ]) === 0, JSON.stringify(refreshed));
 
   const moved = await spent(`window.__MOVE__("graph", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(1).padStart(40, "0")}" }) })`);
   check("a move that only bumps the history counter asks for the graph alone",
@@ -550,7 +666,7 @@ async function main() {
   const filesOnly = await spent(`
     window.__SNAP__({ files: ${JSON.stringify(FILES)} });
   `);
-  check("changed files alone ask for no listing", total(filesOnly, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0, JSON.stringify(filesOnly));
+  check("changed files alone ask for no listing", total(filesOnly, [...GRAPH_READS, ...REFS_READS, ...SEARCH_READS, ...NEVER_READ]) === 0, JSON.stringify(filesOnly));
 
   // The Git-shaped fields say the same thing as before; only the session differs.
   // Nothing the panel can see in a snapshot tells these two repositories apart,
@@ -685,7 +801,7 @@ async function main() {
   // one graph read it costs here.
   const afterRounds = await spent(`window.__MOVE__("graph", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(2).padStart(40, "0")}" }) })`);
   check("a moved head still costs one graph read after twelve round trips",
-    total(afterRounds, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 1, JSON.stringify(afterRounds));
+    total(afterRounds, [...GRAPH_READS, ...REFS_READS, ...SEARCH_READS, ...NEVER_READ]) === 1, JSON.stringify(afterRounds));
 
   // --- the interval row ---
   //
@@ -716,7 +832,7 @@ async function main() {
   check("the interval row leaves the panel with one repeating timer",
     afterInterval.intervals === 1, `${afterInterval.intervals} live intervals`);
   check("changing the interval reads nothing",
-    total(intervalRows, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0, JSON.stringify(intervalRows));
+    total(intervalRows, [...GRAPH_READS, ...REFS_READS, ...SEARCH_READS, ...NEVER_READ]) === 0, JSON.stringify(intervalRows));
   // The field shows the number in force, and storage holds it: the first is what
   // stops a clamped request from leaving a lie in the box, the second is what makes
   // the key a live name rather than one a later build migrates out of nothing.
@@ -725,11 +841,144 @@ async function main() {
     return box.value === localStorage.getItem("guit.activityInterval") && box.value === "5";
   })()`));
 
+  // --- the search field ---
+  //
+  // The field is the one read this panel starts because a person asked for it, so
+  // it has its own budget rather than a share of the refresh one: a question
+  // walked over the history should cost the history listing nothing, and a
+  // refresh should cost the question nothing. The counts below are the shape of
+  // that separation. The timing at the end is the other half, and it is taken
+  // from the keystroke — which is why the wait is read out of the source and put
+  // inside the measured number rather than subtracted from it.
+  const keystroke = (text) => `(() => {
+    const field = document.querySelector('.search-field');
+    field.value = ${JSON.stringify(text)};
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`;
+
+  const asked = await spent(keystroke("commit"));
+  check("one keystroke asks one search read and no other read",
+    total(asked, SEARCH_READS) === 1 && total(asked, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0,
+    JSON.stringify(asked));
+  const answered = await evaluate(`(() => {
+    const results = document.querySelector('.search-results');
+    return [
+      !results.hidden,
+      document.querySelectorAll('.search-row').length,
+      document.querySelector('.search-hint').textContent,
+      results.querySelector('.search-footer').textContent,
+    ];
+  })()`);
+  check("the answer is rows and a sentence about them, not a waiting word",
+    answered[0] && answered[1] === 40 && answered[2] === "" && /40 commits matched/.test(answered[3]),
+    JSON.stringify(answered));
+
+  // The continuation is the same question asked further back, under the same
+  // query id, because the backend keys one scan's cancellation on that pair. It
+  // is still only a search read: nothing here re-lists the names or re-reads the
+  // page the graph is drawing.
+  const further = await spent(`document.querySelector('.search-footer button').click()`);
+  check("reading further back asks again and touches no other listing",
+    total(further, SEARCH_READS) === 1 && total(further, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0,
+    JSON.stringify(further));
+
+  // An input method tells one question in several keystrokes. Each of them fires
+  // an input event, and a scan started on a half-composed character is a scan
+  // thrown away — so the middle of a composition costs this panel no read at all,
+  // and the text that actually lands is asked once, on the ordinary wait.
+  const halfWritten = await spent(`(() => {
+    const field = document.querySelector('.search-field');
+    field.dispatchEvent(new CompositionEvent('compositionstart'));
+    for (const piece of ['n', 'ni', '你']) {
+      field.value = piece;
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  })()`);
+  check("a composition in progress asks for nothing", total(halfWritten, SEARCH_READS) === 0, JSON.stringify(halfWritten));
+  const landed = await spent(`(() => {
+    document.querySelector('.search-field').dispatchEvent(new CompositionEvent('compositionend'));
+  })()`);
+  check("the text that lands at the end of one is asked once", total(landed, SEARCH_READS) === 1, JSON.stringify(landed));
+
+  const emptied = await spent(`(() => {
+    const field = document.querySelector('.search-field');
+    field.value = '';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  check("emptying the field asks for nothing and takes the layer down",
+    total(emptied, SEARCH_READS) === 0 && (await evaluate("document.querySelector('.search-results').hidden")),
+    JSON.stringify(emptied));
+
+  // The search reads the history on screen, so it follows the graph's own rule:
+  // the backend's counter retired the answer, and the reader's question is still
+  // in the field. One re-ask, on the same wait any other keystroke pays — and no
+  // second one, which is what a view that re-armed its timer per repaint would
+  // cost.
+  await spent(keystroke("commit"));
+  const historyMoved = await spent(`window.__MOVE__("graph", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { oid: "${String(3).padStart(40, "0")}" }) })`);
+  check("a moved history re-asks the question on screen, once, and moves no listing",
+    total(historyMoved, SEARCH_READS) === 1 && total(historyMoved, GRAPH_READS) === 1 && total(historyMoved, REFS_READS) === 0,
+    JSON.stringify(historyMoved));
+
+  // A names move is the other half of that rule. The rows answer a question about
+  // commits, which did not move, so the layer keeps them and asks for nothing —
+  // even though the answer it holds carries a names generation older than the
+  // screen's, which is a thing the footer says rather than a reason to re-read.
+  const namesMoved = await spent(`window.__MOVE__("refs", { branch: Object.assign({}, window.__SNAPSHOT__.branch, { behind: 7 }) })`);
+  check("a names move leaves an answer about the history alone and asks for nothing",
+    total(namesMoved, SEARCH_READS) === 0 && (await evaluate("document.querySelectorAll('.search-row').length")) === 40,
+    JSON.stringify(namesMoved));
+
+  const DEBOUNCE = exportedDebounce();
+  await evaluate("window.__RESET__()");
+  const samples = await evaluate(`window.__WARM__("commit", 20)`);
+  const warm = await calls();
+  const hintMs = samples.map((pair) => pair[0]);
+  const rowMs = samples.map((pair) => pair[1]);
+  const shown = (values) => values.map((one) => one.toFixed(1)).join(" ");
+  const state = await evaluate("document.visibilityState");
+  console.log(`   keystroke to the waiting sentence  p50 ${quantile(hintMs, 0.5).toFixed(1)}  p95 ${quantile(hintMs, 0.95).toFixed(1)}  [${shown(hintMs)}]`);
+  console.log(`   keystroke to the first drawn row   p50 ${quantile(rowMs, 0.5).toFixed(1)}  p95 ${quantile(rowMs, 0.95).toFixed(1)}  [${shown(rowMs)}]`);
+  check("twenty keystrokes ask twenty searches and no other read",
+    total(warm, SEARCH_READS) === samples.length && total(warm, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0,
+    `${samples.length} samples, ${JSON.stringify(warm)}`);
+  // Not a bar the panel is being held to: a claim about the measurement. Every
+  // sample has to contain the wait, and a number below it would mean this channel
+  // timed the request instead of the keystroke — the one way it could report a
+  // fast panel while the panel asks from a timer nobody is measuring.
+  check("the wait is counted inside what is measured",
+    quantile(hintMs, 0.5) >= DEBOUNCE && quantile(rowMs, 0.5) >= DEBOUNCE,
+    `p50 ${quantile(hintMs, 0.5).toFixed(1)} / ${quantile(rowMs, 0.5).toFixed(1)} against the exported ${DEBOUNCE} ms wait (${state} tab)`);
+  // Both bars are the product's own, and both are answered by this channel's part
+  // of them only: the stub resolves in a microtask, so the second number is what
+  // the reader waits for before a request is even out of the panel, and the walk
+  // behind it is measured separately, in Rust, and reported beside it rather than
+  // folded into this.
+  check("the waiting sentence arrives inside the bar for it",
+    quantile(hintMs, 0.95) <= 150,
+    `p95 ${quantile(hintMs, 0.95).toFixed(1)} ms, of which ${DEBOUNCE} ms is the wait`);
+  check("the first rows arrive inside the bar for them",
+    quantile(rowMs, 0.95) <= 500,
+    `p95 ${quantile(rowMs, 0.95).toFixed(1)} ms with an answer that costs no Git read`);
+
   // Ending the session is the one snapshot transition that is not a read, and
   // the graph has to answer it: a list of commits from a repository that is no
-  // longer open says something about the screen that is no longer true.
+  // longer open says something about the screen that is no longer true. The field
+  // is left holding a live question here, because that is the case worth
+  // measuring — a reader who searches and then closes the repository.
+  const askedBeforeClose = await evaluate(`(() => {
+    const field = document.querySelector('.search-field');
+    return [field.value, document.querySelectorAll('.search-row').length];
+  })()`);
   const ended = await spent(`document.querySelector('.appbar [aria-label="Close session"]').click()`);
-  check("closing the session reads nothing", total(ended, [...GRAPH_READS, ...REFS_READS, ...NEVER_READ]) === 0, JSON.stringify(ended));
+  check("closing the session reads nothing", total(ended, [...GRAPH_READS, ...REFS_READS, ...SEARCH_READS, ...NEVER_READ]) === 0, JSON.stringify(ended));
+  check("closing the session takes the field's answer with it",
+    askedBeforeClose[0] === "commit" && askedBeforeClose[1] === 40 && (await evaluate(`(() => {
+      const field = document.querySelector('.search-field');
+      return field.value === '' && field.disabled && document.querySelector('.search-results').hidden
+        && document.querySelectorAll('.search-row').length === 0;
+    })()`)),
+    JSON.stringify(askedBeforeClose));
   check("closing the session clears the graph it was showing", await evaluate(`(() => {
     const rows = document.querySelectorAll('[id^="commit-row-"]').length;
     const empty = document.querySelector('.history-view .empty-state');

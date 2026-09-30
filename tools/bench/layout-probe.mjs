@@ -6,11 +6,13 @@
 // painted on top of the next one, while every accessibility assertion still
 // passed. That is a rendering fact, so it is checked in a renderer.
 //
-// The panel is two pages that share one tab strip, one layer the branch picker
-// borrows, and a main page whose two regions are on screen together. The probe
-// boots the built bundle against a stub IPC, then measures every screen the
-// user can be on at every interesting shape. Three defects are asserted on each
-// of them, and they are the three that produce invisible or unusable UI:
+// The panel is two pages that share one tab strip, two layers that float over
+// the page (the branch picker borrows one page-sized, the search field draws its
+// results into a shorter one), and a main page whose two regions are on screen
+// together. The probe boots the built bundle against a stub IPC, then measures
+// every screen the user can be on at every interesting shape. Three defects are
+// asserted on each of them, and they are the three that produce invisible or
+// unusable UI:
 //
 //   overlap   two nodes that both render text and whose boxes intersect
 //   overflow  a node whose right edge leaves the viewport
@@ -25,7 +27,9 @@
 //              height, not a hairline nobody can grab
 //   reach      every primary action is focusable and carries its name in the
 //              accessibility tree — including a tab whose visible label a
-//              narrow window has dropped
+//              narrow window has dropped, and the three repository icons the bar
+//              gives up below 481px, which are looked for in the More menu that
+//              the stylesheet says repeats them, read with that menu open
 //   keys       Ctrl/Cmd+1 and +2 move between the pages from a cold start, and
 //              Escape leaves a layer with focus on the strip that stays
 //
@@ -206,6 +210,71 @@ const STUB = `(() => {
       ],
     }),
     show_tag: (A) => ({ context: A.context, value: { name: "v0.1.0", oid: "bb655b5b", targetOid: "bb655b5b", annotated: true, message: "" } }),
+    // One window of a search, in the shape the backend publishes. The answer is
+    // deliberately not complete: a settled scan hides the layer's own paging
+    // button, and that button is part of what this probe lays out. The fragments
+    // are computed from the query rather than written down, because the row is
+    // drawn by slicing the string at those units — an off-by-one here would draw
+    // a row that no real answer could produce, and the layer would be measured
+    // with furniture instead of content. The fixture's own strings are ASCII, so
+    // byte and UTF-16 offsets coincide and both are given honestly.
+    search_repository: (A) => {
+      const needle = String((A && A.query) || "");
+      const low = needle.toLowerCase();
+      const frag = (text) => {
+        const at = text.toLowerCase().indexOf(low);
+        if (at < 0) return null;
+        return [{ byteStart: at, byteEnd: at + needle.length, unitStart: at, unitEnd: at + needle.length }];
+      };
+      const commits = COMMITS.map((one) => {
+        const subject = frag(one.subject);
+        const body = frag(one.message);
+        const hits = [];
+        if (subject) hits.push({ field: "subject", tier: "subsequence", fragments: subject });
+        if (body) hits.push({ field: "body", tier: "subsequence", fragments: body });
+        return {
+          oid: one.oid,
+          message: one.message,
+          subjectEndBytes: one.subject.length + 1,
+          subjectEndUnits: one.subject.length + 1,
+          authorName: one.authorName,
+          commitDate: one.commitDate,
+          offset: 0,
+          hits,
+        };
+      });
+      const refs = [];
+      for (const branch of REFS.branches) {
+        const fragments = frag(branch.name);
+        if (fragments) {
+          refs.push({ kind: "branch", name: branch.name, commitOid: branch.oid, head: branch.current, reachedFromHead: true, tier: "subsequence", fragments });
+        }
+      }
+      for (const tag of REFS.tags) {
+        const fragments = frag(tag.name);
+        if (fragments) {
+          refs.push({ kind: "tag", name: tag.name, commitOid: tag.target, head: false, reachedFromHead: true, tier: "subsequence", fragments });
+        }
+      }
+      return {
+        context: A.context,
+        value: {
+          queryId: A.queryId,
+          head: window.__SNAPSHOT__.branch.oid,
+          refsGeneration: window.__SNAPSHOT__.refsGeneration,
+          window: {
+            cursor: A.cursor,
+            scanned: COMMITS.length,
+            complete: false,
+            stoppedBy: null,
+            nextCursor: COMMITS.length,
+            hitsTruncated: false,
+            commits,
+            refs,
+          },
+        },
+      };
+    },
     stash_list: (A) => ({ context: A.context, value: [] }),
     list_worktrees: (A) => ({ context: A.context, value: [] }),
     submodule_status: (A) => ({ context: A.context, value: [] }),
@@ -264,6 +333,16 @@ const STUB = `(() => {
     // through the document, and the layer's Escape lives there.
     document.body.dispatchEvent(new KeyboardEvent("keydown", { key: key, ctrlKey: true, bubbles: true, cancelable: true }));
   };
+  // Typing into the field is the only way the result layer opens: the view asks
+  // on its own clock, so this writes the text and fires the same input event a
+  // keyboard would, and the caller sleeps past the debounce before measuring.
+  window.__SEARCH__ = (text) => {
+    const field = document.querySelector(".search-field");
+    if (!field) return false;
+    field.value = text;
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    return true;
+  };
 })();`;
 
 // --- the in-page measurement ----------------------------------------------
@@ -277,7 +356,7 @@ const MEASURE = `(() => {
   for (const name of ["--surface-app", "--surface-panel", "--accent", "--text",
                       "--appbar-height", "--statusbar-height", "--tab-min-width",
                       "--tab-item-size", "--splitter-size", "--main-split",
-                      "--gutter", "--detail-cap", "--list-cap"]) {
+                      "--gutter", "--detail-cap", "--list-cap", "--search-cap"]) {
     tokens[name] = style.getPropertyValue(name).trim();
   }
   const root = document.querySelector(".shell") || document.body;
@@ -320,22 +399,42 @@ const MEASURE = `(() => {
     return box.width > 0 && box.height > 0;
   };
   // Every element that renders text of its own (not inherited from a child).
-  // The one page-sized layer the branch picker borrows is opaque and covers
-  // the stage, so what is behind it is not painted and cannot be mislaid: it is
-  // measured against the layer's own contents, and what sits under it is left
-  // out rather than reported as a hundred overlaps.
+  // Two layers float over the page: the branch picker borrows a page-sized
+  // overlay, and the search field draws its results into a smaller one. Both are
+  // opaque, so what sits under one is not painted and cannot be mislaid: it is
+  // left out rather than reported as a hundred overlaps. A layer that is only
+  // partly transparent is read *through*, so the claim is about its paint, not
+  // about its z-index — and a partial layer hides only what it actually covers.
+  const stage = document.querySelector(".stage");
+  const isOpaque = (node) => {
+    const background = getComputedStyle(node).backgroundColor;
+    return background !== "" && background !== "transparent" && background.indexOf("rgba(") !== 0;
+  };
+  const floaters = Array.from(document.querySelectorAll(".overlay:not([hidden]), .search-results:not([hidden])"))
+    .filter(isOpaque)
+    .map((node) => ({
+      node: node,
+      box: node.getBoundingClientRect(),
+      kind: node.classList.contains("search-results") ? "search" : "picker",
+    }));
+  // Which layer hides a node, kept rather than a bare yes/no: "the panel is
+  // unreadable under it" is a different claim about the picker and about the
+  // search layer, and the count that says which one did it is cheap here.
+  const coveredBy = (node) => {
+    for (const one of floaters) {
+      if (one.node.contains(node)) continue;
+      if (!stage || !stage.contains(node)) continue;
+      const box = node.getBoundingClientRect();
+      if (box.right > one.box.left && box.left < one.box.right
+        && box.bottom > one.box.top && box.top < one.box.bottom) return one.kind;
+    }
+    return null;
+  };
+  // The picker's own layer, reported separately because its promise is about the
+  // whole stage: it is only a fix for a cramped panel if it really hides it.
   const layer = document.querySelector(".overlay:not([hidden])");
   const layerBox = layer ? layer.getBoundingClientRect() : null;
   const layerPaint = layer ? getComputedStyle(layer) : null;
-  const covers = (node) => {
-    if (layerBox === null) return false;
-    if (layer.contains(node)) return false;
-    const stage = document.querySelector(".stage");
-    if (!stage || !stage.contains(node)) return false;
-    const box = node.getBoundingClientRect();
-    return box.right > layerBox.left && box.left < layerBox.right
-      && box.bottom > layerBox.top && box.top < layerBox.bottom;
-  };
   const textNodes = Array.from(root.querySelectorAll("*")).filter((node) => {
     if (!isVisible(node)) return false;
     return Array.from(node.childNodes)
@@ -355,7 +454,9 @@ const MEASURE = `(() => {
       text: (node.textContent || "").trim().slice(0, 28),
       fontSize: px(computed.fontSize),
       lineHeight: px(computed.lineHeight) || px(computed.fontSize) * 1.2,
-      hidden: covers(node),
+      // Which layer hides it, or null: a truthy string is what drawn filters
+      // on, and the name says which of the two layers the claim is about.
+      hidden: coveredBy(node),
       // The undrawable question is about the box the layout gave the text, not
       // the part of it the scroll window happens to show: a row half past the
       // bottom of a list is scrolled to, not broken.
@@ -469,15 +570,86 @@ const MEASURE = `(() => {
     },
     regions: {
       panel: probe(".main-panel"),
+      search: probe(".main-panel > .search-view"),
       changes: probe(".main-panel > .changes-view"),
       history: probe(".main-panel > .history-view"),
       fileList: probe(".main-panel > .changes-view .file-list"),
       historyList: probe(".main-panel > .history-view .history-list"),
       splitter: probe(".main-splitter"),
     },
+    // The result layer, and what its cap actually did to the window it holds.
+    // A row the cap cuts off is a row the scroller will bring back, so the count
+    // that matters is the one drawn against the *painted* rect: the layer is
+    // only keeping its promise if some rows are cut and none are lost.
+    search: (() => {
+      const results = document.querySelector(".main-panel > .search-view .search-results");
+      if (!results) return null;
+      const rows = Array.from(results.querySelectorAll(".search-row"));
+      const drawn = rows.filter((row) => {
+        const box = painted(row);
+        return box.w > 0 && box.h > 0;
+      });
+      const changes = document.querySelector(".main-panel > .changes-view");
+      const history = document.querySelector(".main-panel > .history-view");
+      const box = results.getBoundingClientRect();
+      const hit = (node) => {
+        if (!node) return false;
+        const other = node.getBoundingClientRect();
+        return box.right > other.left && box.left < other.right
+          && box.bottom > other.top && box.top < other.bottom;
+      };
+      return {
+        open: results.hidden !== true,
+        box: bounds(results),
+        // The cap as the renderer resolved it, not as the token was written: an
+        // unregistered custom property reads back its own vh token here, while
+        // the element's used max-height is the pixels the layout spent.
+        maxHeightPx: px(getComputedStyle(results).maxHeight),
+        rows: rows.length,
+        drawnRows: drawn.length,
+        cutRows: rows.length - drawn.length,
+        scrolls: results.scrollHeight > results.clientHeight + 1,
+        // How much of the panel this one layer is the reason is not painted —
+        // counted from the nodes this measurement already decided about, so the
+        // number belongs to the layer that hides them and not to whichever
+        // floater happened to be on the page as well.
+        hides: textNodes.filter((one) => one.hidden === "search").length,
+        // The bar it hangs off is the reason the layer starts where it does: a
+        // layer drawn over its own bar would be a layer pushing the page down.
+        overBar: (() => {
+          const bar = document.querySelector(".main-panel > .search-view .search-bar");
+          if (!bar) return null;
+          return box.top < bar.getBoundingClientRect().bottom - 1;
+        })(),
+        overChanges: hit(changes),
+        overHistory: hit(history),
+        insideViewport: box.left >= -1 && box.right <= window.innerWidth + 1
+          && box.top >= -1 && box.bottom <= window.innerHeight + 1,
+      };
+    })(),
+    // How many bands the graph's own head row drew, counted the way the app bar's
+    // lines are: by vertical overlap, which is what the row laid out rather than
+    // a width this check brought along and hopes to find. This is the row whose
+    // flex-wrap was decided when it carried one more control than it does now.
+    historyHead: (() => {
+      const head = document.querySelector(".history-list-head");
+      if (!head) return null;
+      const boxes = Array.from(head.children)
+        .map((node) => node.getBoundingClientRect())
+        .filter((box) => box.width > 0 && box.height > 0)
+        .sort((a, b) => a.top - b.top);
+      let lines = 0;
+      let bandBottom = -Infinity;
+      let right = 0;
+      for (const box of boxes) {
+        right = Math.max(right, box.right);
+        if (box.top >= bandBottom) { lines += 1; bandBottom = box.bottom; }
+        else if (box.bottom > bandBottom) { bandBottom = box.bottom; }
+      }
+      return { lines: boxes.length === 0 ? null : lines, right: boxes.length === 0 ? null : right };
+    })(),
     overlay: (() => {
       if (!layer) return { open: false };
-      const stage = document.querySelector(".stage");
       const stageBox = stage ? bounds(stage) : null;
       const background = layerPaint.backgroundColor;
       return {
@@ -542,6 +714,11 @@ const PAGES = {
   // The layer is a third thing on the page, and it is the only screen with
   // these controls.
   Picker: ["Filter branches and tags", "New branch name", "Branches and tags"],
+  // The field, the list it opened and the one action the layer offers below the
+  // rows. The search reads no file and writes nothing, so this is the whole set
+  // of controls the layer adds to the page.
+  Search: ["Main", "Settings", "Search commits, branches and tags", "Search results",
+           "Search further back", "Changed files", "Commit history"],
   Settings: ["Main", "Settings", "Theme", "Zoom in", "Zoom out", "Reset zoom",
              "Test compact window", "Export diagnostics…", "Run probe"],
   Welcome: ["Main", "Settings", "Open repository", "Recent repositories"],
@@ -721,9 +898,18 @@ async function main() {
   const SCREENS = [
     { key: "Main", enter: 'window.__TAB__("Main")' },
     { key: "Picker", enter: 'window.__TAB__("Main"); document.querySelector(".appbar-branch").click()' },
+    { key: "Search", enter: 'window.__TAB__("Main"); window.__SEARCH__("commit")' },
     { key: "Settings", enter: 'window.__TAB__("Settings")' },
     { key: "Welcome", enter: 'window.__TAB__("Main"); window.__BAR__("Close session")' },
   ];
+
+  // The three repository icons are the ones the bar hands over at the declared
+  // minimum, by the words the More menu repeats them with. The stylesheet says
+  // they go somewhere that already holds them; that is only a fix if the copies
+  // are really there, so a name missing from the bar is looked for in the menu
+  // before it is called unreachable.
+  const HANDED_OVER = ["Open repository", "Refresh status", "Close session"];
+  let mainGeo = null;
 
   for (const size of SIZES) {
     if (session) session.close();
@@ -758,6 +944,25 @@ async function main() {
     check(`[${size.label}] exactly two pages hang off the strip`,
           strip.count === 2 && strip.names === "Main,Settings", strip.names);
 
+    // Read the handoff once per size, with the menu opened and closed again by
+    // its own controls: at the widths where nothing is handed over this stays an
+    // empty list, so no screen can borrow a pass from a menu it never opened.
+    const carried = size.width <= 480 ? await evaluate(`(() => {
+      const button = document.querySelector('.appbar [aria-label="More repository actions"]');
+      if (!button) return [];
+      button.click();
+      const names = Array.from(document.querySelectorAll(".menu .menu-item"))
+        .filter((node) => node.getClientRects().length > 0)
+        .map((node) => (node.textContent || "").trim());
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      return names;
+    })()`): [];
+    if (size.width <= 480) {
+      check(`[${size.label}] the bar hands its three icons to a menu that holds all three`,
+            HANDED_OVER.every((name) => carried.includes(name) || carried.includes(name + "…")),
+            carried.join(", "));
+    }
+
     for (const screen of SCREENS) {
       await evaluate(screen.enter);
       await sleep(500);
@@ -783,6 +988,57 @@ async function main() {
               o.open === true && o.coversStage === true && o.opaque === true && o.coveredCount > 0,
               "covered=" + (o.coveredCount || 0) + " background=" + o.background);
       }
+      if (screen.key === "Main") mainGeo = report;
+      if (screen.key === "Search") {
+        const s = report.search;
+        check(`${where}: the field's answer is a layer on the page`,
+              s !== null && s.open === true && s.rows > 0,
+              s === null ? "no layer in the built bundle"
+                : `${s.rows} rows, ${s.drawnRows} painted, box ${Math.round(s.box.w)}x${Math.round(s.box.h)}`);
+        // The claim the whole design rests on: a floating answer costs the panel
+        // nothing below it. Measured against this same size's own reading with
+        // the layer closed, to the pixel the renderer laid out.
+        const same = mainGeo !== null && s !== null
+          && Math.abs(mainGeo.regions.changes.y - report.regions.changes.y) < 0.001
+          && Math.abs(mainGeo.regions.changes.h - report.regions.changes.h) < 0.001
+          && Math.abs(mainGeo.regions.history.y - report.regions.history.y) < 0.001
+          && Math.abs(mainGeo.regions.history.h - report.regions.history.h) < 0.001;
+        check(`${where}: the two areas under it keep the boxes they had closed`,
+              same === true,
+              mainGeo === null ? "no closed-layer reading at this size"
+                : `changes ${report.regions.changes.y.toFixed(3)}+${report.regions.changes.h.toFixed(3)}, `
+                  + `history ${report.regions.history.y.toFixed(3)}+${report.regions.history.h.toFixed(3)}`);
+        check(`${where}: it covers the page rather than standing beside it`,
+              s !== null && s.overChanges === true && s.hides > 0 && s.overBar === false,
+              s === null ? "" : `covers the changes area, ${s.hides} of its text nodes not painted, `
+                + (s.overHistory ? "and reaches the graph" : "stops above the graph"));
+        check(`${where}: the layer keeps its own box inside the window`,
+              s !== null && s.insideViewport === true,
+              s === null ? "" : `box ${Math.round(s.box.x)},${Math.round(s.box.y)} `
+                + `to ${Math.round(s.box.right)},${Math.round(s.box.bottom)} of `
+                + `${report.viewport.w}x${report.viewport.h}`);
+        // The cap is the promise `--search-cap` makes; what it is worth is how
+        // many rows it cut and whether the layer can still bring them back.
+        check(`${where}: the cap cuts rows and the scroller still holds them all`,
+              s !== null && s.cutRows > 0 && s.drawnRows > 0 && s.scrolls === true,
+              s === null ? "" : `${s.drawnRows} of ${s.rows} rows painted, ${s.cutRows} cut, scrolls=${s.scrolls}`);
+        const capPx = s === null ? 0 : s.maxHeightPx;
+        const fraction = report.viewport.h > 0 ? capPx / report.viewport.h : 0;
+        const capShape = `--search-cap ${Math.round(capPx)}px of ${report.viewport.h}px = ${fraction.toFixed(3)}`;
+        // Judged as a fraction of this window's own short axis, never as a pixel
+        // count: the layer is capped against the viewport, and the band the
+        // stylesheet picks for it moves at 560px and again at 440px.
+        if (size.height <= 440) {
+          check(`${where}: a very short window caps the layer at the third restatement`,
+                Math.abs(fraction - 0.30) < 0.005, `${capShape} (base 40vh, 36vh at 560px, 30vh here)`);
+        } else if (size.height <= 560) {
+          check(`${where}: a short window caps the layer lower than a roomy one`,
+                Math.abs(fraction - 0.36) < 0.005, `${capShape} (base 40vh, 36vh here)`);
+        } else {
+          check(`${where}: a roomy window caps the layer at its base share`,
+                Math.abs(fraction - 0.40) < 0.005, capShape);
+        }
+      }
       if (screen.key === "Welcome") {
         check(`${where}: the empty state is Main's, not a third page`,
               report.tabs.current[0] === "Main" && report.textCount > 0);
@@ -791,8 +1047,16 @@ async function main() {
       const actions = await evaluate(NAMES);
       const onScreen = new Set(actions.filter((entry) => !entry.blocked).map((entry) => entry.name));
       const missing = (PAGES[screen.key] || []).filter((name) => !onScreen.has(name));
-      check(`${where}: every action it offers is reachable`, missing.length === 0,
-            missing.join(", "));
+      // A name the bar gave up is reachable through the copy this size opened,
+      // so it is reported as handed over rather than as lost — and only when the
+      // menu actually carries those words.
+      const handed = missing.filter((name) => HANDED_OVER.includes(name)
+        && (carried.includes(name) || carried.includes(name + "…")));
+      const unreachable = missing.filter((name) => !handed.includes(name));
+      check(`${where}: every action it offers is reachable`, unreachable.length === 0,
+            [unreachable.join(", "),
+             handed.length > 0 ? "in the More menu instead: " + handed.join(", ") : ""]
+              .filter(Boolean).join(" | "));
     }
 
     // --- the two regions of Main, together ---
@@ -823,6 +1087,20 @@ async function main() {
     check(`[${size.label}] a panel too short for both floors scrolls rather than clips`,
           r.panel && (bothInside || r.panel.canScroll),
           r.panel ? `panel ${Math.round(r.panel.h)}px scrollable=${r.panel.canScroll}` : "");
+
+    // The graph's own head row: the number that once decided it may break was
+    // taken while a control still hung off it that the page no longer has, so it
+    // is read again here, against the window it is drawn in rather than against a
+    // note. How many bands it needed is printed rather than required — the row is
+    // allowed to break where the stylesheet says it may — but no part of it is
+    // allowed to sit past the edge, which is the failure the break exists to stop.
+    const head = geo.historyHead;
+    check(`[${size.label}] the graph's head row keeps every part of it inside the window`,
+          head !== null && head.right !== null && head.right <= geo.viewport.w + 1,
+          head && head.right !== null
+            ? `widest part ends at ${Math.round(head.right)} of ${geo.viewport.w}px, `
+              + `in ${head.lines} band(s)`
+            : "no head row on this screen");
 
     const splitterFloor = parseFloat(geo.tokens["--splitter-size"]) || 0;
     check(`[${size.label}] the divider is a grabbable bar`,
@@ -948,6 +1226,13 @@ async function main() {
     // This is what the AT-SPI smoke checks in the real window. The renderer
     // answers the same question for the bundle, so a name that only exists as
     // a DOM attribute — and therefore reaches no screen reader — fails here.
+    // At the widths where the bar hands its icons over, the tree is read with
+    // that menu open: an action whose only copy lives in a closed menu is not in
+    // the tree a screen reader walks, which is the failure this checks for.
+    if (size.width <= 480) {
+      await evaluate(`document.querySelector('.appbar [aria-label="More repository actions"]').click()`);
+      await sleep(250);
+    }
     let axNames = null;
     let axError = "";
     try {
@@ -958,7 +1243,12 @@ async function main() {
     } catch (error) {
       axError = String(error.message || error);
     }
-    const axMissing = axNames === null ? [] : PAGES.Main.filter((name) => !axNames.has(name));
+    if (size.width <= 480) {
+      await evaluate(`document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))`);
+      await sleep(150);
+    }
+    const axMissing = axNames === null ? [] : PAGES.Main.filter(
+      (name) => !axNames.has(name) && !axNames.has(name + "…"));
     check(`[${size.label}] the accessibility tree carries the primary actions`,
           axNames !== null && axMissing.length === 0,
           axError || axMissing.join(", "));

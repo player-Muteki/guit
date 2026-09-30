@@ -237,11 +237,24 @@ release it belongs to did not measure.
   that starts at that commit, and said so on the head line — which stays standing until
   the rows it describes have arrived, rather than retiring a claim about rows still on
   screen. Drawing that full window costs 0.55 ms per draw, measured as twenty draws in
-  one interval. Two things this channel cannot see are still unmeasured: the budget from
-  the keystroke to the candidate, because it contains the Git read behind the answer,
-  and which shorter cap a real 340x400 window selects, because that harness answers a
-  viewport unit for its own window rather than for the frame a page is built in. The
-  host and Git version behind every measurement here are the ones the rest of this
+  one interval. That layer has since been drawn and measured in nine real window sizes,
+  from the minimum 340x400 up to 2560x1440. Opening a search moved neither the changes area
+  nor the graph at any of them, never covered the bar it hangs under, and never left the
+  window; the two shorter caps the stylesheet restates are each selected by a window that
+  exists — the shortest at 400 and 420 px of height, the middle one at 480 and 560 px —
+  rather than only being present in the CSS. What the selected cap covers is now counted as
+  painted text rather than as boxes over boxes: the answer carries 40 commit rows at every
+  size, of which the smallest window draws 2 and 2560x1440 draws 13, and the rows above the
+  painted ones stay in that layer's own scroll rather than disappearing. The same nine sizes
+  re-measured the history's head line and found nothing past the right edge at any width;
+  it wraps to two lines only at the two narrowest. The wait before a question is counted
+  inside the measured number instead of excluded from it: twenty keystrokes in a row produce
+  twenty searches and no other read, and over three passes of twenty warm samples on a
+  visible page the waiting sentence arrives within 0.9 ms after that wait ends and the first
+  row within 1.5 ms. One thing this channel still cannot see is the read itself: it answers
+  from a stand-in, so the time from a keystroke to a real first result carries a Git scan
+  this number does not contain, and no end-to-end budget is claimed here. The host, Git
+  version and browser engine behind every measurement here are the ones the rest of this
   record comes from.
 
 ### Changed

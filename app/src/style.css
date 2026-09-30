@@ -920,12 +920,14 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
      At the minimum width those did not share a line: the button's own right
      edge sat 21px past the viewport. That measurement was taken while the head
      also carried the page's own find box, which is gone — the search field above
-     asks that question now — so this break is kept on a number that is one item
-     wider than the row it now guards, and re-measuring it is open work. A row
-     that is not allowed to break does not lose a word, it loses the box — and a
-     paging button the pointer cannot land on is the failure, not the row height
-     it costs the list. So a break is allowed here, and only where it must
-     happen: at any width where the parts fit, nothing about this row moves. */
+     asks that question now. Measured without it, the break still earns its keep
+     exactly where it was drawn: at 340 and 420 CSS px the row takes two lines and
+     its widest part ends at 214 and 408 of those widths, and at 480 px — the
+     widest width this rule can reach — it stays on one line with twelve to spare.
+     Past 480 the rule does not apply and the row does not move. A row that is not
+     allowed to break does not lose a word, it loses the box — and a paging button
+     the pointer cannot land on is the failure, not the row height it costs the
+     list. So a break is allowed here, and only where it must happen. */
   .history-list-head { flex-wrap: wrap; row-gap: 0.1rem; }
 }
 
