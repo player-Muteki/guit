@@ -160,7 +160,17 @@ const ICONS = {
 
 export type IconName = keyof typeof ICONS;
 
-export type MenuItem = { label: string; run: () => void; danger?: boolean };
+export type MenuItem = {
+  label: string;
+  /** Absent means the row tells the reader something rather than offering it:
+   * a branch already checked out, a name that cannot be handed back to Git. */
+  run?: () => void;
+  danger?: boolean;
+  /** A second, quieter line — what the row is, not what picking it does. */
+  detail?: string;
+  /** Why an inert row is inert, as the row's own tooltip. */
+  hint?: string;
+};
 
 // Floating row/menu popup: anchored under `anchor`, dismissed by Escape, the
 // next outside click, or picking an item. One instance at a time — opening a
@@ -185,18 +195,27 @@ export function openMenu(anchor: HTMLElement, items: MenuItem[]): void {
     close();
   };
   for (const item of items) {
+    const inert = item.run === undefined;
     const entry = el("button", {
-      class: `menu-item${item.danger ? " danger" : ""}`,
+      class: `menu-item${item.danger ? " danger" : ""}${inert ? " inert" : ""}`,
       type: "button",
       role: "menuitem",
-      text: item.label,
-    });
+      disabled: inert,
+      title: item.hint,
+    }, [
+      el("span", { class: "menu-label", text: item.label }),
+      ...(item.detail === undefined ? [] : [el("span", { class: "menu-detail", text: item.detail })]),
+    ]);
+    if (inert) {
+      menu.append(entry);
+      continue;
+    }
     entry.addEventListener("click", () => {
       // The item is about to leave the tree, so the anchor is what a dialog
       // opened from this menu must give focus back to.
       noteActivator(anchor);
       close(false);
-      item.run();
+      item.run?.();
     });
     menu.append(entry);
   }

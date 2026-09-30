@@ -7,7 +7,8 @@
 // arrives still belongs to it.
 
 import { invoke } from "@tauri-apps/api/core";
-import { button, el, icon, plural } from "../dom";
+import { button, el, icon, openMenu, plural, type MenuItem } from "../dom";
+import { branchChoices, branchLabel } from "../headModel";
 import { onDispose } from "../lifecycle";
 import {
   anchorRow,
@@ -58,6 +59,7 @@ import type {
   HistoryPage,
   OperationResult,
   ReadContext,
+  RefListing,
   SessionRead,
   ToolResult,
 } from "../types";
@@ -123,6 +125,17 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   ]);
   firstParentLabel.title =
     "Follow only each commit's first parent: the straight line of the branch, with the branches it merged left out.";
+  // The name of what the graph is drawing, and the way to draw another one. It
+  // leads the head because it is the subject of the sentence the rest of the
+  // line finishes; the toggle, the find box and the paging button all describe
+  // how that one history is read.
+  const branchButton = el("button", {
+    class: "btn history-branch",
+    type: "button",
+    "aria-label": "Switch branch",
+    "aria-haspopup": "menu",
+  });
+  branchButton.title = "The branch this history is drawn from. Pick another to read its history.";
   const moreButton = el("button", { class: "btn", type: "button", text: "Load older", disabled: true });
   const countLabel = el("span", { class: "history-count", role: "status" });
   // A names read Git refused leaves every row unlabelled, which is drawn
@@ -135,7 +148,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   });
   namesRetry.hidden = true;
   const listHead = el("div", { class: "history-list-head" }, [
-    countLabel, namesRetry, el("div", { class: "spacer" }), firstParentLabel, findBox, moreButton,
+    branchButton, countLabel, namesRetry, el("div", { class: "spacer" }), firstParentLabel, findBox, moreButton,
   ]);
 
   const rowsHost = el("div", { class: "virtual-rows" });
@@ -198,6 +211,11 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // reader or by the next move of the names.
   let namesContext: ReadContext | undefined;
   let namesAsked: ReadContext | undefined;
+  // The listing the chips were joined from, kept for the one other thing that
+  // answers from it: the header's list of branches to read. It travels with
+  // `refTips` and never on its own, so the menu can never offer a branch the
+  // rows are not already labelled with.
+  let namesListing: RefListing | null = null;
   // Set when the backend had to draw the history first-parent because the
   // live lane count would not fit the gutter. It is said in words, because a
   // silently linearised graph would claim a shape the history does not have.
@@ -879,6 +897,71 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     if (visible.length > 0) renderRows();
   };
 
+  // --- the branch this history is drawn from ---
+  // The header answers with the names the rows already carry, so opening it
+  // costs no read: the listing shown is the listing the chips were joined from,
+  // and a menu that offered a branch the rows are not labelled with would be a
+  // second answer to a question already answered.
+  const branchMenu = (): MenuItem[] => {
+    if (namesListing === null) {
+      // The same two cases the line above the list tells apart, in its words.
+      return [{ label: namesContext === undefined
+        ? "The names have not been read yet."
+        : "The names could not be read." }];
+    }
+    const items = branchChoices(namesListing.branches, currentSnapshot()?.branch ?? null).map(
+      (choice): MenuItem => choice.current
+        // Shown and inert: this is the row the graph is already on, and a
+        // switch to it is a Git run that changes nothing.
+        ? { label: choice.name, detail: "checked out" }
+        : choice.runnable
+          ? { label: choice.name, detail: choice.detail, run: () => void switchTo(choice.name) }
+          : { label: choice.name, detail: "not switchable", hint: choice.reason ?? undefined },
+    );
+    if (items.length === 0) items.push({ label: "This repository has no other branch." });
+    return items;
+  };
+  branchButton.addEventListener("click", () => openMenu(branchButton, branchMenu()));
+
+  // The button answers with the head the snapshot publishes, so all three
+  // states — a named branch, a detached HEAD, a branch with no commits — are
+  // said in the same words the app bar uses for them.
+  const renderBranchChoice = (): void => {
+    const snapshot = currentSnapshot();
+    branchButton.textContent = branchLabel(snapshot?.branch ?? null);
+    branchButton.disabled = snapshot === null || isWriteRunning();
+  };
+
+  // One write, on the lane every write shares. A switch asks for no preview and
+  // no ticket: it is not a destructive operation here, and what it cannot do
+  // Git itself refuses with HEAD left where it was. The snapshot that refusal
+  // carries is what keeps the graph honest — so nothing reloads from here,
+  // because the head moving is exactly the event the graph domain is
+  // subscribed to, and a second page read would be the same page read twice.
+  const switchTo = async (name: string): Promise<void> => {
+    const snapshot = currentSnapshot();
+    if (snapshot === null || isWriteRunning()) return;
+    setWriteRunning(true);
+    setStatus(`Switching to ${name}…`, "progress");
+    try {
+      const result = await invoke<OperationResult>("switch_branch", {
+        snapshotVersion: snapshot.version,
+        name,
+      });
+      applySnapshot(result.snapshot);
+      setStatus(
+        result.details ? `${result.message} ${result.details}` : result.message,
+        result.outcome === "success" ? "success" : "error",
+      );
+    } catch (error) {
+      deps.onError(error);
+      setStatus("The branch switch did not run.", "error");
+    } finally {
+      setWriteRunning(false);
+      renderBranchChoice();
+    }
+  };
+
   // Moving the gutter by whole columns. One step answers both halves of the
   // gesture: the drawing shifts and the line above the list names the columns
   // now on screen. A pane with nothing off its edge has no pan to offer, so
@@ -951,6 +1034,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       namesAsked = undefined;
       namesContext = undefined;
       refTips = unknownNames();
+      namesListing = null;
       renderNames();
       return;
     }
@@ -961,6 +1045,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       // listing of the session that closed joins nothing here.
       namesContext = undefined;
       refTips = unknownNames();
+      namesListing = null;
     }
     if (!retry && namesAsked !== undefined && contextMatches(namesAsked, asked)) return;
     namesAsked = asked;
@@ -970,6 +1055,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       if (!contextMatches(asked, read.context)) return;
       namesContext = asked;
       refTips = indexNames(read.value);
+      namesListing = read.value;
     } catch {
       if (namesAsked === undefined || !contextMatches(asked, namesAsked)) return;
       // The read was asked and nothing came of it. That is a fact about these
@@ -977,6 +1063,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       // failure reported twice if the branch picker is open over this view.
       namesContext = asked;
       refTips = unknownNames();
+      namesListing = null;
     }
     renderNames();
   };
@@ -1228,6 +1315,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     const locked = !isSessionActive();
     moreButton.disabled = locked || !hasMore || loading;
     renderActions();
+    renderBranchChoice();
     if (commits.length > 0) renderRows();
   };
 

@@ -226,6 +226,16 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .menu-item:hover { background: var(--accent-soft); }
 .menu-item.danger { color: var(--danger); }
 .menu-item.danger:hover { background: var(--danger-soft); }
+/* A row can say two things: what picking it does, and what the row *is* — where
+   a branch tracks, or that it is the one already checked out. The second line
+   is quieter and loses its tail first, because the verb is what a menu is for. */
+.menu-item { display: flex; flex-direction: column; align-items: flex-start; gap: 0.05rem; }
+.menu-label, .menu-detail { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-detail { font-size: var(--text-xs); color: var(--text-muted); }
+/* An inert row reports a state instead of offering it, so it must not look
+   pickable: no hover, no pointer, and the muting that says "read me, not me". */
+.menu-item.inert { color: var(--text-muted); cursor: default; }
+.menu-item.inert:hover { background: transparent; }
 
 /* --- shell body --- */
 .shell-body { display: flex; flex: 1 1 auto; min-height: 0; }
@@ -493,6 +503,13 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .history-list-head { display: flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.75rem; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
 .history-count { font-size: var(--text-sm); color: var(--text-muted); white-space: nowrap; }
 .history-list-head .btn, .history-list-head .checkbox { flex: 0 0 auto; white-space: nowrap; }
+/* The branch a graph is drawn from is the subject of this line, and a name is
+   as long as it is: whoever made the branch did not consult the layout. It
+   takes the room it is given and loses its tail, so the count — which says how
+   many commits are on screen and whether the paging button has anything to do —
+   keeps the line it is on. The cap is the menu's own width, so the button and
+   the list it opens ask the same room for a name. */
+.history-branch { flex: 0 1 auto; min-width: 0; max-width: 11rem; overflow: hidden; text-overflow: ellipsis; }
 /* The find box takes the room the head has left and gives it back when it
    closes, so opening it never squeezes the count or the Load-older button
    into wrapping. */
