@@ -746,36 +746,50 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
 
 ## 8. F03 的预览构造落地
 
-`41639c8` 把 §7 的规则落成 `reset.rs` 里的 `plan_restore`：五个名单读取、六个集合、一条
-写前拒绝，加 6 条跑真实 Git 并在事后读磁盘的用例。**命令未注册**，所以这一片没有前端一行、
-没有渲染证据，也没有新的探针——它还没有可画的界面。
+`41639c8` 把 §7 的规则落成 `reset.rs` 里的 `plan_restore`：五个名单读取、六个集合、一条写前
+拒绝，加 6 条跑真实 Git 并在事后读磁盘的用例。`a51a871` 补上那一份清单欠的第六条读取，于是
+构造是**六个名单读取、七个集合**（多出"被忽略而目标仍要写"那一格）、8 条新用例，其间还纠正了
+一条量错过的事实（§8.2 第二条）。**命令仍未注册**，所以这一片没有前端一行、没有渲染证据，也
+没有新的探针——它还没有可画的界面。
 
 ### 8.1 §7 那十四条各自落在哪一处
 
 | §7 的那一条 | 代码里的落点 |
 | --- | --- |
-| 第 1 条（并，不是子集） | `plan_restore` 依次走 `tree_differences`、`target_paths`、`tracked_dirty_set`（即 `write::status_index`，不新起进程）、`untracked_paths`、`write::clean_candidates`；那份清单上的第六次读取（只给被忽略那一类的那一条）在本片还没有落点，见 §8.4 |
+| 第 1 条（并，不是子集） | `plan_restore` 依次走 `tree_differences`、`target_paths`、`tracked_dirty_set`（即 `write::status_index`，不新起进程）、`untracked_paths`、`write::clean_candidates`、`ignored_paths`——六次读取、七个集合，`status` 那一问不新起进程 |
 | 第 2、14 条（保护必须自己算；写前拒绝只有一条判据） | `Restoration::guard()` → `reset_preview_repository`，一句里带那个路径的名字 |
 | 第 3 条（目录前缀规则） | `claimed_by_target` 除完整名字相等外，逐 `/` 试前缀；`is_ancestor_dir` 要求第一个差异就是 `/` |
 | 第 4 条（覆盖是范围，不是内容变化） | `overwritten` 只按名单算；整个构造一次都没读文件字节 |
 | 第 5 条（丢弃 = status ∩ diff） | `discarded` |
 | 第 6 条（删除承诺只绑 `clean` 自己的答案） | `removals` 只从 `clean_candidates` 那份名单里来；没被列出的落进 `left_behind`，`!item.repository` 那一格就是这条 |
-| 第 7 条（折叠不自己展开；`--exclude-standard` 不可省） | 粒度取 `ls-files --others --exclude-standard -z` 那一条，选项写死在 argv 里 |
+| 第 7 条（折叠不自己展开；`--exclude-standard` 不可省） | 两条名单都把选项写死在 argv 里：`ls-files --others --exclude-standard -z` 与 `ls-files --others --ignored --exclude-standard -z`；同一套折叠判定（结尾的 `/` 就是"那是别人的仓库"）由 `as_untracked` 一处算 |
 | 第 12 条（预算） | `ls-tree` 与那一条"只给被忽略那一类"的读取都是先量了再采用（§6.6 重测那一版）；进程条数随第 1 条那份清单走 |
 | 第 13 条（逐文件粒度 + 第二步之前重问 `clean`） | 粒度已落；**重问归 F04**，构造里只有一次 `clean -nd` |
-| 第 8 条（忽略 ∩ 目标那一个例外） | **未落**：那条"只给被忽略那一类"的逐文件读取还没进构造；它用哪一条命令，§7 第 7 条已经量过两个来源并定了 |
+| 第 8 条（忽略 ∩ 目标那一个例外） | `Restoration::ignored_written`：那条逐文件名单里被目标持有（完整名字或目录前缀）的路径，**说**而不**拒**；同一条名单里的仓库仍按第 14 条进 `blocked` |
 | 第 9、10 条（残留怎么陈述；事后两条条件） | 未落，归 F05 |
 | 第 11 条（复用 `resolve_target`） | `plan_restore` 第一行；`sequencer::validate_target` 仍未动 |
 
 `write::clean_candidates` 从私有变成 `pub(crate)`，为的是删除承诺只有一个来源——reset 不另
 写一份 `clean -nd` 的解析，两份解析会在同一天各自漂移。
 
-### 8.2 三条动手时才定下来的判断
+### 8.2 六条动手时才定下来的判断
 
 - **`ls-tree` 是不可省的那一条读取**：覆盖判定问的是"磁盘上这个未跟踪路径在不在目标里"，
   而 `diff HEAD <target>` 恰好**不列**两棵树都持有且一致的那条路径——索引里被撤过、磁盘上
   又躺着同一个名字时，差里看不见它。§6.3 的 `predict()` 一直用它，这一版才把它的代价量出来
   （2,001 条 2.4 ms），§7 第 1 条那份读取清单因此加了一条。
+- **那条夹具原来没造出它要问的那一格**：§6.4 末"目标树跟踪一个被忽略的路径"这一例，第一次
+  是用 `git add -A` 造的，而那条规则正好盖住那个文件——它从未进过树，`git rm --cached` rc=128
+  而探针不看返回码，后面四行量的是"一个未跟踪的忽略文件"。改成 `add -f` 之后先把目标自己的
+  `ls-tree` 打印出来当证据，`rm --cached` 的 rc 也打出来。跟着改的是结论：`check-ignore`
+  在写完之后**不再**报那条规则（它默认先看索引，`--no-index` 才剥掉这层），本节早先记的恰好
+  相反。构造一次都没问 `check-ignore`，所以代码不受这条纠正影响，但"它答模式不答跟踪"这句
+  依据从此是错的——一个只有失败路径读它的设计会在这里读错方向。
+- **"忽略 ∩ 目标"用哪一条命令读，量过两个来源**：`status --porcelain -z -uall --ignored` 与
+  `ls-files --others --ignored --exclude-standard -z` 在夹具上给出同一批路径、同一粒度，前者
+  8.9 ms 里 101 条只有 1 条是 `!!`，其余 100 条是这一问不需要的状态、每条还要先剥掉开头那三个
+  字节；后者 1.9 ms 只回被忽略那一类。取后者；这也让
+  折叠判定只有一套（两条名单都以结尾 `/` 认仓库，`as_untracked` 一处算）。
 - **读取失败的三条分支都拒绝**：起不来的进程交回 `runner` 自己的码，Git 说不是
   `reset_preview_failed`，装不下是 `reset_preview_too_large`；没有一条走"于是这份名单是空的"。
   bound 跟 `status` 同一条（`runner::STATUS_OUTPUT_LIMIT`），理由写在 `submodules.rs:41`：约一千
@@ -783,33 +797,43 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
 - **不认识 diff 的字母就整份拒绝**，而不是跳过那一项：`--no-renames` 已经把 `R`/`C` 挡在外面
   （pair 记录是另一种 `-z` 形状），真出现别的字母说明 Git 与这段解析对不上，而那个字母正是
   "目标里有没有这条路径"的判断依据，跳过它就是猜操作会做什么。
+- **例外那一格是"说"，不是"拒"，除非它是个仓库**：被忽略而目标要写的普通文件进
+  `ignored_written`，预览欠它一句"这条既被忽略也将被写入"；同一条名单里如果那是一个仓库（忽略
+  规则盖住的一个 `y/`，目标把 `y` 当文件），第 14 条那条判据照旧成立——被销毁的东西与规则说
+  什么无关。用例因此两条：一条把 `reset --hard` 真跑一遍、断言写回的是目标的字节，一条断言
+  拒绝之后 `y/own.txt` 还在（拒绝什么都不做）。
 
 ### 8.3 门禁与度量
 
-门禁数从 detached worktree 的 `41639c8` 上取（共享树当时带着在飞的
-`app/src/views/history.ts`，`npx tsc --noEmit` 在共享树里报的每一行都出自那一个文件——那是
-他们工作树上的改动，不是 HEAD 的红，所以那一条通道只在 worktree 里读）：`cargo test`
-**379 passed / 0 failed**（`reset` 26 条，其中新增 6 条）、`cargo fmt --check` 零 diff、
-`cargo clippy --locked --all-targets` **0 告警**、`npm run build` ✓ **47 modules
-transformed**、`npm run test:fixture` **402 pass / 0 fail**（含 shipped-copy 与
-ipc-surface 两道门）、`color-contrast.py` fails=0、`responsive-check.py` fails=0。
-探针在同一次运行里 `exit=0`、**432 行**，跑前跑后 `/tmp` 里都是 0 个 `guit-clean-reset-*`。
+门禁数从 detached worktree 的 `a51a871` 上取（共享树当时带着阶段 E 在飞的一批前端文件，
+`npx tsc --noEmit` 在共享树里报的每一行都出自那些文件——那是他们工作树上的改动，不是 HEAD 的
+红，所以那一条通道只在 worktree 里读）：`cargo test` **381 passed / 0 failed**（`reset` 28 条，
+两次提交合计新增 8 条）、`cargo fmt --check` 零 diff、`cargo clippy --locked --all-targets`
+**0 告警**、`npm run build` ✓ **47 modules transformed**、`npm run test:fixture`
+**402 pass / 0 fail**（含 shipped-copy 与 ipc-surface 两道门；这一片没动前端，所以这条数与
+上一次相同）、`color-contrast.py` fails=0、`responsive-check.py` fails=0。探针在 worktree 里
+同一次运行 `exit=0`、**441 行**（比上一版多 9 行：两条新名单读数与那条夹具证据），跑前跑后
+`/tmp` 里都是 0 个 `guit-clean-reset-*`。
 
 `plan_restore` 自己的墙钟**没量**：到这一片为止没有任何调用方起过它一次。§6.6 末那个加和是
 表里对应那几行各自中位数的相加，不是这条通道上的一次读数——它要在 F04 把预览接进 `write.rs`
-之后才有可量的对象。
+之后才有可量的对象。新加的那一条读取不是免费的，也不是没账的：它在同一份夹具上量得
+1.9 ms（1.9–1.9），比它替代的那一条 `status --ignored` 便宜 7 ms。
 
 ### 8.4 这一片没做完的
 
 - **命令注册**：`preview_restore` 与它的确认必须与前端 `invoke` 字面量同一次提交落地
-  （`ipc-surface.mjs` 那条门），`reset.rs` 里六处 `allow(dead_code)` 因此还挂着——四个字段、
+  （`ipc-surface.mjs` 那条门），`reset.rs` 里七处 `allow(dead_code)` 因此还挂着——五个字段、
   `guard()`、`plan_restore`。
 - **F04**：`Bound` 的新变体要绑 §7 第 11 条列的那几样（会话、解析后的目标 oid、观测到的
-  HEAD、路径差、脏路径、计划删除的未跟踪路径、覆盖名单、受保护名单），动词序列
+  HEAD、路径差、脏路径、计划删除的未跟踪路径、覆盖名单、受保护名单，加上这一片新算出来的
+  "被忽略而目标要写"那一份），动词序列
   `reset --hard` + 有界 `clean`，**第二步之前重问一次 `clean -nd`**，同路径变化重查。
 - **F05**：事后两条条件（`status -z -uall` 空 **且** `diff --quiet <target>` rc=0）、
   取消／超时／部分完成的如实报告、预览续约。
 - **F06**：更改区的提交号输入、预览分组、确认文案与焦点，以及这份预览的渲染证据。
-- **第 8 条那个"忽略 ∩ 目标"的例外**仍未读；§6.9 那一整列（不区分大小写的宿主、符号链接、
-  稀疏检出与 `skip-worktree`、`core.protectNTFS` 那一类名字、可执行位、未跟踪空目录、
-  目标是 gitlink 而磁盘是未跟踪目录那一反向格）仍未量；Windows/macOS 仍只是构建配置。
+- **第 8 条例外现在有了落点，但它的新形态仍未量**：那一份名单在真实窗口里怎么说出来（F06），
+  以及它读的是不是那类宿主上同一批路径。§6.9 那一整列——不区分大小写的宿主、符号链接、
+  稀疏检出与 `skip-worktree`、`core.protectNTFS` 那一类名字、可执行位、未跟踪空目录（新加的
+  这条"只给被忽略那一类"的名单在空目录这一格上没单独造过夹具）、目标是 gitlink 而磁盘是
+  未跟踪目录那一反向格——仍未量；Windows/macOS 仍只是构建配置。
