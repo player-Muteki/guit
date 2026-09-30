@@ -401,12 +401,19 @@ export function refsIncluding(
   return { names: found.slice(0, limit), truncated: found.length > limit };
 }
 
-// --- the bubble that answers a hovered or focused row ------------------------------
+// --- the bubble that answers a hovered or focused row -------------------
 
-// A rectangle in one coordinate space, in pixels. The view reads all three of
-// the boxes below off live elements and puts them in the space of the element
-// the bubble is drawn into, so the numbers here are only ever comparable
-// because they arrive from one place.
+// How long the pointer has to rest on a row before the bubble opens. Under a
+// quarter second it fires on the way past — sweeping the mouse down a long list
+// is a search, not a hundred reads — and past half a second it stops feeling
+// like an answer. A keyboard move does not use it: a key press is already the
+// decision, so the bubble for a row reached by a key opens on that key.
+export const BUBBLE_HOVER_MS = 250;
+
+// A rectangle in one coordinate space, in pixels. The view reads both of the
+// boxes it places between off live elements and puts them in the space of the
+// element the bubble is drawn into, so the numbers here are only ever
+// comparable because they arrive from one place.
 export interface Rect {
   left: number;
   top: number;
@@ -433,11 +440,11 @@ export interface BubblePlacement extends BubbleSize {
   left: number;
   top: number;
   // True when the bubble landed above its row because the room below ran out.
+  // The view writes it into the markup, because which edge of the bubble faces
+  // the row is the one thing a reader needs in order to tell a tall box from a
+  // detached one — and the only thing about the placement a probe can check
+  // without redoing the arithmetic.
   above: boolean;
-  // True when the bubble is drawn over its own row. Only a box with more
-  // height than the room on either side can do that, so it names the one case
-  // where the bubble hides the thing it came from rather than pointing at it.
-  overlaps: boolean;
 }
 
 /// Where a bubble of the given size goes for the given row, inside the given
@@ -486,7 +493,8 @@ export function placeBubble(
   } else if (roomBelow >= roomAbove) {
     // Neither side holds the whole box. Sitting against the bottom of the
     // pane keeps the row's own text reachable from above the bubble, which is
-    // where the pointer came from; the row is covered, and `overlaps` says so.
+    // where the pointer came from; the row it came from is covered, and the
+    // box being inside the pane is what the clamps below guarantee.
     top = pane.top + edge + innerHeight - height;
     above = false;
   } else {
@@ -499,14 +507,7 @@ export function placeBubble(
   const minLeft = pane.left + edge;
   const maxLeft = minLeft + innerWidth - width;
   const left = Math.min(Math.max(anchor.left, minLeft), maxLeft);
-  return {
-    left,
-    top,
-    width,
-    height,
-    above,
-    overlaps: top < anchor.top + anchor.height && top + height > anchor.top,
-  };
+  return { left, top, width, height, above };
 }
 
 /// The commit the anchored row still names, or `null` when it names another or

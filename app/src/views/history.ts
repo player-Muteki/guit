@@ -10,8 +10,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, plural } from "../dom";
 import { onDispose } from "../lifecycle";
 import {
+  anchorRow,
   buildHistoryRows,
   buildRefMap,
+  bubbleInsetPx,
   filterCommits,
   findError,
   graphColumns,
@@ -20,16 +22,20 @@ import {
   graphNodePx,
   graphPan,
   historyPageStart,
+  includedInLine,
   indexNames,
   matchPosition,
   namesAt,
+  placeBubble,
   refsIncluding,
   rowGeometry,
   stepMatch,
   unknownNames,
+  BUBBLE_HOVER_MS,
   type FindQuery,
   type GraphPan,
   type NameIndex,
+  type Rect,
   type RefSummary,
 } from "../historyModel";
 import { revealScroll, rowHeightPx, visibleWindow, HISTORY_ROW_REM } from "../fileModel";
@@ -146,7 +152,21 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
 
   const detail = el("div", { class: "history-detail", hidden: true });
 
-  element.append(listHead, listPane, splitter, emptyState, detail);
+  // The bubble that answers the row the pointer rests on or the keyboard
+  // moved to. It is a child of the view rather than of a row: the rows are
+  // replaced wholesale on every scroll, page and filter, so a layer inside one
+  // would be destroyed by the paint it is supposed to survive. It carries no
+  // controls — only text, so that the 40-character id can be selected.
+  const bubbleMessage = el("pre", { class: "bubble-message" });
+  const bubbleAuthor = el("p", { class: "bubble-line" });
+  const bubbleOid = el("p", { class: "bubble-line bubble-oid" });
+  const bubbleRefs = el("p", { class: "bubble-line" });
+  const bubble = el("div", { class: "commit-bubble", "aria-hidden": "true", hidden: true }, [
+    bubbleMessage, bubbleAuthor, bubbleOid, bubbleRefs,
+  ]);
+
+  // The view is the box the bubble is placed in and confined to.
+  element.append(listHead, listPane, splitter, emptyState, detail, bubble);
 
   let commits: CommitView[] = [];
   let hasMore = false;
@@ -187,8 +207,28 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // page of commits for one repository is indistinguishable — commit for commit
   // — from a page for a copy of it.
   let graphContext: ReadContext | undefined;
+  // The row the keyboard and the pointer are pointing at. This is a cursor,
+  // not an open pane: moving it costs nothing, because looking is not a
+  // request to work on the commit.
   let selected: CommitView | null = null;
   let selectedIndex = -1;
+  // The commit the detail pane is describing, and the only thing the action
+  // buttons act on. The pane opens on a click or on Enter and stays put while
+  // the cursor moves on, so reading a file list is not undone by an arrow key.
+  let opened: CommitView | null = null;
+  // Where the bubble is open: the row it hangs off, and the commit that row
+  // was naming when it opened. The index says where to look and the id says
+  // whether what is there is still the thing being described.
+  let bubbleAt: { index: number; oid: string } | null = null;
+  let hoverTimer: number | undefined;
+  let leaveTimer: number | undefined;
+  // Set just before the view scrolls itself, so the scroll event that follows
+  // is not mistaken for the reader wheeling away from the row.
+  let internalScroll = false;
+  onDispose(() => {
+    window.clearTimeout(hoverTimer);
+    window.clearTimeout(leaveTimer);
+  });
   let detailHeight = 240;
   // Whether the page is the whole history or only each commit's first parent.
   // This is Git's own notion of a mainline, so the backend decides what it
@@ -223,27 +263,29 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   const detailFiles = el("ul", { class: "detail-files" });
   const closeDetail = button("Close", () => hideDetail(), { class: "btn" });
   const copyOid = button("Copy OID", () => void copyOidNow(), { class: "btn" });
-  const diffCommit = button("Diff commit", () => void runCommitDiff(), { class: "btn" });
+  const diffCommit = button("Diff commit", () => {
+    if (opened) void runCommitDiff(opened);
+  }, { class: "btn" });
   const branchFrom = button("Branch from commit…", () => {
-    if (selected) deps.onBranchFromCommit(selected.oid);
+    if (opened) deps.onBranchFromCommit(opened.oid);
   }, { class: "btn" });
   const tagFrom = button("Tag from commit…", () => {
-    if (selected) deps.onTagFromCommit(selected.oid);
+    if (opened) deps.onTagFromCommit(opened.oid);
   }, { class: "btn" });
   const cherryPick = button("Cherry-pick", () => {
-    if (selected) void runCommitWrite("pick_commit", { oid: selected.oid }, `Cherry-picking ${selected.oid.slice(0, 10)}…`);
+    if (opened) void runCommitWrite("pick_commit", { oid: opened.oid }, `Cherry-picking ${opened.oid.slice(0, 10)}…`);
   }, { class: "btn", title: "Apply this commit onto the current branch" });
   const revert = button("Revert", () => {
-    if (selected) void runCommitWrite("revert_commit", { oid: selected.oid }, `Reverting ${selected.oid.slice(0, 10)}…`);
+    if (opened) void runCommitWrite("revert_commit", { oid: opened.oid }, `Reverting ${opened.oid.slice(0, 10)}…`);
   }, { class: "btn", title: "Create a new commit undoing this one on the current branch" });
   const resetSoft = button("Reset soft", () => {
-    if (selected) void runCommitWrite("reset", { mode: "soft", target: selected.oid }, `Resetting (soft) to ${selected.oid.slice(0, 10)}…`);
+    if (opened) void runCommitWrite("reset", { mode: "soft", target: opened.oid }, `Resetting (soft) to ${opened.oid.slice(0, 10)}…`);
   }, { class: "btn", title: "Move the branch to this commit; keep the index and all file contents" });
   const resetMixed = button("Reset mixed", () => {
-    if (selected) void runCommitWrite("reset", { mode: "mixed", target: selected.oid }, `Resetting (mixed) to ${selected.oid.slice(0, 10)}…`);
+    if (opened) void runCommitWrite("reset", { mode: "mixed", target: opened.oid }, `Resetting (mixed) to ${opened.oid.slice(0, 10)}…`);
   }, { class: "btn", title: "Move the branch and index to this commit; keep file contents" });
   const resetHard = button("Reset hard…", () => {
-    if (selected) void deps.preview.request("resetHard", { target: selected.oid }, null);
+    if (opened) void deps.preview.request("resetHard", { target: opened.oid }, null);
   }, { class: "btn btn-danger", title: "Move the branch to this commit and overwrite working-copy changes (with confirmation)" });
 
   const actions = el("div", { class: "detail-actions" }, [
@@ -252,26 +294,36 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   ]);
   detail.append(detailMessage, detailMeta, detailFiles, actions);
 
-  const setSelected = (commit: CommitView, index: number): void => {
+  // Moving the cursor. This repaints the rows and says nothing to the
+  // backend: the pane that reads a commit's files is opened by `openDetail`,
+  // because an arrow key is not a request to run a Git process per press.
+  const setCursor = (commit: CommitView, index: number): void => {
     selected = commit;
     selectedIndex = index;
     renderRows();
+  };
+
+  // Opening the pane. A click and Enter are the two ways to ask to work on a
+  // commit, so they are the two ways the files are read.
+  const openDetail = (commit: CommitView, index: number): void => {
+    closeBubble();
+    setCursor(commit, index);
+    opened = commit;
     void showDetail(commit);
   };
 
   const hideDetail = (): void => {
-    selected = null;
-    selectedIndex = -1;
+    opened = null;
     detail.hidden = true;
-    renderRows();
+    renderActions();
   };
 
   // A commit nothing names and a names read that failed are two different
   // facts, and an empty row drawn for the second would hide the failure the
   // reader needs.
   const paintDetailNames = (): void => {
-    if (selected === null) return;
-    const chips = refTips.unknown ? null : namesAt(refTips, selected.oid);
+    if (opened === null) return;
+    const chips = refTips.unknown ? null : namesAt(refTips, opened.oid);
     const lines =
       chips === null
         ? ["The names could not be read."]
@@ -315,7 +367,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       // a head which has since moved, or for a copy of this repository opened
       // while the read ran, belong to no row on this screen.
       if (
-        selected !== commit ||
+        opened !== commit ||
         graphContext === undefined ||
         !contextMatches(asked, graphContext) ||
         !contextMatches(asked, read.context)
@@ -335,14 +387,14 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         );
       }
     } catch (error) {
-      if (selected !== commit) return;
+      if (opened !== commit) return;
       deps.onError(error);
       detailFiles.replaceChildren(el("li", { class: "muted", text: "The file list could not be loaded." }));
     }
   };
 
   const renderActions = (): void => {
-    const locked = selected === null || isWriteRunning();
+    const locked = opened === null || isWriteRunning();
     copyOid.disabled = locked;
     diffCommit.disabled = locked || isToolRunning();
     branchFrom.disabled = locked;
@@ -355,8 +407,8 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   };
 
   const copyOidNow = async (): Promise<void> => {
-    if (selected === null) return;
-    const oid = selected.oid;
+    if (opened === null) return;
+    const oid = opened.oid;
     try {
       await navigator.clipboard.writeText(oid);
       setStatus("Commit id copied.", "success");
@@ -367,17 +419,19 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   };
 
   // Shares the external-tool lane with file diffs: one blocking tool at a
-  // time, while staging and committing stay available.
-  const runCommitDiff = async (): Promise<void> => {
+  // time, while staging and committing stay available. The commit is a
+  // parameter rather than a read of the selection, because a double-click is
+  // aimed at the row under the pointer and the cursor may have moved on.
+  const runCommitDiff = async (commit: CommitView): Promise<void> => {
     const asked = graphContext;
-    if (selected === null || asked === undefined || isToolRunning()) return;
+    if (asked === undefined || isToolRunning()) return;
     setToolRunning(true);
     setStatus("Waiting for the diff tool to close…", "progress");
     renderActions();
     try {
       const read = await invoke<SessionRead<ToolResult>>("open_commit_diff", {
         context: asked,
-        oid: selected.oid,
+        oid: commit.oid,
       });
       // This answer is an action, not a read. The backend refused it if the row
       // had already left the screen when the tool was asked for; from then on
@@ -473,44 +527,147 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     if (next === null) return;
     const index = visible.findIndex((commit) => commit.oid === next);
     if (index < 0) return;
-    listPane.scrollTop = revealScroll(listPane.scrollTop, listPane.clientHeight || 240, index, rowHeight());
-    setSelected(visible[index], index);
+    revealRow(index);
+    setCursor(visible[index], index);
+    // A step lands on a match the reader asked for, so the answer comes with
+    // it rather than waiting for the pointer — same rule as the arrow keys.
+    openBubble(visible[index], index);
     // Each step flashes, so stepping through hits in a long list is visible
     // rather than a silent jump.
     flashRowAt(index);
   };
 
-  // --- list ---
-  const SVG_NS = "http://www.w3.org/2000/svg";
+  // Scrolling a row into view only when the view itself asked for the scroll,
+  // and telling the scroll handler so: the row the bubble hangs off moves with
+  // the list, which is the opposite of the reader wheeling away from it.
+  const revealRow = (index: number): void => {
+    const before = listPane.scrollTop;
+    const top = revealScroll(before, listPane.clientHeight || 240, index, rowHeight());
+    if (top === before) return;
+    internalScroll = true;
+    listPane.scrollTop = top;
+    // The browser clamps a target past the end of the content, and an
+    // assignment that lands back where it started fires no scroll event at
+    // all. Reading the value back is what says whether the flag above has an
+    // event to explain; a flag left standing would let the reader's next wheel
+    // movement pass for one the view asked for, and the bubble would outlive
+    // the row it was answering.
+    if (listPane.scrollTop === before) internalScroll = false;
+  };
 
-  /// Draws one row's graph. The geometry comes from the pure model, so this
-  /// only turns parts into SVG nodes; a row is drawn from its own columns
-  /// alone, which is what lets the list stay virtualised.
-  ///
-  /// Each stroke is laid down twice: first a wider underlay in the row's own
-  /// background, then the coloured line on top. Where two branches cross,
-  /// the underlay is what stops them fusing into one thick mark — the line
-  /// that passes over gets a clean gap around it, so every crossing stays
-  /// readable without any of them being dashed or faded.
-  // The row already says who and what; the tooltip answers the one question
-  // the row cannot — which loaded ref tips contain this commit. When none
-  // do yet, it says so rather than leaving the line blank.
-  const graphTooltip = (commit: CommitView): string => {
+  // --- the bubble ---
+  // Nothing here asks the backend. The full message, the full date and the
+  // full id are in the page that is already on screen, and the one line the
+  // row cannot answer — which loaded ref tips contain this commit — is walked
+  // from the pages already loaded. A hover costs what a hover should: nothing.
+  const summaryFor = (commit: CommitView): RefSummary => {
     // Nothing is cached while the names are unknown: the next listing changes
-    // the answer, and a cached failure would keep the tooltip silent about the
+    // the answer, and a cached failure would keep the bubble silent about the
     // names that arrived since.
     let summary = refTips.unknown ? undefined : refSummaries.get(commit.oid);
     if (summary === undefined) {
       summary = refsIncluding(refMap, refTips, commit.oid);
       if (!refTips.unknown) refSummaries.set(commit.oid, summary);
     }
-    const included = refTips.unknown
-      ? "the names could not be read"
-      : summary.names.length === 0
-        ? "nothing loaded"
-        : summary.names.join(", ") + (summary.truncated ? " …" : "");
-    return `${commit.authorName} — ${commit.subject}\nIncluded in: ${included}`;
+    return summary;
   };
+
+  // Putting the bubble where its row is, inside the list pane. Both boxes are
+  // measured in the view's own space, because the bubble is drawn into the
+  // view: a viewport rectangle handed to `placeBubble` would land it somewhere
+  // else whenever the panel is not at the top-left of the screen.
+  const boxOf = (node: Element, origin: DOMRect): Rect => {
+    const box = node.getBoundingClientRect();
+    return { left: box.left - origin.left, top: box.top - origin.top, width: box.width, height: box.height };
+  };
+
+  const placeBubbleNow = (): void => {
+    if (bubbleAt === null) return;
+    const row = rowsHost.querySelector<HTMLElement>(`#commit-row-${bubbleAt.index}`);
+    // The row is not on screen — the list scrolled it out between the paint
+    // that anchored this bubble and this measure. The commit is still loaded;
+    // the bubble is not, and following it to wherever the row used to be is a
+    // box pointing at nothing.
+    if (row === null) {
+      closeBubble();
+      return;
+    }
+    const origin = element.getBoundingClientRect();
+    // Clear the size the last placement left behind, so the measurement is the
+    // text's own box and not the box the pane forced on it last time.
+    bubble.style.width = "";
+    bubble.style.height = "";
+    const placed = placeBubble(
+      boxOf(row, origin),
+      boxOf(listPane, origin),
+      { width: bubble.offsetWidth, height: bubble.offsetHeight },
+      bubbleInsetPx(currentFontPx()),
+    );
+    if (placed === null) {
+      closeBubble();
+      return;
+    }
+    bubble.style.left = `${placed.left}px`;
+    bubble.style.top = `${placed.top}px`;
+    bubble.style.width = `${placed.width}px`;
+    bubble.style.height = `${placed.height}px`;
+    bubble.dataset.side = placed.above ? "above" : "below";
+  };
+
+  const paintBubble = (commit: CommitView): void => {
+    bubbleMessage.textContent = commit.message;
+    bubbleAuthor.textContent = `${commit.authorName} — ${commit.authorDate}`;
+    bubbleOid.textContent = commit.oid;
+    bubbleRefs.textContent = `Included in: ${includedInLine(refTips, summaryFor(commit))}`;
+    bubble.hidden = false;
+    placeBubbleNow();
+  };
+
+  // Opening on a row the reader is pointing at or has just moved to by key.
+  const openBubble = (commit: CommitView, index: number): void => {
+    bubbleAt = { index, oid: commit.oid };
+    paintBubble(commit);
+  };
+
+  const closeBubble = (): void => {
+    window.clearTimeout(hoverTimer);
+    hoverTimer = undefined;
+    window.clearTimeout(leaveTimer);
+    leaveTimer = undefined;
+    bubbleAt = null;
+    bubble.hidden = true;
+  };
+
+  const scheduleBubble = (commit: CommitView, index: number): void => {
+    window.clearTimeout(leaveTimer);
+    leaveTimer = undefined;
+    if (bubbleAt !== null && (bubbleAt.index !== index || bubbleAt.oid !== commit.oid)) closeBubble();
+    // Resting on the row the bubble already answers is not a new request.
+    if (bubbleAt !== null) return;
+    window.clearTimeout(hoverTimer);
+    hoverTimer = window.setTimeout(() => {
+      hoverTimer = undefined;
+      openBubble(commit, index);
+    }, BUBBLE_HOVER_MS);
+  };
+
+  // The pointer left the row. Whether that is "gone" or "moved into the
+  // bubble" is not knowable from the event — the two boxes touch on purpose —
+  // so the answer is read off the live tree on the next tick, once the hover
+  // style has been recomputed.
+  const retireBubble = (): void => {
+    window.clearTimeout(hoverTimer);
+    hoverTimer = undefined;
+    if (bubbleAt === null) return;
+    window.clearTimeout(leaveTimer);
+    leaveTimer = window.setTimeout(() => {
+      leaveTimer = undefined;
+      if (!bubble.matches(":hover")) closeBubble();
+    }, 0);
+  };
+
+  // --- list ---
+  const SVG_NS = "http://www.w3.org/2000/svg";
 
   // Where the gutter's one fixed width sits over the loaded history, at the
   // size it is drawn. Derived rather than stored: the four numbers are a
@@ -521,6 +678,15 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   const graphWindow = (fontPx = currentFontPx()): GraphPan =>
     graphPan(gutterColumns, graphLanePx(fontPx), graphGutterMaxPx(fontPx), graphOrigin);
 
+  /// Draws one row's graph. The geometry comes from the pure model, so this
+  /// only turns parts into SVG nodes; a row is drawn from its own columns
+  /// alone, which is what lets the list stay virtualised.
+  ///
+  /// Each stroke is laid down twice: first a wider underlay in the row's own
+  /// background, then the coloured line on top. Where two branches cross,
+  /// the underlay is what stops them fusing into one thick mark — the line
+  /// that passes over gets a clean gap around it, so every crossing stays
+  /// readable without any of them being dashed or faded.
   const graphSvg = (
     commit: CommitView,
     height: number,
@@ -549,7 +715,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("focusable", "false");
 
-    const element = (name: "line" | "path" | "circle" | "title"): SVGElement =>
+    const element = (name: "line" | "path" | "circle"): SVGElement =>
       document.createElementNS(SVG_NS, name);
     // Column 0 is the mainline and keeps the quiet colour; every other column
     // is a side lane and cycles through the hues. The mapping is a function
@@ -601,12 +767,6 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         dot.setAttribute("cx", String(part.cx));
         dot.setAttribute("cy", String(part.cy));
         dot.setAttribute("r", String(part.r));
-        // A native tooltip on hover. The gutter is hidden from assistive
-        // tech, so this is a convenience for a mouse, never the only way to
-        // the fact.
-        const title = element("title");
-        title.textContent = graphTooltip(commit);
-        dot.appendChild(title);
         dots.push(dot);
       }
     }
@@ -657,6 +817,8 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     hasMore = false;
     selected = null;
     selectedIndex = -1;
+    opened = null;
+    closeBubble();
     detail.hidden = true;
     moreButton.disabled = true;
     countLabel.textContent = "";
@@ -845,19 +1007,23 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         // up down the list. One reading eye can then scan a column instead of
         // re-finding where each row's text begins.
         el("span", { class: "commit-refs", "aria-hidden": "true" }, refChips(commit)),
-        el("span", { class: "commit-subject", text: commit.subject, title: commit.subject }),
-        el("span", { class: "commit-author", text: commit.authorName, title: commit.authorName }),
+        el("span", { class: "commit-subject", text: commit.subject }),
+        el("span", { class: "commit-author", text: commit.authorName }),
         el("span", { class: "commit-date", text: commit.authorDate.slice(0, 10) }),
         // The short id is here so a commit can be named out loud from the
-        // list; the full one is a click away in the detail pane.
+        // list; the full one is what the bubble answers with.
         el("span", { class: "commit-short", "aria-hidden": "true", text: commit.oid.slice(0, 7) }),
       ]);
       // The graph leads the row, so it is prepended last: `prepend` puts the
       // element at the very front, and the gutter belongs left of the refs
       // chips and the subject.
       element.prepend(graphSvg(commit, rowHeightNow, fontPx, pan.origin));
-      element.addEventListener("click", () => setSelected(commit, index));
-      element.addEventListener("dblclick", () => void runCommitDiff());
+      element.addEventListener("click", () => openDetail(commit, index));
+      element.addEventListener("dblclick", () => void runCommitDiff(commit));
+      // Resting on a row asks what it is; the delay is what tells a rest from
+      // a sweep down the list.
+      element.addEventListener("pointerenter", () => scheduleBubble(commit, index));
+      element.addEventListener("pointerleave", retireBubble);
       fragment.append(element);
     }
     rowsHost.replaceChildren(fragment);
@@ -880,6 +1046,16 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     } else {
       listPane.removeAttribute("aria-activedescendant");
     }
+    // The rows are new, so the bubble's claim on its row is re-tried against
+    // them: the same index must still carry the same commit, or the bubble
+    // closes. Following the screen position onto a different commit is the one
+    // thing a bubble may not do — it would read as one commit's message
+    // wearing another one's id.
+    if (bubbleAt !== null) {
+      const still = anchorRow(visible, bubbleAt.index, bubbleAt.oid);
+      if (still === null) closeBubble();
+      else paintBubble(still);
+    }
   };
 
   // --- splitter ---
@@ -889,7 +1065,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     splitter.setPointerCapture(event.pointerId);
   });
   splitter.addEventListener("pointermove", (event) => {
-    if (!dragging || selected === null) return;
+    if (!dragging || opened === null) return;
     const rect = listPane.getBoundingClientRect();
     const next = Math.min(Math.max(120, rect.bottom - event.clientY), Math.max(120, rect.height - 100));
     detailHeight = next;
@@ -922,8 +1098,22 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     }
   });
   listPane.addEventListener("scroll", () => {
+    // A scroll the view asked for is the cursor moving to a row it can be seen
+    // on; a scroll the reader made is the reader leaving the row the bubble is
+    // answering, and the bubble goes with the row it was pointing at.
+    if (internalScroll) internalScroll = false;
+    else if (bubbleAt !== null) closeBubble();
     if (visible.length > 0) renderRows();
   }, { passive: true });
+  // The bubble sits flush against its row so that the pointer can travel from
+  // one to the other without crossing anything else, which is also what lets a
+  // reader select the 40-character id. Resting inside it keeps it open;
+  // leaving it retires it the same way leaving a row does.
+  bubble.addEventListener("pointerenter", () => {
+    window.clearTimeout(leaveTimer);
+    leaveTimer = undefined;
+  });
+  bubble.addEventListener("pointerleave", retireBubble);
   // A wheel turned sideways, or one turned down under Shift, moves the graph
   // rather than the list: the pane cannot scroll horizontally — every row
   // shares one gutter width — so there is nothing else this gesture could be
@@ -947,7 +1137,6 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   onDispose(() => rowWatcher.disconnect());
   listPane.addEventListener("keydown", (event) => {
     if (visible.length === 0) return;
-    const viewport = listPane.clientHeight || 240;
     let target = -2;
     switch (event.key) {
       case "ArrowDown": target = selectedIndex < 0 ? 0 : Math.min(selectedIndex + 1, visible.length - 1); break;
@@ -964,7 +1153,9 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         if (shiftGraph(1)) event.preventDefault();
         return;
       case "Enter":
-        if (selectedIndex >= 0) setSelected(visible[selectedIndex], selectedIndex);
+        // The key that says *work on this one*: the row key only shows what
+        // the row already knows, this one opens the pane that reads the files.
+        if (selectedIndex >= 0) openDetail(visible[selectedIndex], selectedIndex);
         event.preventDefault();
         return;
       case "/":
@@ -972,14 +1163,26 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
         event.preventDefault();
         return;
       case "Escape":
-        if (findOpen) closeFind();
+        // The bubble is the topmost thing this view drew, so it goes first.
+        if (bubbleAt !== null) closeBubble();
+        else if (findOpen) closeFind();
         return;
       default: return;
     }
     event.preventDefault();
     if (target < 0) return;
-    listPane.scrollTop = revealScroll(listPane.scrollTop, viewport, target, rowHeight());
-    setSelected(visible[target], target);
+    revealRow(target);
+    setCursor(visible[target], target);
+    // A key press is already the decision to read this row, so the answer
+    // comes on the key: no hover delay on the keyboard path, and no Git
+    // process either — the pane stays where the last click left it.
+    openBubble(visible[target], target);
+  });
+  // Leaving the list leaves the row the keyboard was reading. The check for
+  // the pointer being inside the bubble is what keeps a selection of the id
+  // alive: taking focus off the pane must not be a reason to lose the text.
+  listPane.addEventListener("blur", () => {
+    if (bubbleAt !== null && !bubble.matches(":hover")) closeBubble();
   });
 
   // --- lifecycle ---
@@ -1006,6 +1209,10 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     void readNames();
     selected = null;
     selectedIndex = -1;
+    opened = null;
+    // A different history on screen retires both layers: neither has a row
+    // this side of the refresh to hang off.
+    closeBubble();
     detail.hidden = true;
     if (head === null) placeholder("No commits yet.");
     else void loadPage(true);

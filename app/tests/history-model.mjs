@@ -787,7 +787,7 @@ test("a bubble lands under its row, flush against it", () => {
   assert.equal(placed.left, 8, "the row's own left edge");
   assert.equal(placed.top, 124, "the row's bottom edge, with no gap between them");
   assert.equal(placed.above, false);
-  assert.equal(placed.overlaps, false);
+  assert.ok(placed.top >= 124, "and it is clear of the row it answers");
   assert.equal(placed.width, 200);
   assert.equal(placed.height, 60);
   // Flipping up has to be flush too. The pointer travels between the two boxes
@@ -805,22 +805,21 @@ test("a bubble takes the room the pane has, not more", () => {
   assert.equal(wide.left, inset, "and therefore pushed off the row's left edge to stay inside");
   const tall = placeBubble(row(100), pane, { width: 200, height: 4000 }, inset);
   assert.equal(tall.height, pane.height - 2 * inset);
-  assert.equal(tall.overlaps, true, "a box as tall as the pane covers the row it came from");
+  assert.ok(tall.top < 124 && tall.top + tall.height > 100, "a box as tall as the pane covers the row it came from");
 });
 
-test("with room on neither side the bubble picks the larger and says it covers the row", () => {
+test("with room on neither side the bubble picks the larger and stays in the pane", () => {
   // A 300px box in a 400px pane, over a row 150px down: 220px of room below,
   // 144px above. Neither holds it, so it goes below — against the pane's
-  // bottom edge — and admits it is drawn over its own row instead of
-  // pretending otherwise.
+  // bottom edge — covering the row it came from rather than leaving the pane
+  // to avoid it.
   const placed = placeBubble(row(150), pane, { width: 200, height: 300 }, inset);
   assert.equal(placed.above, false);
-  assert.equal(placed.overlaps, true);
   assert.equal(placed.top + placed.height, pane.height - inset, "flush with the pane's inner bottom");
+  assert.ok(placed.top < 174, "and over the row");
   // The mirror: the same box over a row with more room above it than below.
   const up = placeBubble(row(200), pane, { width: 200, height: 300 }, inset);
   assert.equal(up.above, true);
-  assert.equal(up.overlaps, true);
   assert.equal(up.top, inset, "flush with the pane's inner top");
 });
 
