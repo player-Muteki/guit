@@ -375,8 +375,15 @@ def scenario_protected() -> None:
     root = scratch("ignored-target")
     write(root, ".gitignore", "built.txt\n")
     write(root, "built.txt", "the target's own bytes\n")
+    # `add -A` skips this file: the rule is already in place. The whole point of the
+    # shape is a path the rules cover *and* the tree tracks, so it goes in by force —
+    # and the target's own listing is printed, because a fixture that quietly fails to
+    # track the path measures a different question.
+    git(root, "add", "-f", "--", "built.txt")
     target = commit(root, "built.txt tracked despite the rule")
-    git(root, "rm", "--cached", "-q", "--", "built.txt")
+    print(f"    the target holds: {one_line(git(root, 'ls-tree', '-r', '--name-only', target)[1])}")
+    rc, _out, _err = git(root, "rm", "--cached", "-q", "--", "built.txt")
+    print(f"    git rm --cached now: rc={rc}")
     commit(root, "built.txt untracked, and ignored")
     rc, out, _ = git(root, "check-ignore", "-v", "built.txt")
     print(f"    check-ignore -v: rc={rc} {one_line(out)}")
@@ -387,6 +394,8 @@ def scenario_protected() -> None:
     ask(root, "git reset --hard <target>", ["reset", "--hard", target], ["built.txt"])
     rc, out, _ = git(root, "check-ignore", "-v", "built.txt")
     print(f"    the same path is tracked now: check-ignore -v rc={rc} {one_line(out)}")
+    rc, out, _ = git(root, "check-ignore", "-v", "--no-index", "built.txt")
+    print(f"    with --no-index the same rule is reported again: rc={rc} {one_line(out)}")
 
 
 def folded_repo() -> tuple[str, str]:

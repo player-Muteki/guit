@@ -487,18 +487,27 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
 其中任何一个（`plain.txt` 之外它什么都不说）。
 
 最后一类，是"忽略"和"目标要跟踪"同时成立：`.gitignore` 里写着 `built.txt`，目标树跟踪
-`built.txt`。
+`built.txt`。这一例**造它的人差点没造出来**：`git add -A` 会跳过那条规则盖住的路径，于是
+第一次跑这份夹具时 `built.txt` 从来没进过树，`git rm --cached` 直接 rc=128 而探针不看返回码，
+后面那几句量的其实是"一个未跟踪的忽略文件"——不是这一问。现在的夹具用 `add -f`，并先把目标
+自己的树打印出来作证据。
 
-    check-ignore -v                        rc=0  .gitignore:1:built.txt   built.txt
-    status --porcelain -uall --ignored     rc=0  !! built.txt
+    the target holds:                        .gitignore / built.txt
+    git rm --cached now                      rc=0
+    check-ignore -v                          rc=0  .gitignore:1:built.txt   built.txt
+    status --porcelain -uall --ignored       rc=0  !! built.txt
     ls-files --others --ignored --exclude-standard  rc=0  built.txt
-    clean -ndx                             rc=0  Would remove built.txt
-    git reset --hard <target>              rc=0  built.txt 变成目标的字节；status 变空
-    之后再看同一条规则                      rc=0  check-ignore 仍然报 .gitignore:1:built.txt
+    clean -ndx                               rc=0  Would remove built.txt
+    git reset --hard <target>                rc=0  built.txt 变成目标的字节；status 变空
+    之后再看同一条规则                        rc=1  什么都不报
+    再加 --no-index                           rc=0  .gitignore:1:built.txt
 
-也就是说：**被忽略的路径如果目标要跟踪它，恢复会写它**，而"它被忽略了"这件事在写完之后
-仍然被 `check-ignore` 肯定。**`check-ignore` 答的是模式，不是跟踪状态**，拿它判"这个路径
-不受保护"或"这个路径不是被跟踪的"都会答错。
+也就是说：**被忽略的路径如果目标要跟踪它，恢复会写它**——写之前它在 `status --ignored` 与
+`ls-files --others --ignored` 里都是逐文件的一条，写之后它变成已跟踪、`status` 不再报它。
+`check-ignore` 这一条**纠正本节早先记的一句**：它不是"写完仍然报那条规则"，而是反过来——
+默认它先看索引，路径一旦跟踪就 rc=1 沉默，加上 `--no-index` 才只答模式。所以它两个方向都不能
+当判据：拿它判"这条路径不受保护"（未跟踪时报的是模式）与拿它判"这条路径已被跟踪"（跟踪之后它
+不答）都会答错。构造里一次都没问它。
 
 ### 6.5 两步走完，凭什么说"干净了"
 
@@ -687,9 +696,10 @@ Git 仍然把目标字节写了一遍（无人能看见），名单里必须留�
    后者要先把 101 条里那三个字节的表头认出来、再丢掉 100 条这一问不需要的状态，代价 1.9 ms
    对 8.9 ms。两条都跑过，答案在夹具上一致。
 8. **默认保护忽略的东西，但要先算出那一个例外**：目标树跟踪了一个被 `.gitignore` 盖住的
-   路径时，恢复会写它，而 `check-ignore` 在写完之后仍然报那条规则（§6.4 末）——
-   **`check-ignore` 答模式，不答跟踪状态**，不能用它判跟踪与否。忽略 ∩ 目标从第 7 条那一条
-   逐文件名单里算，算出来就要在写之前说：这一条路径既被忽略又将被写入。这一句是**说**而不是
+   路径时，恢复会写它（§6.4 末）。`check-ignore` 当不了这个例外的判据，两个方向都不行：
+   路径未跟踪时它答的是**模式**，路径一旦跟踪它就沉默（它默认先看索引，`--no-index` 才剥掉
+   这层）。忽略 ∩ 目标因此从第 7 条那一条逐文件名单里算，算出来就要在写之前说：这一条路径
+   既被忽略又将被写入。这一句是**说**而不是
    **拒**：例外之所以是例外，正因为恢复确实要写它。唯一的例外之外还有第 14 条——那条路径如果
    本身是一个仓库（在逐文件名单里以折叠的目录形式出现），被销毁的代价与忽略规则无关，仍然
    写前拒绝。
