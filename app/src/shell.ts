@@ -21,7 +21,7 @@ import {
   watchStatus,
   type ViewId,
 } from "./state";
-import type { BranchView } from "./types";
+import { aheadBehind, branchLabel } from "./headModel";
 import { railHint, VIEW_ICONS, VIEW_TITLES } from "./railModel";
 import { VIEW_HINTS } from "./viewHints";
 import { isAlwaysOnTop, isMaximized, onAlwaysOnTopChange, onMaximizedChange, setAlwaysOnTop } from "./window";
@@ -82,21 +82,6 @@ function repoName(): string | null {
   const snapshot = currentSnapshot();
   if (!snapshot) return null;
   return snapshot.repo.root ?? snapshot.repo.gitDir;
-}
-
-function branchLabel(branch: BranchView | null): string {
-  if (!branch) return "bare repository";
-  if (branch.headState === "detached") return `detached at ${branch.oid?.slice(0, 8) ?? "?"}`;
-  if (branch.headState === "unborn") return `${branch.name ?? "?"} (no commits yet)`;
-  return branch.name ?? "?";
-}
-
-function aheadBehind(branch: BranchView | null): string {
-  if (!branch || !branch.upstream) return "";
-  const parts: string[] = [];
-  if (branch.ahead !== null) parts.push(`↑${branch.ahead}`);
-  if (branch.behind !== null) parts.push(`↓${branch.behind}`);
-  return parts.length ? ` ${parts.join(" ")}` : "";
 }
 
 export function createShell(actions: ShellActions): Shell {

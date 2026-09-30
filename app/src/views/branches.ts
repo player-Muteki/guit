@@ -10,6 +10,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, openMenu, plural } from "../dom";
+import { branchDetail } from "../headModel";
 import { readRefListing } from "../refsStore";
 import { contextMatches, readContextFor } from "../snapshotBus";
 import {
@@ -219,12 +220,8 @@ export function createBranchesView(deps: BranchesDeps): BranchesView {
     const rows: HTMLElement[] = [el("div", { class: "ref-heading", text: `Branches (${branches.length})` })];
     for (const branch of branches) {
       if (!matchesFilter(branch.name)) continue;
-      const parts: string[] = [];
-      if (branch.upstream) parts.push(`→ ${branch.upstream}`);
-      if (branch.upstreamGone) parts.push("upstream gone");
-      if (branch.ahead !== null) parts.push(`↑${branch.ahead}`);
-      if (branch.behind !== null) parts.push(`↓${branch.behind}`);
-      const element = refRow(branch.head ? "●" : "", branch.name, parts.join("  "), branch.addressable);
+      const parts = branchDetail(branch);
+      const element = refRow(branch.head ? "●" : "", branch.name, parts, branch.addressable);
       // Only byte-round-trippable names can be write targets; the
       // checked-out branch can be renamed but never switched away or deleted.
       if (branch.addressable && renaming === branch.name) {
