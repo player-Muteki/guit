@@ -162,3 +162,100 @@ CaseFolding.txt 的全部差异：`ÿ`、`ſ`、兼容区的那些分岔没有�
 依赖时**必须**带 `default-features = false`：它的默认 feature 会引入 `utf16_iter` 与
 `write16` 两个此前没被解析进来的包。带上之后 Cargo.lock 只在 `guit` 的依赖清单里多出
 两行，包图零增长，发布产物不多一行代码。
+
+## 7. §6 那五条事实的量得结果
+
+逐条对上 §6，因为每一条都改了一个接口，而不是一个常量：
+
+1. **一次 `log` 的代价**。在 6,524 条真实历史上量 `--skip` 的再走一遍：skip 0 的 p50 是
+   8.9 ms，skip 6000 是 34.2 ms（九次 warm）。所以窗口不能窄——按 50 条翻页会把整段
+   历史重走 N 次，扫描变成二次；`WINDOW_RECORDS = 1_000` 是"一次进程读够一批正文"的
+   那个数，游标按整窗前进。另两条一起量的：`--topo-order` 在同一次 50 条读取上是
+   34.6 ms 对 5.9 ms，而搜索结果列表没有对齐的图沟要保持，于是扫描只要新→旧。
+   三个上限各自独立：读 1,000 条（扫描批）、报 100 条提交（结果）、报 50 个名字
+   （refs），第四个是 100,000 条的行走天花板。
+2. **正文与作者的读法**。用 `%B` 单字段带回整条说明，不用 `%b`：正文和标题是同一段
+   字节里的两行，解析端按第一个 `\n` 划出 subject 边界并同时给出字节与 UTF-16 两种
+   坐标，一次读取两种标签。记录用 `-z`（`\0`）分隔、字段用 `0x1f` 分隔并按
+   `splitn(4)` 切，因此多行正文不会打乱解析——夹具里就有带空行和 emoji 的多行正文。
+   作者 `%an` 是独立的第四个字段命中，只作为附加命中字段，永不替代正文。
+3. **截断不解析**。`truncated` 一旦为真，整窗拒绝为 `search_truncated`，不返回被切的
+   记录；形状不符（切不出四段、id 不是 id）是 `search_protocol_error`。窗口上限
+   8 MiB，本夹具首窗 99,991 字节——本仓库自己 218 条提交的全部 `%B` 读取是
+   208,441 字节（平均约 956 字节/条），据此一个真实仓库的 1,000 条窗口约 1 MB，
+   仍只占上限的八分之一，一条超大说明挤爆窗口的路径是被拒绝而不是被截短。
+4. **取消是取消，不是空答案**。复用既有 `cancelled` 标志与 `runner`；取消返回
+   `process_cancelled`（夹具钉住它不得伪装成"没搜到"）。本节**没有**引入新的代计数器：
+   `ReadContext`/`SessionRead` 的接线在 E03，因此 E02 的 `scan` 只把 `rev` 当参数再校验
+   一次完整 oid，把它交给 Git 之前不假设调用方已经钉住。
+5. **没有缓存**。一个窗口一次读取，续读靠 `next_cursor`；HEAD 移动即游标作废这件事由
+   E03 的 session 绑定负责，本模块不自建保留集，因此也没有"有界保留"要证明。
+
+窗口语义里唯一容易被写错的一条：`hits_truncated`（这个窗口还有更好的没送来）和
+`complete`（历史走完了）是两个不同的断言，只有后者能支撑"无结果"那句文案。夹具把
+它们分开了：2,500 条全命中、窗口 1,000、上限 100，第一窗被截断且未完，最后一窗才完。
+
+## 8. E02 实施记录
+
+```text
+任务：E02 新 search.rs：当前历史消息/正文/提交号 + 仓库 refs，批次、取消、输出界限
+对应产品目标：G03 统一模糊搜索（消息正文、OID、Tag、Branch；能找到面板没加载的旧提交）
+起止提交与变更文件：基线 `e9c5a1a` → 本文与代码同一次提交。
+  新增 app/src-tauri/src/search.rs（scan/read_window/ref_hits/probe_reachable 与 19 个
+  单元测试）；app/src-tauri/src/main.rs 加一行 mod search;（唯一一行，命令注册不在本
+  任务）；app/src-tauri/src/fuzzy.rs 给 Fragment 加 `Serialize` 与 camelCase 重命名
+  （含一行 `use serde::Serialize;`），使命中片段可以随结果出后端，并把它的模块级承接
+  注释改写成"随命令注册一起撤"。无 Cargo 变更：serde 早已是直接依赖。不改任何既有命令
+  面、不动 session/write/runner 的实现。
+输入条件及 fixture：19 个 Rust 单元测试，需要 Git 与临时仓库，不需要显示环境。夹具是
+  一次 `git fast-import` 写的线性历史（每提交秒递增，"新→旧"因此是夹具规定的事实而非
+  请求的运气），五个提交覆盖中文标题、多行正文、emoji、作者名；跨窗口的历史用
+  deep(count, positions, needle) 生成，positions 是**扫描序偏移**（"HEAD 往回第几条"），
+  因为那是窗口报告的数，而流是旧→新写的，所以消息按偏移选好再倒序交给 fast-import。
+  这里踩过两次坑，记下来免得重踩：`data <len>` 的 len 把结尾换行算在内，再补一个换行
+  就是 commit 的终止空行，随后的 `M 100644 inline lane` 会被当成顶层命令而报
+  "unsupported command"；`--done` 需要流末尾真的有 `done`；同一分支的连续 commit 自动
+  接前一个作父，`from` 只在跨分支或首提交时用，写 `from refs/heads/main^0` 会被拒
+  （"invalid ref name or SHA1 expression"），写分支自身会被拒（"can't create a branch
+  from itself"）。
+实现行为与异常路径：查询先 trim 再折叠，折叠后为空是 search_query_empty（"没输入"和
+  "输入折叠没了"都由调用方判，不是"无结果"）；长过 256 字符是 search_query_too_long；
+  rev 不是完整 oid 是 search_target_invalid；游标越过天花板是 search_scan_capped 且带
+  "历史没被搜完"这句话。七位以上纯十六进制才按对象 id 前缀处理，且 id 命中永远是
+  exact/prefix、不参与模糊评分。一条记录内：oid、消息（一次，标题/正文按落点标签）、
+  作者名各成一命中，按字段优先再按 matcher 的键排；稳定排序让等键保留 Git 的新→旧。
+  refs 只在游标 0 读一次（`refs::list` 的 fail-closed 三条照用），按它自带的 rank 排序
+  并截到名字上限，可达性用 `merge-base --is-ancestor` 问 Git（0 是、1 否、其它是
+  search_reach_failed），最多探 8 个，`oid == rev` 免进程直接判是。异常路径全部落在
+  "整窗拒绝"：截断、非零退出、非四段形状、id 不像 id。
+运行命令、退出码、日志位置：全部从 app/ 执行，退出码 0，输出不落盘（终端即日志）。
+  共享命令同 §5 那份：`cargo test`、`cargo fmt --check`、
+  `cargo clippy --locked --all-targets`、`npm run build`、`npm run test:fixture`、两个
+  样式 gate。计数：cargo test 353 passed（其中 search 19）、fixture 355 pass / 0 fail、
+  build 45 modules、两个样式 gate fails=0、clippy 无告警。fmt 本轮必须跑：新文件写完
+  `cargo fmt --check` 报了 18 处 diff，`cargo fmt` 后只差 `search.rs` 一个文件（共享树
+  当时只有我的三个文件在飞，`git status --short` 复核过，没有碰到并行开发者的内容）。
+  用户可见文案 gate 也在扫描 `app/src-tauri/src` 的注释，355 条里包含它，通过。
+桌面/性能证据与环境：无桌面证据（本任务没有任何 UI，不新增 DOM、样式或交互面，构建
+  产物与改动前同源）。布局探针与两个引擎探针本轮没跑，理由同 §5：跑它们测不出新东西。
+  扫描吞吐在本宿主 cargo test a_batch_of_two_thousand -- --nocapture --test-threads=1
+  量到：2,000 条合成历史上首窗（1,000 条 + 1 备用）warm 九次 p50 23.9 ms，整趟三窗
+  48.7 ms，首窗 99,991 字节；**是 unoptimized + debuginfo 档**，release 档没量过，不做
+  换算推测。对照 D03a 每页 20.3 ms（[阶段 D 契约依据](16-graph-contract-d.md) §6.1）：
+  一个搜索窗的成本约等于一页图的成本，这正是"按整窗翻页"能成立的依据。
+  度量都在共享树做：并行开发者当时没有未提交的 Rust 文件。
+未解决限制：`scan` 今天没有调用者，两个模块级 allow(dead_code) 一起承接，E03 注册
+  `search_repository` 时必须同时撤掉并按 BOUND_READS 归类（ipc-surface.mjs 要求每条
+  bound read 都有前端 invoke 字面量，这就是 E02 不注册命令的原因）；`queryId`、
+  ReadContext 绑定与"旧 query/旧仓库的结果不得覆盖新结果"属于 E03；顶栏输入、IME
+  组合期不发半成品查询、结果浮层、高亮、键盘导航与图定位属于 E04；验证目标里
+  "输入到候选反馈 warm p95 ≤150ms、首批 p95 ≤500ms"要到 E04 才有可量对象，本节的
+  23.9 ms 是后端单窗，不含 IPC 与渲染；Windows/macOS 仍只是构建配置；可达性探测
+  上限 8 个意味着一个第 9 个匹配上的名字会以"未知"报出，这是有意的取舍，不是漏项。
+回退方式：删除 search.rs、main.rs 那一行与 fuzzy.rs 的三处改动（Fragment 的
+  Serialize 派生、use、承接注释）即可，不触碰任何共享模块，不影响现有命令面；本轮
+  没有 Cargo 变更，回退不改变发布产物。
+结论：完成（E02 的交付物与验收条件由测试与测量支撑：未加载的旧提交在第 1,050 条被
+  找到并带偏移；完整扫描之前没有任何窗口能说"无结果"。阶段退出门槛仍差 E03–E04）
+```
+

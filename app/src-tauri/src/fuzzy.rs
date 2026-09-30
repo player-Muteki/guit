@@ -30,12 +30,14 @@
 //! all — a commit id has to be resolved by the backend, not fuzzy-scored
 //! against prose.
 
-// The matcher is reached only by tests so far: nothing outside this file calls
-// it, and the attribute goes as soon as the search lane does. Listing it here
-// rather than at each item keeps the warning gate on for everything else.
+// The matcher is reached by `search` and by its tests, and nothing outside those
+// two files calls either: the attribute goes with the command registration that
+// puts the scan in front of the frontend. Listing it here rather than at each
+// item keeps the warning gate on for everything else.
 #![allow(dead_code)]
 
 use icu_normalizer::ComposingNormalizerBorrowed;
+use serde::Serialize;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// How well a query matched a field, best first. The order is the ladder: a
@@ -56,7 +58,8 @@ pub enum Tier {
 /// the caller's: bytes slice the Rust string it came from, UTF-16 units index
 /// the JavaScript string the row is drawn from, and the two differ for every
 /// astral character — an emoji in a subject line is not rare.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Fragment {
     pub byte_start: usize,
     pub byte_end: usize,

@@ -14,6 +14,7 @@ mod refs;
 mod repo;
 mod reset;
 mod runner;
+mod search;
 mod sequencer;
 mod session;
 mod stash;
