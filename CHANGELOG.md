@@ -131,6 +131,30 @@ release it belongs to did not measure.
   two on the row's own text — the same facts, said twice in the operating system's
   layout instead of the panel's. The branch and tag chips keep their tooltips, which
   answer a different question: what kind of name this is.
+- The line above the commit graph now leads with the branch whose history it is
+  drawing, and is the second door onto another one. It says `main`, or
+  `detached at 1a2b3c4d`, or `fresh (no commits yet)`, or `bare repository` — the
+  same four sentences the app bar uses, written down in one place rather than
+  remembered twice, because one state said two ways in one window is a state
+  nobody can trust. A name longer than the header loses its tail rather than
+  pushing the rest of the line off it (measured in the panel's own renderer: 430
+  px of name drawn inside 174 px, the whole string still there to read back).
+  Opening it lists the repository's local branches, answered from the very
+  listing the labels on those rows were joined from, so opening the header fires
+  no Git read at all. Three kinds of row are told apart: the branch already
+  checked out is shown and not pickable, a branch whose bytes cannot be handed
+  back to Git is said as not switchable rather than hidden, and a switchable one
+  carries where it tracks and how far apart the two are. A remote-tracking name
+  and a tag are not offered, because Git does not switch to either — it refuses
+  them, and a panel that offered them would be offering its own refusal.
+  Picking a branch is one write on the lane every write shares, bound to the
+  snapshot on screen. It asks for no confirmation and never retries with force:
+  switching is not a destructive operation here, and the part of it that is
+  impossible is refused by Git with HEAD left where it was. Measured in the same
+  renderer: the head moving costs exactly one page of history and no second
+  names read, a Git refusal re-reads nothing and leaves the graph on the branch
+  it was drawing, and a write the backend would not start at all is said so
+  rather than drawn as a repository that has not changed.
 
 ### Changed
 

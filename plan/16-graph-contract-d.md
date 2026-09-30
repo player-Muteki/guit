@@ -1118,3 +1118,96 @@ stdout/stderr。没标实测的是从代码读出的结论，并注明出处。
 - picker 与 chip 的既有交互：D05 加的是第二扇门，不是重做第一扇。
 - "看别的分支但不切过去"的只读浏览：`history_page` 的 `oid` pin 今天只有"把一次分页的两读
   钉在同一个提交"这一个用途（§1.2），把它当浏览器入口不是本轮契约。
+
+## 14. D05 落地：第二扇门开在图的上方，以及它在引擎里量出来的数
+
+三个切片各自落地：措辞（`a085b59`）、界面（`5a128e2`）、引擎证据与这一节。后端一行未动
+——§13.1 的预测在这里兑现为事实：`ipc-surface` 的四张表没有被改过一行，`switch_branch`
+仍是 picker 与图头部共用的那一个命令。
+
+### 14.1 切片一：一个状态只能有一句话
+
+`app/src/headModel.ts`（新）把"HEAD 叫什么"与"哪些名字可以交给 Git"写成一份纯模型：
+`branchLabel`（`:21`，三态三句）、`aheadBehind`（`:29`，没有 upstream 就没有计数）、
+`branchDetail`（`:41`，一行分支值得说的那半句）、`branchChoices`（`:73`，可选性与理由）。
+`shell.ts:24` 与 `views/branches.ts:13` 改为 import 它，两处原来手写的措辞被删掉；
+今天 app-bar 的 chip、picker 的行与图的头部是同一段话的三个抄本，这段之后是一个。
+
+`branchChoices` 偏离 §13.5 第 3 条一处，是有意的：`current` 取
+`ref.head || ref.name === head.name` 的**并集**。两个信号来自两个计数器——listing 属于
+refsGeneration，head 属于快照——切换一次动的是两个，于是在"写完成"与"names 重读完成"
+之间它们可以不一致。谁单独说"这一行就是当前分支"，这一行就不会被当作目标；漏掉一半就会
+出现"面板正在画它，却允许你切过去"。十项夹具测试在 `app/tests/head-model.mjs`，其中
+第三条量的正是这个并集。
+
+### 14.2 切片二：菜单行长出第二条腿
+
+`MenuItem`（`dom.ts:163`）的 `run` 变成可选，并添 `detail` 与 `hint`：没有 `run` 的行是
+**报告**，不是**提议**，于是它 `disabled`、没有 hover、把理由放进自己的 `title`
+（`:198`）。共享 popup 的其余形状没动——一个实例、Escape 与外部点击收起、关闭归还焦点——
+所以 picker 的每一行（都带 `run`）行为不变。
+
+视图侧（`views/history.ts`）：`namesListing`（`:218`）与 `refTips` 同生同灭，头部因此
+只会回答"行上已经有的名字"；`branchMenu`（`:905`）把三种状态写成三类行，names 读失败时
+回答的是那句话而不是空列表；`renderBranchChoice`（`:929`）只在 `render()` 里被调用一次；
+`switchTo`（`:941`）是一次写，带 `snapshotVersion`，成功与失败都照后端交回的快照走
+`applySnapshot`，自己不再读一页。样式（`style.css:232-238`、`:512`）给菜单行两行文字的
+列，给头部按钮 `max-width: 11rem`——与菜单自己的 `min-width` 同一个数，按钮和它打开的
+列表为一句话要同样多的地方。
+
+### 14.3 引擎里的实测：`tools/bench/branch-selector-engine-probe.ts`
+
+探针在 WebKitGTK 里建六个舞台（具名分支、detached、unborn、bare、names 读失败、一个比
+头部长的名字），派发真的 `click`，并且**手工掌握 `switch_branch` 的结局**：写可以在
+半空中被观察（车道被占、头部变灰、状态行在说"正在切"），然后按需要落成三种结局之一。
+发布走的是 `main.ts` 的那套：一个没见过的 version 发布一次，域按后端数出的代数动。于是
+"选择器自己没多读一页"是一个数出来的事实，不是一次读代码的结论。44 条全过：
+
+| 断言 | 实测 |
+| --- | --- |
+| 头部的三态 | `main` / `detached at 90000000` / `fresh (no commits yet)` / `bare repository`；names 读失败时仍是 `solo` |
+| 打开头部的成本 | 发射的命令列表为 `[]`——一次 Git 读都没有，菜单答的是行上已有的名字 |
+| 菜单的内容 | `main,dev,weird,topic`，就是 Git 列出的顺序；`origin/dev` 与标签 `v1.0` 没有成为可切过去的分支 |
+| 三类行 | `main` 禁选 + `checked out`；`dev` 可选 + `→ origin/dev  ↑2 ↓1`；`weird` 禁选 + `not switchable` + 理由里有"switched to" |
+| 禁选的行 | 点击不发任何东西（asks 不变），菜单也不收起——它是拿来读的 |
+| 一次点击 | `[{"cmd":"switch_branch","args":{"snapshotVersion":1,"name":"dev"}}]`，仅此一条 |
+| 半空中 | `isWriteRunning()` 为真且头部 `disabled`；再点头部不开菜单，也不发第二条写 |
+| 成功后 | 页数 `1 → 2`（head 动了，一次），names `1 → 1`（没有为此重读），头部 `dev`，状态行 `success` |
+| Git 拒绝 | 头部仍 `dev`，状态行是 `The branch switch did not happen. error: your local changes would be overwritten by checkout`，页数 `2 → 2`——head 没动就不重读 |
+| 写没跑起来 | `write_stale_snapshot` 交给 `onError`（夹具里只有这一条），状态行 `The branch switch did not run.`，头部不变、页不重读 |
+| unborn | listing 没带 head 旗标（Git 的旗标来自 HEAD，而 unborn 没有 HEAD），快照里那个名字仍把该行标成 checked out；该会话 `history_page` 发射 0 次 |
+| bare / 只有一个分支 | 菜单是一行禁选的报告："This repository has no other branch." |
+| 名字比头部长 | `scrollWidth 430`，`clientWidth 174`，封顶 `176`（11rem × 实测 16 px 根字号），计算样式 `text-overflow: ellipsis`；`textContent` 仍是整串名字，被裁掉的只是画不下的那半截 |
+| 整场跑完问过什么 | `history_page, list_refs, switch_branch` —— 没有 stash、force、fetch、push、preview |
+
+复现：`/usr/bin/python3 ../tools/bench/webkit-engine-probe.py branch-selector-engine-probe.ts src/style.css src/style/tokens.css`。
+本轮全树门禁跑在共享工作树上，那棵树同时带着并行阶段未提交的 `app/src-tauri/src/fuzzy.rs`
+改动与未注册的 `app/src-tauri/src/search.rs`（后者没有被任何阶段声明，因此不参与编译）。
+前端的数与这次改动的文件无关，后端那三个数是两侧都跑过的：`npm run build` 0 errors，
+`npm run test:fixture` 355/355，`color-contrast.py dist/assets` fails=0，`responsive-check.py`
+fails=0，`cargo fmt --check` 干净，`cargo test` 334 passed / 0 failed，
+`cargo clippy --locked --all-targets` 无输出。中间有一次 `cargo test` 编译失败
+（`error: cannot find derive macro Serialize in this scope`，`fuzzy.rs` 被并发写到一半），
+重跑即恢复——AGENTS.md 那句"共享树上带着别人未提交的代码时要从独立 worktree 量已提交的
+状态"在数值层面兑现了：本轮记录的 334 两侧一致，而那次红不是任何一方的代码事实。
+改的正是 D04 那个视图与共享 popup，所以把它们的回归网也重跑了：
+`commit-bubble-engine-probe.ts`、`graph-pan-engine-probe.ts`、`appearance-engine-probe.ts`、
+`theme-engine-probe.ts` 各自 fails=0。
+
+### 14.4 残差
+
+- **探针不碰 Git 进程。** `invoke` 被换成一张表：它证明前端只发一条 `switch_branch`、
+  带着屏幕上的 `snapshotVersion`、并且没有顺路发别的；argv 里到底没有 `-f`，仍归
+  `branches.rs` 的 `prepare` 与它的 Rust 单测（§13.2）说，本轮没有把那条路接到引擎里。
+- **脏冲突仍然说不出是哪几个文件。** §13.3 第一条没变：`git switch` 把 offending 路径放在
+  第二行，`first_stderr_line` 只留首行。表里那行实测证明的是"首行那句原样到了状态行"，
+  不是"用户能看到是哪三个文件"。共享的 `first_stderr_line` / `redact` 按 §13.6 没动。
+- **worktree 占用那句话里的绝对路径仍未擦除。** 与上一条同源，且 picker 今天就能走到它。
+- **菜单没有方向键遍历。** 共享 popup 只处理 Escape 与外部点击（`dom.ts:175-196`），
+  键盘读者靠 Tab 走到各行；`role=menu` / `role=menuitem` 通常被期望用方向键遍历。这是
+  共享 popup 的既有形状，本轮没有为选择器改它，也没有测它。
+- **`text-overflow` 那组数是在默认根字号下量的。** rem 让封顶跟着界面缩放走，但"缩放后
+  这个名字还剩几个字符"没有第二个字号的实测。
+- **`layout-probe.mjs` 与 AT-SPI 那两组本轮没跑。** 前者要 WebKit 远程检查端点；后者的
+  节点名通道看不见浮层，头部按钮的 `aria-label` 已经在本探针里断言过。
+- **Windows 与 macOS 仍只是构建配置。** 上面的每个数来自 Linux 宿主、Git 2.53、WebKitGTK。
