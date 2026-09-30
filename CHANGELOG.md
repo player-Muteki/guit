@@ -100,6 +100,37 @@ release it belongs to did not measure.
   survives the loss of one of its copies. That is the same trade the Commit button
   already makes, and it is made in the other direction on purpose: a window button that
   loses its box loses the only place the panel itself offers to put the window away.
+- Resting the pointer on a commit row — or walking to one with the arrow, Home and End
+  keys — opens a bubble against that row and answers it: the full message the row cuts
+  off, the author with the whole timestamp rather than the date the row shows, the
+  object id in full, and which loaded branch and tag names contain that commit. The
+  pointer waits a quarter of a second for its answer, which is what tells a rest on a
+  row from a sweep down the list; a key press answers on the key, because pressing it
+  is already the decision to read this one.
+  None of that costs a Git read. Everything the bubble says is in the page already on
+  screen, and the one line a row cannot answer is walked from the loaded pages. The
+  question that does cost a read is "work on this one", and only a click or Enter asks
+  it: measured in the panel's own renderer, twenty rows walked by key fire no file-list
+  read at all, where the same twenty presses used to fire twenty. Walking past a
+  commit the pane was opened for no longer moves the pane — it keeps describing the
+  commit it was opened for, and its buttons belong to that commit alone.
+  The box is placed, not centred: flush against its row so the pointer can travel
+  between the two without crossing a gap it would fall through, flipping above the row
+  when the list has no room below, and capped to the list's own box however long the
+  message is. At the 340 CSS px minimum window that means a 40-character id in a 300 px
+  box inside a pane inset 6 px from each edge, still touching its row. It closes when
+  the pointer leaves the row or the box, when the reader scrolls the list, on Escape,
+  and whenever the rows are rebuilt under it — a bubble that could no longer confirm
+  its own row closes rather than following the screen position onto the next commit,
+  which would read as one commit's message wearing another one's id. A scroll the panel
+  caused itself is the cursor moving to a visible row, so it keeps the answer it was
+  already giving.
+  The bubble carries no buttons and is hidden from the screen reader: the row already
+  says who and when, the full id is selectable in the box itself, and copying stays the
+  detail pane's one button. What it replaces is the graph node's native tooltip and the
+  two on the row's own text — the same facts, said twice in the operating system's
+  layout instead of the panel's. The branch and tag chips keep their tooltips, which
+  answer a different question: what kind of name this is.
 
 ### Changed
 
@@ -159,9 +190,11 @@ release it belongs to did not measure.
 - The node the pointer is over grows, so the graph acknowledges the mouse
   before the detail pane opens. A merge's ring grows and its inner dot does
   not, so the join still reads as a join.
-- Hovering a graph node now also lists the loaded ref tips that contain the
-  commit, which the row itself cannot say, instead of repeating the row's
-  author and subject.
+- The ref tips that contain a commit are no longer listed by the graph node
+  under the pointer. That line — the one fact about a commit its own row cannot
+  say — is now the last line of the bubble over the row, and the node keeps only
+  its own acknowledgement: the dot that grows. Neither says it twice, and the
+  answer no longer waits on the operating system's tooltip delay and layout.
 - Paging a long history reads Git once per page instead of twice. The lanes that
   run off the bottom of a page used to be settled by reading the whole history
   above that page again, in a second process, on every click; the panel now

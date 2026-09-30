@@ -917,3 +917,113 @@ shell 的 `escapeStack`（`shell.ts:250-254`）只管 app-bar 菜单与 overlay�
 250 ms 之前不出现、方向键路径无延迟、`commit_files` 的发射次数在走 20 行之后不涨、
 窄窗（340）下气泡仍在 pane 里。§11.5 那句"每次按键一个进程"目前是读代码读出来的，
 探针跑过才算实测。
+
+## 12. D04 落地：气泡是什么，以及它在引擎里量出来的数
+
+三条提交各留一段：切片一是纯几何与身份（§11.7 那五行 + §11.4 那一条），切片二是视图接线与样式
+（§11.2/§11.3/§11.5/§11.6/§11.8），切片三是探针（§11.9）。行号仅作导航，取落地时的树。
+
+### 12.1 先分开的是状态，不是界面
+
+§11.5 要把"看一眼"和"打开来干活"分家，而今天这两个动作共用一个 `selected`。所以视图里先立两根
+指针：`selected`/`selectedIndex` 是**光标**（键盘与悬停读的那一行），`opened` 是**打开的详情面板**
+（`views/history.ts:300-319`）。`openDetail()` 是唯一的开面板入口，它先 `closeBubble()` 再移动光标，
+于是点击不会留下一个"面板与气泡各说一行"的中间态。凡是原来读 `selected` 的面板读者——九个动作按钮、
+`renderActions()`、`copyOidNow()`、`paintDetailNames()`、`showDetail()` 的过期答复守卫、splitter 拖拽
+——一律改读 `opened`；`runCommitDiff()` 改成显式收一个 `CommitView`，双击因此不可能作用在一条早已
+移走的光标上。这一条不是洁癖：分家之后 `selected` 每按一次键都在动，任何还读它的面板动作都会在
+下一次键之后拿错提交干活。
+
+### 12.2 纯函数与它们的测试（切片一）
+
+`historyModel.ts` 的气泡一节（`:411-539`）：`BUBBLE_HOVER_MS`（`:411`，250 只在这一处出现）、
+`Rect`（`:417`）、`BUBBLE_INSET_REM`/`bubbleInsetPx`（`:428-432`）、`BubbleSize`/`BubblePlacement`
+（`:434-445`）、`placeBubble`（`:466-519`）、`anchorRow`（`:521-529`）、`includedInLine`（`:535-539`）。
+`app/tests/history-model.mjs` 加 7 条（`:784-880`），`npm run test:fixture` 338 → **345**：
+
+- 落点：贴行下、左边对齐；向上翻也是贴的（`flipped.top + flipped.height === row.top`）——两箱之间
+  没有缝，指针走在两箱之一上，§11.8 的 `:hover` 复查才有意义。
+- 封顶：宽与高都按 pane 内框收，收的结果是气泡被推离行的左边也要留在框内。
+- 两侧都不够：选大的一侧并夹进 pane，且**承认**它盖住了行（断言写成几何：`top < 124 && top + height > 100`）。
+- 行的位置怎么变，箱都在框内；行没画出来（虚拟窗口外）时 `placeBubble` 收到的是缺锚点，不是猜一个。
+- 身份：同一 index 换了 oid 就是 `null`；`includedInLine` 把"names 读失败"与"这条提交没人命名"分成两句。
+
+### 12.3 与 §11.7 的一处偏离：`overlaps` 没有成为返回字段
+
+§11.7 第 4 步要求"把顶边夹进 pane，同时报告压住了锚行"，并把 `overlaps` 列为可见事实。落地时返回类型里
+没有这个布尔（`BubblePlacement` 只有 `left/top/width/height/above`）。理由不是省一次赋值：
+
+- 第 1 步把高度封顶之后，"两侧都不够"只剩 pane 比气泡矮一种原因，而那一支写出的位置就是"贴着 pane
+  内框的底"。压住锚行是这个位置的**结果**，任何拿到四个数的读者都能自己算
+  `bubble.top < row.bottom && bubble.bottom > row.top`——探针正是这样断言的（§12.5）。
+- 视图里没有一条分支依它而变：样式上"压住"不是一种态（气泡本来就带自己的边框与 `z-index`），文案上也
+  没有。留一个恒为真的布尔在返回类型里，是给下一个读者一条他会以为需要处理的信号。
+
+于是那句"报告"从返回字段改成了探针里的一句不变式：**要么与行齐平，要么盖住行，永不相离**。
+§11.7 的字面因此按本节为准。
+
+### 12.4 视图接线的五条路（切片二）
+
+- **鼠标付等待，键盘不付。** `scheduleBubble()`（`:641-652`）在行的 `pointerenter` 上排一个
+  `BUBBLE_HOVER_MS`；方向键/Home/End 那条（`:1174-1179`）直接 `openBubble()`。同一个函数
+  `paintBubble()` 填那四行，两条路唯一的区别是等待。
+- **换行不是刷新。** `scheduleBubble()` 先看清气泡是否属于另一行：属于别的行就立刻收起（旧答案不该在
+  新 250 ms 里挂着），同一行就什么都不做。
+- **视图自己造成的滚动不算读者离开。** `revealRow()`（`:543-556`）只在目标与当前不同时置
+  `internalScroll`，并在赋值后读回 `scrollTop`：钳到端点的赋值不发事件，旗标留着会让读者下一次滚轮
+  被当成"视图要的"，气泡就活得比它回答的那一行久。滚动监听（`:1100-1107`）吃旗标，否则收起。
+- **指针走在两箱之间。** `retireBubble()`（`:658-667`）排一个 0 ms 的复查，读 `bubble.matches(":hover")`
+  决定收不收；气泡自己的 `pointerenter`/`pointerleave`（`:1112-1116`）接在同一条路上。`listPane` 的
+  `blur`（`:1184-1186`）同样先看 `:hover`——选中那 40 个字符会把焦点拿走，那不是"不再读这一行"。
+- **行重建后重新确认身份。** `renderRows()` 末尾（`:1054-1058`）对 `anchorRow(visible, index, oid)`：
+  认上就重画，认不上就收起，不追屏幕位置。`sync()` 与 `placeholder()` 一并 `closeBubble()`。
+
+样式那一节（`style.css:641-…`）把 §11.3 与 §11.6 写死：`.history-view{position:relative}`（`:492`）是
+唯一的 containing block；`.commit-bubble` 是 `position:absolute` + `z-index:20`、无控件、`overflow:hidden`；
+`[data-side]` 把 accent 那条 2 px 边放在贴行的一侧，所以"哪一行被回答"不需要读文字就能看出来；
+`.bubble-oid{user-select:all}` 让一次点击选中整串 id，而复制仍只有详情面板那一个出处。
+撤掉的 `title` 是节点的与 `commit-subject`/`commit-author` 的三处；chip 上那句留，理由同 §11.6。
+
+### 12.5 引擎里的实测：`tools/bench/commit-bubble-engine-probe.ts`
+
+§11.2 那句"每次按键一个 `commit_files` 进程"到本轮为止只是读代码读出来的。新探针把视图在 WebKitGTK
+里建两个舞台（720×640 与 340×400），派发真的 `pointerenter`/`WheelEvent`/`KeyboardEvent`/`click`，
+并把 `window.setTimeout` 换成一个可拨的队列——于是"250 ms 之前不出现"是一次断言而不是一次等待，
+而延时本身比的是模型导出的常量，两处手打 250 蒙对的可能被排除。25 条全过：
+
+| 断言 | 实测 |
+| --- | --- |
+| 悬停后排着的定时器 | `[250]`，与 `BUBBLE_HOVER_MS` 同一个数；跑它之前 `hidden === true` |
+| 跑掉之后 | `data-side=below`，在 pane 内，与行齐平 |
+| 四行内容 | `the body no row draws for commit 3.`；`dev — 2026-09-01T10:11:12+08:00`；`3000…0`（40 字符）；`Included in: release-1.0, main` |
+| 悬停的成本 | `commit_files` 发射 0 次；气泡内无 `button`；消息里没有文件路径 |
+| 原生 tooltip | `commit-subject` 的 `title` 为 null，SVG 里没有 `<title>`；chip 仍是 `Branch release-1.0` |
+| 离开与滚动 | 离开后收起（队列空）；读者一次滚动后收起 |
+| 340×400 走 20 行 | `commit_files` 仍 0 次，详情面板 `hidden`，按键当下就出答案且队列空 |
+| 同一段的几何 | inset 6 px，气泡被封顶到 300 px 宽；20 行全在 pane 内、全与行齐平（`covering = 0`，§12.3 那条退路在这个形状上没走到） |
+| 翻转 | `below` 与 `above` 都出现过 |
+| 身份 | 每一步气泡写的整串 id 都以那一行的 7 字符短 id 开头（夹具的 id 把序号放在最前，否则七字符全同，这条断言就是空的） |
+| 键造成的 reveal | 保留气泡；紧接着第二次滚动收起 |
+| 过滤 | `subject of commit 3` 命中 11 行，index 0 换了提交 → 收起，不追 |
+| 付费的两条路 | 一次点击 `commit_files` 0→1，之后两次方向键仍 1，`Enter` 1→2；详情 meta 里是 `2000…`（点击那一行）而不是 `4000…`（光标所在） |
+
+复现：`/usr/bin/python3 ../tools/bench/webkit-engine-probe.py -v commit-bubble-engine-probe.ts src/style.css src/style/tokens.css`
+（需要显示器、WebKitGTK 绑定与 `/usr/bin/python3`）。本轮全树门禁：`npm run build` 0 errors，
+`npm run test:fixture` 345/345，`color-contrast.py` 与 `responsive-check.py` fails=0，
+`graph-pan-engine-probe.ts` fails=0（D04 改的正是同一个视图，那条探针是它的回归网）。后端一行未动，
+因此 `cargo test` 与本轮无关，也没有新命令进 `ipc-surface` 的四张表。
+
+### 12.6 残差
+
+- **`coversRow` 那一条退路没被走到。** 340×400 下 20 行全都能翻上翻下，"pane 比气泡矮"只在更高的
+  消息、更大的界面缩放或更矮的窗口上才成立；本轮探针允许它并数出 0 次，也就是说它是从模型测试
+  （§12.2 第三条）知道的，不是从引擎看见的。
+- **`blur` 那条路没派发过。** `listPane` 失焦收起、`:hover` 例外（`:1184-1186`）是读代码的结论；
+  真机上"选 id 时焦点被拿走"需要一次真实点击与选择，探针给不了选择状态。
+- **`.bubble-message` 的内滚动没量过。** `max-height: 7rem` + `overflow-y: auto` 是为一条几千字的
+  消息准备的，本轮夹具的消息是三行。封顶后的气泡高度是否仍在 pane 内是算术，画面上是否读得动不是。
+- **250 ms 是"等一个定时器"，不是"这个延时合适"。** 前者可测且测了；后者是手感，没有任何通道能测。
+- **`layout-probe.mjs` 本轮没跑**（它要 WebKit 远程检查端点，本会话拿不到：`ECONNREFUSED 127.0.0.1:9222`）。
+  因此"气泡压在列表上而不被裁"这一条只有本探针的矩形证据，AT-SPI 那边没有新断言——AGENTS.md 记着
+  AT-SPI 没有 z-order，本来也看不见这一层。
+- **Windows 与 macOS 仍只是构建配置。** 上面的每个数来自 Linux 宿主、Git 2.53、WebKitGTK。
