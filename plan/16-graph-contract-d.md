@@ -1027,3 +1027,94 @@ shell 的 `escapeStack`（`shell.ts:250-254`）只管 app-bar 菜单与 overlay�
   因此"气泡压在列表上而不被裁"这一条只有本探针的矩形证据，AT-SPI 那边没有新断言——AGENTS.md 记着
   AT-SPI 没有 z-order，本来也看不见这一层。
 - **Windows 与 macOS 仍只是构建配置。** 上面的每个数来自 Linux 宿主、Git 2.53、WebKitGTK。
+
+## 13. D05 动手前：切换这条路已有的形状，与它拒绝时的实测样子
+
+本轮审计的对象是"把一个分支名交出去"这一条路，不是选择器本身。下面标了实测的，
+是在临时仓库里直接跑 `git switch`（Git 2.53，zh_CN locale）量出来的；guit 的 `run_git`
+走 `repo::user_git_command`，argv 与手敲相同，所以那半张表可以直接读成 guit 会看到的
+stdout/stderr。没标实测的是从代码读出的结论，并注明出处。
+
+### 13.1 出口今天已经有一个，选择器是第二扇门
+
+- `switch_branch`（`branches.rs:156`）今天唯一的调用者是分支 picker 上的 Switch 按钮
+  （`views/branches.ts:246`）。它已经在写车道里、已经带 `snapshotVersion`、已经把这个写
+  命令重读出来的快照交给 `applySnapshot`（`views/branches.ts:99-126`）。
+- 因此选择器**不需要**新命令（`ipc-surface` 的四张表不动）、**不需要**自己的刷新步骤，
+  也**不需要**"切换成功后重读历史"。切换动的是 `graph_input = (name, head_state, oid)`
+  （`session.rs:311-323`），`historyGeneration` 正是为它 bump，而 `main.ts:236` 那条
+  `subscribeToDomain("graph", …)` 就是为此而挂的。视图里再多调一次 `loadPage` 会让一页
+  历史被读两遍——这条不是猜测，是 §10 数过的每页一次 Git 进程。
+
+### 13.2 "不隐式 stash / force / fetch" 不是要新守的规矩，是 `prepare` 今天的形状
+
+- Switch 这一支只构造 `["switch", name]`（`branches.rs:310-319`）：没有 `-f`，没有
+  `--detach`，没有 `--merge`/`--conflict`，没有 `--orphan`。全仓库搜不到 `--autostash`；
+  唯一的 `force` 是分支删除的 `-d`/`-D`（`:440-441`），那是另一条车道上的另一件事。
+- Git 拿不准的时候不代办：`repo::user_git_command` 剥掉继承的 `GIT_*`，设
+  `GIT_TERMINAL_PROMPT=0`，关掉子模块递归与惰性对象抓取，所以一个不可能的名字只会失败，
+  不会把网络拉进来。
+- Git 之前的三道拒绝，全是 `Outcome::Rejected`：`write_no_session` / `write_stale_snapshot`
+  / `write_bare_repo`（`session.rs:178-208`）、`branch_name_invalid`（`check-ref-format
+  --branch` 必须原样回显，`branches.rs:40-62`）、`git_too_old`（`restore_supported`，
+  2.23 边界）。
+- 每一种结局都带一次重读的快照：成功/失败/取消走 `report`（`write.rs:411-426`），Git 之前
+  的拒绝走 `plain`（`:388-404`）——被拒不等于画面停在旧状态。
+
+### 13.3 Git 自己怎么拒绝（实测）
+
+| 情形 | Git 说的 | guit 的结局 |
+| --- | --- | --- |
+| 本地修改会被目标覆盖 | rc=1，stderr 首行 `error: 您对下列文件的本地修改将被检出操作覆盖：`，**文件名在第二行**，随后"请在切换分支前提交或储藏您的修改。/ 正在中止"；HEAD 未动 | `Failed`，`details` 只有首行 → 说不出是哪个文件 |
+| 未提交的修改与目标不冲突 | rc=0，改动随人走到目标分支（储藏旗标不存在） | `Success`，且不产生储藏条目 |
+| 给的是远程跟踪名 | rc=128 `fatal: 期望一个分支，得到远程分支 'origin/other'`，HEAD 未动 | `Failed`——**不会静默 detach**，选择器不必替 Git 挡这一手 |
+| 名字被另一个 worktree 占着 | rc=128 `fatal: 'side' is already used by worktree at '/tmp/…'` | `Failed`，首行**带绝对路径** |
+| 名字不存在 | rc=128 `fatal: 无效引用：nonexistent` | `Failed` |
+| 切到已经在的分支 | rc=0 | `Success`（幂等，不是错误） |
+| unborn HEAD 切到自己的分支名 | 单测 `branches.rs:840-842` | `Failed` + 重读快照 |
+| detached HEAD 切回具名分支 | 单测 `branches.rs:805-818` | `Success`，`head_state` 回 `Branch`，listing 的 head 标记跟着移 |
+
+两条记住就够：
+
+- **脏冲突的原因不在首行。** `details` 是 `first_stderr_line`（`write.rs:1123-1134`：首行 +
+  `redact` + 500 字符封顶），而 `git switch` 把 offending 路径放在第二行缩进里。面板因此
+  说得出"没换成"，说不出"因为哪三个文件"——而正是那几个文件的名字在选择器上方那片 changes
+  区域里，同一个快照已经画着。本轮不动共享的 `first_stderr_line`（§13.6）。
+- **worktree 占用这句话带路径。** `redact`（`probe.rs:69-91`）只擦 URL 的 authority 与
+  query，不擦路径。这不是选择器带来的新暴露面：picker 的 Switch 按钮今天就能走到同一句话。
+  `branches.rs:232-236` 那句"消息不含文件系统路径"约束的是 `prepare` 的拒绝，Git 自己失败
+  的那半从来不在它里面。
+
+### 13.4 三态不靠空字符串
+
+- `BranchView` 的 `name` 与 `oid` 都是 `Option`（`model.rs:21-29`）：detached 是
+  `name=None` + `oid=Some`（`:46-50`），unborn 是 `oid=None`（`:58`
+  `(!headless).then(...)`）。后端已经把三态分开交出来了。
+- 措辞也已经有一份：`shell.ts:87-92` 的 `branchLabel` 把三态写成 `main` /
+  `detached at 1a2b3c4d` / `main (no commits yet)`。选择器要回答"这张图现在是谁的历史"，
+  就必须与 app-bar 那颗 chip 共用这一份措辞，否则同一个状态会在一个窗口里被说成两种样子。
+
+### 13.5 选择器的形状（动手前定形）
+
+1. **位置**：`history-list-head` 最左、count 之前。这一行的职责是"这些行是什么"，分支是
+   这句话的主语；`firstParentLabel` / `findBox` / `moreButton` 说的都还是"这些行怎么看"。
+   不放 app-bar：那颗 chip 已经是 picker 的入口，再放一颗就是第三个门。
+2. **只列本地分支**（`RefListing.branches`，经 `refsStore.readRefListing`）。三条理由：
+   远程跟踪名实测被 Git 拒（上表）；`addressable=false` 的名字（非 UTF-8 字节回退成
+   U+FFFD）不能反过来变回 Git 参数，picker 今天正是这样挡的（`views/branches.ts:196-200`）；
+   refsStore 已按 context 缓存一次 names 读，视图不该再起一次。
+3. **当前 head 是标记，不是目标**（`head: true`）。detached 时没有任何一行带 head 标记
+   （实测单测 `branches.rs:789`），此时选择器画"detached at …"，下面每一条都可点。
+4. **点一条 = 一次写**：`switch_branch` + `snapshotVersion: currentSnapshot().version`，
+   走 `isWriteRunning` / `setWriteRunning` 那条车道，状态行照 `runBranch` 的形状。不弹确认
+   ——切换在 guit 的模型里不是破坏性操作，Git 自己拒绝它做不到的那部分；也不加 `-f` 重试。
+5. **unborn**：图上一行都没有（`history_head_unresolved`，`branches.rs:849-850`），选择器
+   仍要说"这个名字还没有提交"，并把 Git 的拒绝原样交出，本地不额外挡。
+
+### 13.6 本轮不动的东西
+
+- 共享的 `first_stderr_line` / `redact`：§13.3 那两条事实都归它，要改得带着 merge、rebase、
+  分支删除一起审，不是一次 UI 工作的顺路。
+- picker 与 chip 的既有交互：D05 加的是第二扇门，不是重做第一扇。
+- "看别的分支但不切过去"的只读浏览：`history_page` 的 `oid` pin 今天只有"把一次分页的两读
+  钉在同一个提交"这一个用途（§1.2），把它当浏览器入口不是本轮契约。
