@@ -2,21 +2,31 @@
 
 实施日期：2026-09-30。基线提交：`e9c5a1a`（阶段 D 的 D05 收口之后）。本文既固定
 F01–F06 必须遵守的口径，也是它们各自的实施记录。§1–§3 是动手前先拿到的事实，
-§4 是 F01 的落地（`9e3cac4` 后端、`29be513` 前端、本次收口）；F02 之后的落地各起一节，
+§4 是 F01 的落地（`9e3cac4` 后端、`29be513` 前端、`a20a0e4` 收口），§5 是 F02 的落地
+（`67cdd7a` 测量、`12a718b` 实现、本次收口）；F03 之后的落地各起一节，
 写到时才存在，不要按编号去找还没有的小节。
 
 主机条件同 [A01 基线](05-baseline-a01.md)：Linux x86_64、Git 2.53、WebKitGTK、
 Node 26、rustc 1.96.1。**本文没有 Windows/macOS 证据**，那两个平台仍只是构建配置。
 
-并行开发状态：阶段 E 在同一棵共享工作树上推进，E02 已落在 HEAD（`e62e90d`），在飞的是
-`app/src-tauri/src/{fuzzy,search}.rs` 与 `app/src/searchModel.ts`、`app/tests/search-model.mjs`。
-本文的所有度量只针对**已经提交**的状态，阶段 F 的每次落地只 `git add` 自己改过的那些路径。
+并行开发状态：阶段 E 在同一棵共享工作树上推进，E03 已落在 HEAD（`0295068`），在飞的是
+`app/src-tauri/src/{fuzzy,main,search}.rs`、`app/src/searchModel.ts`、`app/src/views/history.ts`
+与 `app/tests/ipc-surface.mjs`。本文的所有度量只针对**已经提交**的状态，阶段 F 的每次落地只
+`git add` 自己改过的那些路径。
 
 一次记录在这里，因为它改变的是整棵树的门禁读数：收口 F01 时 `npm run test:fixture` 是红的，
 红的不是阶段 F 的用例——`tests/search-model.mjs` 从 `searchModel.ts` 导入了一个当时还没有的
 名字，整个文件在装载期就失败，于是 `node --test` 的汇总少了它全部的用例，看起来只是"总数
 变了"。那次运行用排除该文件的办法证明阶段 F 自己全绿（369 通过、0 失败），排除项与被排除的
 文件都写在这里；共享树上跑门禁时，先看清红的是谁。
+
+收口 F02 时红的有两处，也都不属于阶段 F：`npm run build` 停在
+`src/views/history.ts`（一个当时还不存在的 `anchorOid`，和 `HistoryView` 上那个还没被实现的
+`reveal`），`tests/ipc-surface.mjs` 报 `search_repository is registered but no literal invoke
+names it`——那正是 E03 收口行写明的"命令注册必须与它的前端调用者同一次提交"这条门槛在在飞
+状态下应有的红。这一次不再靠排除法自证，而是把度量整个搬到 detached worktree 的 `12a718b`
+上跑：build 45 modules、fixture 389 通过 0 失败、cargo test 373 通过 0 失败、两道样式 gate
+fails=0。**共享树上的红不等于 HEAD 上的红，而 HEAD 上的读数才是本文引用的读数。**
 
 ## 1. 四条现有出口，今天各自兑现到哪一步
 
@@ -221,3 +231,105 @@ not asked."（`preview.ts:153-156`），并把剩下的两条守卫留在沉默�
 - Rust 侧是真实 Git：五条 scoped clean 用例在临时仓库里跑完 `clean -fd` 再查磁盘，写 `write::tests` 那一个过滤词就能只跑它们。
 - 仍是本宿主（Linux x86_64、Git 2.53）。**Windows/macOS 没有证据**，`:(literal)`
   在别的 Git 构建上的行为也没量过。
+
+## 5. F02 落地：一次重置走去 Git 自己说出的那一个提交
+
+两个提交，一条量、一条写：`67cdd7a` 把"三种 no 拿什么分开"打进探针，`12a718b` 把 §3
+那六条落成代码。六条逐条对照在下面；第 3 条有**一处偏离**，理由是两次测量，写在 §5.2。
+
+### 5.1 形状门，和吃它的两条路
+
+`shape_of`（`reset.rs:105`）在起进程之前把输入分成四类——空、非十六进制、短于四、长于
+六十四——余下的小写化之后才交给 Git。四句 `reset_target_shape` 各自成文，"太短"那一句
+直接说出 4 这个数：§2 第 1、2 条量到它既不是 `core.abbrev` 给的（`-c core.abbrev=40`
+之下 4 hex 照样解析），也不能靠候选数和"查无此物"分开（3 hex 时 `--disambiguate` 报零
+行）。所以这条线是 guit 自己划的，钉在 `MIN_TARGET_LEN`（`reset.rs:75`）上，注释指着那
+次测量。
+
+大小写放过去（§2 第 5 条），但**进 argv 的从来不是用户那串字符**：只有
+`resolve_target`（`reset.rs:259`）返回的那个完整小写 oid 才是目标。软/混合在
+`reset.rs:388` 取它，硬重置在 `reset.rs:434` 取它；票据绑的、`rev-list` 用来数丢哪些提交
+的、确认列表上显示的（`short()`，十个字符）全是这一个值。§1 末那条注入面到这里不再是
+"被形状挡住"，而是结构上不可能——调用点在类型上已不持有用户文本。
+
+`sequencer::validate_target` 一个字没动（§3 第 5 条）：merge/rebase 的目标确实可以是分支
+名，`sequencer.rs:30-32` 的注释记的就是这件事。收紧的是 reset 自己那两只入口。
+
+### 5.2 唯一性问 Git；分诊为什么不是"一条 batch-check"
+
+§3 第 3 条写的是"rc!=0 之后跑一次 `--disambiguate`，再用**一个** `cat-file
+--batch-check` 批量问类型"。没照做，因为那条进程在 guit 里问不出来：`--batch-check`
+只从 stdin 读 id（把 id 直接摆进 argv 是 rc=129），而 `runner.rs` 给每条进程强制
+`Stdio::piped()` 并在 `close_stdin_after = Duration::ZERO` 处关掉——任何人还能往 stdin 写
+之前，那个通道已经没了。探针把两种问法都打了出来：候选存在时 `one batch-check` 那行是
+rc=0 且形状正确（`commit,commit,blob,blob`），**它对，只是我们喂不进去**。为一句拒绝的
+话给三个缝里最窄的那一个加一条输入通道，代价不成比例。
+
+也没走"`--type` 一次问出提交数"这条路：`rev-parse` 没有这个选项。
+`--disambiguate=0f44 --type=commit` 把 `--type` 当普通参数回显进 stdout，同时以
+`error: short object ID 0f44 is ambiguous` 的 rc=128 退出；四种参数摆法、两个对象格式都
+试过（`type_filter`）。"一次进程直接给出提交数"这句话在 Git 里不存在。
+
+于是分诊改成**每个候选一次 peel**（`why_absent`，`reset.rs:221`），上限
+`TRIAGE_CANDIDATE_LIMIT = 16`（`reset.rs:83`）。它只住在失败路径上：成功的一次解析仍是
+**一条**进程。本宿主量得一次失败的 peel 约 1.2 ms，含列表与三个候选的一次完整分诊
+6.5 ms / 5 条进程。候选多于 16 个就不再数（`Absent::Crowded`，`reset.rs:214`），那句拒
+绝说"这不是恰好一个提交"，不带一个我们没问出来的数字。
+
+分诊自己还发现一条：候选里恰好数出**一个**提交，是两次读互相矛盾（peel 说"不是恰好一
+个"，逐个 peel 说"有一个"）。那是关于这次读的事实，不是关于那个 id 的事实，所以报
+`reset_target_unreadable`（`reset.rs:247`）。
+
+### 5.3 三种 no 各有句子，读失败永远不是查无此物
+
+| 代码 | 说的是什么 | 怎么知道的 |
+| --- | --- | --- |
+| `reset_target_shape` | 空 / 非十六进制 / 太短 / 太长 | 没问 Git |
+| `reset_target_absent` | 没有任何对象顶着这个 id | `--disambiguate` 零行 |
+| `reset_target_not_commit` | 有东西顶着它，而它不是提交 | 候选逐个 peel，零个提交 |
+| `reset_target_ambiguous` | 两个及以上提交顶它（带真实数目）/ 候选多过 16（不带数目） | 同上 / 没数 |
+| `reset_target_unreadable` | 进程起不来、输出被截断、列表不是完整小写 id、两次读互相矛盾 | 这四条都是"问不成" |
+
+软/混合把拒绝写成 `Outcome::Rejected` 的一句话并且**不起进程**
+（`reset.rs:390`，用例断言 `exit_code == None`）；硬重置直接返回错误，预览压根不开。
+`AGENTS.md` 那句"一次读失败不能报成干净仓库"在这一格的形状是：把"问不成"说成"查无此
+物"，就是把一次读失败讲成一个关于仓库的事实。
+
+### 5.4 用例（真 Git，临时仓库，`cargo test … reset` 二十条通过）
+
+- `reset_targets_are_validated_before_git`：`HEAD~1`、`@{u}`、`nosuchbranch`、
+  `main extra`、`HEAD`、`main`、`v1`、空串、纯空白逐条被拒且 `exit_code` 为 `None`；
+  一个形状完好却不存在的完整 id 在硬预览上是 `reset_target_absent`，而 `main` 是
+  `reset_target_shape`——**票据不能绑一个今天指向某提交、明天指向另一个的名字**。
+- `a_shape_gate_needs_no_git_to_answer`：不起仓库，只问分类。`de adbeef`、`deadbeeg`、
+  `-deadbeef`、`--help` 都归 Noise，`abc` 短、`abcd` 过、64 个 `a` 过、65 个不过，
+  `" 0F44 "` 与 `"0f44"` 同一类。门与进程隔开，才是"一次 Git 都没起"那句断言的依据。
+- `an_abbreviation_names_the_commit_it_uniquely_names`：一个 4 hex 前缀打到那个提交，
+  并且软重置回话里出现的是 Git 答出的完整 id 的前十个字符，不是敲进去的那四个。这条
+  顺带钉住续约口径——预览会重读并抬版本，所以确认用的是预览返回的那个版本。
+- `an_id_copied_in_upper_case_is_the_same_commit`；
+  `the_id_of_a_thing_that_is_not_a_commit_is_named_as_one`：blob 的完整 id 要求
+  `reset_target_not_commit`，且那句里不许出现 "does not exist"。
+- `an_abbreviation_that_names_two_commits_says_so_with_their_count`：从拒绝的话里读出数
+  目，要求 ≥ 2。
+
+歧义夹具是 `colliding_commit_prefix`（`reset.rs:897`）：提交对象就是文本，于是手写
+payload 交给 `hash-object -t commit -w`，两批各 1500 个、共两条进程（本宿主约 0.13 秒），
+在返回的 id 里找第一个被两个提交共用的 4 hex 前缀；找到之后还要用 `--disambiguate` 复查
+候选数 ≤ 上限才采用——否则夹具自己造出一条 `Crowded`，测的就不是数目。暴力等真哈希不在
+测试里做。
+
+### 5.5 这一格什么没验
+
+- **还没有人能看到这些句子**。更改区的提交号输入栏与重置按钮是 F06；今天重置只从图侧详情
+  面板那三个按钮到达，而它的 `target` 是后端刚读出来的完整 oid（§1 那张表就是这么记的），
+  所以 `reset_target_shape`、`reset_target_ambiguous` 这几句在现有界面上不可达。句子先于
+  入口存在是 F02/F06 的顺序决定的，不是漏了接线——F06 必须把它们接到人面前，并量渲染出来
+  的那一句。
+- **没有新的引擎探针**：这一格改的全是"Git 怎么答"，证据在 Rust 侧的真实仓库里；渲染出来
+  的拒绝归 F06 一起量。
+- 4 这个地板、16 这个上限、分诊的毫秒数，全是本宿主（Linux x86_64、Git 2.53，sha1 与
+  sha256 各一遍）的量。**Windows/macOS 没有证据**，别的 Git 构建上"短于四是否仍报零候选"
+  也没量过。
+- §3 第 6 条（票据绑定解析后的 oid）今天只对**已存在**的 `Bound::ResetHard` 成立；F04 那
+  个新变体落地时必须照同一口径，这一条在这里只是被引用，没有被验证。

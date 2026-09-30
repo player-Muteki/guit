@@ -174,6 +174,26 @@ release it belongs to did not measure.
   clean is pinned as a claim about the sources, not measured in a drawn page — this
   stage has no changes-area rendering probe, and the Git side is measured against the
   one Linux host and Git version every other record here comes from.
+- A reset now goes to the commit an abbreviation names, and says which kind of "no"
+  it heard. Four hexadecimal characters are enough — that is where Git stops reading
+  an id, measured in a repository of a hundred objects and one of forty thousand, and
+  it is not a number any setting moves. What is acted on is always the full id Git
+  answers with, so the characters typed are never the characters handed to Git, and
+  an id copied out in upper case is the same commit as the same id in lower. A branch
+  name, a tag name and every revision like `HEAD~1` or `@{u}` are refused before Git
+  is asked, because Git is happy to accept them: a reset bound to a name would go to
+  whatever that name points at when it runs, and the panel would have confirmed
+  something else. Not every refusal is the same fact, and they no longer share one
+  sentence. Nothing in the repository has that id; something does and it is not a
+  commit; two commits share the abbreviation, and the number of them is named so the
+  id can be extended until one is meant. A Git process that could not be started, an
+  answer cut short by its output limit, and two Git reads that disagree about the same
+  id are all reported as the panel failing to read — never as a commit that does not
+  exist. Merge and rebase keep accepting branch names, because there a name is what
+  the operation means. These are the backend's rules and the words behind them; the
+  panel does not yet have a box to type an id into, so no screen has been measured
+  showing them, and the abbreviations themselves are verified against the one host and
+  Git version every other record here comes from.
 
 ### Changed
 
