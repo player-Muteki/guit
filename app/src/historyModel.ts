@@ -513,11 +513,11 @@ export function placeBubble(
 /// The commit the anchored row still names, or `null` when it names another or
 /// has gone. A bubble remembers the index it opened at and the commit it
 /// opened about: rows are keyed by index and replaced wholesale on every
-/// scroll, a page or a filter, so the number says where to look and only the
-/// id says whether what is there is still the thing being described. Returning
-/// `null` is the whole answer — the bubble closes rather than following the
-/// screen position onto a different commit, which would read as one commit's
-/// message wearing another one's id.
+/// scroll, on every page and whenever the branch under the graph changes, so
+/// the number says where to look and only the id says whether what is there is
+/// still the thing being described. Returning `null` is the whole answer — the
+/// bubble closes rather than following the screen position onto a different
+/// commit, which would read as one commit's message wearing another one's id.
 export function anchorRow(
   commits: readonly CommitView[],
   index: number,
@@ -538,102 +538,3 @@ export function includedInLine(names: NameIndex, summary: RefSummary): string {
   return summary.names.join(", ") + (summary.truncated ? " …" : "");
 }
 
-// --- finding a commit in what is loaded ---
-
-// What the find box matches against, and how. A plain string is matched as a
-// substring, case-insensitively; a `/.../ ` turns on a real regular
-// expression, because "find the commit that mentions ^Fix" is a thing people
-// actually want and a substring search cannot answer it.
-export interface FindQuery {
-  text: string;
-  regex: boolean;
-  caseSensitive: boolean;
-}
-
-/// Whether one commit matches. The subject, the author, the object id and
-/// the names of the refs sitting on it are all searched, because a reader
-/// typing a branch name wants the commits that name points at, and a reader
-/// pasting an id from a bug report wants that commit. The names come from the
-/// index rather than from the row, so a search run while the namespace is
-/// unknown simply has no names to match — which is what the view says out loud.
-export function commitMatches(
-  commit: CommitView,
-  query: FindQuery,
-  names: NameIndex,
-): boolean {
-  if (query.text === "") return true;
-  const needle = query.caseSensitive ? query.text : query.text.toLowerCase();
-  const haystacks = [
-    commit.subject,
-    commit.authorName,
-    commit.oid,
-    ...namesAt(names, commit.oid).map((chip) => chip.name),
-  ];
-  if (query.regex) {
-    let pattern: RegExp;
-    try {
-      pattern = new RegExp(query.text, query.caseSensitive ? "" : "i");
-    } catch {
-      // An expression that does not compile matches nothing rather than
-      // throwing at the reader mid-keystroke; the box reports it separately.
-      return false;
-    }
-    return haystacks.some((field) => pattern.test(field));
-  }
-  return haystacks.some((field) =>
-    (query.caseSensitive ? field : field.toLowerCase()).includes(needle),
-  );
-}
-
-/// The commits a query keeps, in the order they were loaded. Filtering never
-/// reorders: the graph only makes sense top to bottom.
-export function filterCommits(
-  commits: readonly CommitView[],
-  query: FindQuery,
-  names: NameIndex,
-): CommitView[] {
-  return commits.filter((commit) => commitMatches(commit, query, names));
-}
-
-/// Whether a query is one the reader could have got wrong — a regular
-/// expression that does not compile — so the box can say so instead of
-/// silently matching nothing.
-export function findError(query: FindQuery): string | null {
-  if (!query.regex || query.text === "") return null;
-  try {
-    new RegExp(query.text);
-  } catch {
-    return "Not a valid regular expression.";
-  }
-  return null;
-}
-
-/// Where the reader is among the matches: the index of the current one, and
-/// how many there are. `current` is -1 when nothing matches yet.
-export function matchPosition(
-  commits: readonly CommitView[],
-  query: FindQuery,
-  names: NameIndex,
-  currentOid: string | null,
-): { index: number; total: number } {
-  const matches = filterCommits(commits, query, names);
-  const at = currentOid === null ? -1 : matches.findIndex((commit) => commit.oid === currentOid);
-  return { index: at, total: matches.length };
-}
-
-/// The next match's object id, wrapping at both ends, or null when there are
-/// none. Stepping past the end comes back to the first, so holding the key
-/// cycles rather than sticking.
-export function stepMatch(
-  commits: readonly CommitView[],
-  query: FindQuery,
-  names: NameIndex,
-  currentOid: string | null,
-  delta: 1 | -1,
-): string | null {
-  const matches = filterCommits(commits, query, names);
-  if (matches.length === 0) return null;
-  const at = currentOid === null ? -1 : matches.findIndex((commit) => commit.oid === currentOid);
-  const next = (at + delta + matches.length) % matches.length;
-  return matches[at === -1 ? (delta === 1 ? 0 : matches.length - 1) : next].oid;
-}

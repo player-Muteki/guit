@@ -108,11 +108,15 @@ test("a picked hit asks the graph to show it and decides nothing about how", () 
   // read the page that starts at it — needs the graph's own row list, so only
   // the history view may ask the model. The search view cannot, and would guess.
   assert.doesNotMatch(search, /locateCommit/, "the search never locates anything in the graph itself");
+  // Neither view keeps a second list of rows: the rows a page carries are the
+  // rows it draws, and there is no filtered copy of the history anywhere.
   assert.doesNotMatch(search, /\.visible\b|filterCommits/, "and never touches the rows below it");
+  assert.doesNotMatch(history, /\bvisible\s*[:=]|filterCommits/,
+    "the graph has no filtered second list to draw");
   const reveal = history.match(/const reveal = \(oid: string\): RevealRoute => \{[\s\S]*?\n  \};/);
   assert.ok(reveal, "the history view owns one reveal");
-  assert.match(reveal[0], /locateCommit\(oid, visible\.map\(\(commit\) => commit\.oid\)\)/,
-    "against the oids it has actually drawn");
+  assert.match(reveal[0], /locateCommit\(oid, commits\.map\(\(commit\) => commit\.oid\)\)/,
+    "against the oids it has actually drawn, which are the ones it loaded");
   assert.doesNotMatch(reveal[0], /filterCommits/, "a reveal filters nothing");
 });
 
@@ -131,6 +135,44 @@ test("an anchored page says it is not the branch, and leaves a way back", () => 
   const sync = history.match(/const sync = \(\): void => \{[\s\S]*?\n  \};/);
   assert.ok(sync, "the view owns one sync");
   assert.match(sync[0], /anchorOid = null;/, "a refresh is the branch's own history again");
+});
+
+// --- the one field, and the one key that reaches it ---
+
+test("the page has one search field, and the box that filtered the graph is gone", () => {
+  // The outline counts one input box for *which commit*. The branch picker's
+  // filter asks a different question of a list it already has in memory, so it
+  // is not a second field of this kind — but the three areas of Main are, and
+  // only one of them may hold a box.
+  for (const path of ["views/changes.ts", "views/history.ts", "views/mainPanel.ts"]) {
+    assert.doesNotMatch(source(path), /type: "search"/, `${path} must not build a second search field`);
+  }
+  assert.match(search, /type: "search"/, "the one that exists is the unified field");
+  // The filter itself, and the list it produced, are not merely unused here.
+  const model = source("historyModel.ts");
+  assert.doesNotMatch(model, /filterCommits|commitMatches|FindQuery/,
+    "the graph's model offers no filtering at all");
+  assert.doesNotMatch(history, /find-mod|find-step|history-find|find-count/,
+    "nor does the view still build the box, its two toggles or its two steps");
+  assert.doesNotMatch(css, /\.history-find|\.find-count|\.btn-quiet\.active/,
+    "and nothing is left styled for a box that no longer exists — the toggles " +
+      "were `.btn-quiet.active`, and that rule only ever had this box to style");
+});
+
+test("one key reaches the field from anywhere on the page, and never from inside a box", () => {
+  // A shortcut that only works while the list holds focus is a shortcut the
+  // reader has to be in the right place to know about, so the listener sits on
+  // the window — where the recovery chord for a bad theme already sits.
+  const slash = main.match(/event\.key !== "\/"[\s\S]*?search\.focusField\(\);/);
+  assert.ok(slash, "the window answers `/` with the field");
+  assert.match(slash[0], /!isSessionActive\(\) \|\| activeView\(\) !== "main"/,
+    "it answers only where the field is, and only with a repository open");
+  assert.match(slash[0], /closest\("input, textarea, select"\)/,
+    "and a `/` inside a box is text the reader is writing, not a request to leave it");
+  // The key is bare, and every chord above it is modified: two handlers, no
+  // overlap, and neither one reaching into the other's key.
+  assert.match(main, /if \(!\(event\.ctrlKey \|\| event\.metaKey\) \|\| event\.altKey\) return;/);
+  assert.doesNotMatch(history, /case "\/"/, "the list no longer owns the key");
 });
 
 test("the layer closes on its own terms and not on a repaint", () => {

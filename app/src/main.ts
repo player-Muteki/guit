@@ -14,6 +14,7 @@ import { el } from "./dom";
 import {
   applyActivity,
   applySnapshot,
+  activeView,
   currentSnapshot,
   isSessionActive,
   isWriteRunning,
@@ -405,6 +406,25 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
     settings.noteTheme(disableTheme());
   }
+});
+
+// The key that asks *which commit*, and the only one that is not a chord: every
+// shortcut above needs Ctrl or Cmd, so the two sets cannot answer the same
+// press. It is bound to the window rather than to a pane because the field it
+// reaches sits above both the changes area and the graph — a reader holding
+// focus on a row, on a button or on nothing gets the same answer. Both of its
+// preconditions are tested rather than assumed: the field exists only on Main,
+// and only with a repository open, and taking the reader off Settings to look
+// for it would answer a keystroke they meant for the page they are on.
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (!isSessionActive() || activeView() !== "main") return;
+  // A `/` typed into a box is text the reader is writing — the commit message
+  // is one — and not a request to move the caret out of it.
+  const writer = event.target;
+  if (writer instanceof HTMLElement && writer.closest("input, textarea, select") !== null) return;
+  event.preventDefault();
+  search.focusField();
 });
 
 // --- boot ---

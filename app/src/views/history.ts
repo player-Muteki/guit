@@ -15,8 +15,6 @@ import {
   buildHistoryRows,
   buildRefMap,
   bubbleInsetPx,
-  filterCommits,
-  findError,
   graphColumns,
   graphGutterMaxPx,
   graphLanePx,
@@ -25,15 +23,12 @@ import {
   historyPageStart,
   includedInLine,
   indexNames,
-  matchPosition,
   namesAt,
   placeBubble,
   refsIncluding,
   rowGeometry,
-  stepMatch,
   unknownNames,
   BUBBLE_HOVER_MS,
-  type FindQuery,
   type GraphPan,
   type NameIndex,
   type Rect,
@@ -104,39 +99,11 @@ export interface HistoryView {
 export function createHistoryView(deps: HistoryDeps): HistoryView {
   const element = el("section", { class: "view-body history-view" });
 
-  // The find box and the mainline toggle sit in the list head, above the
-  // graph, because both change what the graph is showing rather than what the
-  // window is.
-  const findInput = el("input", {
-    class: "history-find",
-    type: "search",
-    placeholder: "Find in loaded commits",
-    "aria-label": "Find in loaded commits",
-  }) as HTMLInputElement;
-  const findCase = button("Aa", () => toggleFindCase(), {
-    class: "btn btn-quiet find-mod",
-    ariaLabel: "Match case",
-    title: "Match case",
-  });
-  const findRegex = button(".*", () => toggleFindRegex(), {
-    class: "btn btn-quiet find-mod",
-    ariaLabel: "Use regular expression",
-    title: "Use regular expression",
-  });
-  const findPrev = button("↑", () => void stepFind(-1), {
-    class: "btn btn-quiet find-step",
-    ariaLabel: "Previous match",
-    title: "Previous match (Shift+Enter)",
-  });
-  const findNext = button("↓", () => void stepFind(1), {
-    class: "btn btn-quiet find-step",
-    ariaLabel: "Next match",
-    title: "Next match (Enter)",
-  });
-  const findCount = el("span", { class: "find-count", role: "status" });
-  const findBox = el("div", { class: "history-findbox", hidden: true }, [
-    findInput, findCase, findRegex, findCount, findPrev, findNext,
-  ]);
+  // The mainline toggle sits in the list head, above the graph, because it
+  // changes which history the graph is showing rather than where the window is
+  // in it. The one control that asks *which commit* left this head for the
+  // search field above: a filter that hides rows would redraw the graph with
+  // the rows it hid still wired underneath it.
   const firstParentToggle = el("input", { type: "checkbox", id: "history-first-parent" }) as HTMLInputElement;
   const firstParentLabel = el("label", { class: "checkbox", for: "history-first-parent" }, [
     firstParentToggle, el("span", { text: "Mainline only" }),
@@ -145,8 +112,8 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     "Follow only each commit's first parent: the straight line of the branch, with the branches it merged left out.";
   // The name of what the graph is drawing, and the way to draw another one. It
   // leads the head because it is the subject of the sentence the rest of the
-  // line finishes; the toggle, the find box and the paging button all describe
-  // how that one history is read.
+  // line finishes; the toggle and the paging button both describe how that one
+  // history is read.
   const branchButton = el("button", {
     class: "btn history-branch",
     type: "button",
@@ -178,7 +145,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   anchorClear.hidden = true;
   const listHead = el("div", { class: "history-list-head" }, [
     branchButton, anchorNotice, anchorClear, countLabel, namesRetry,
-    el("div", { class: "spacer" }), firstParentLabel, findBox, moreButton,
+    el("div", { class: "spacer" }), firstParentLabel, moreButton,
   ]);
 
   const rowsHost = el("div", { class: "virtual-rows" });
@@ -287,16 +254,8 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // carries; every other route to a new page — a refresh, a branch switch, a
   // mainline change — starts from the head again and clears it.
   let anchorOid: string | null = null;
-  // The find box searches what is loaded and says so; it never claims to have
-  // searched commits that were never fetched.
-  let find: FindQuery = { text: "", regex: false, caseSensitive: false };
-  // The commits actually shown: the loaded ones, filtered. The graph is laid
-  // out by the backend over everything loaded, and filtering only hides rows,
-  // so a hidden branch is still there in the graph when the box is cleared.
-  let visible: CommitView[] = [];
-  let findOpen = false;
-  // A row to flash on the next paint — used to show where a find step or a
-  // write landed in a long list. Cleared once applied.
+  // A row to flash on the next paint — used to show where a reveal or a write
+  // landed in a long list. Cleared once applied.
   let flashIndex = -1;
   let flashTimer: number | undefined;
   onDispose(() => window.clearTimeout(flashTimer));
@@ -525,69 +484,6 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       setWriteRunning(false);
       renderActions();
     }
-  };
-
-  // --- finding ---
-  const applyFind = (): void => {
-    visible = filterCommits(commits, find, refTips);
-    const error = findError(find);
-    if (error !== null) {
-      findCount.textContent = error;
-      findCount.dataset.state = "error";
-    } else {
-      const { index, total } = matchPosition(commits, find, refTips, selected?.oid ?? null);
-      findCount.dataset.state = "ok";
-      findCount.textContent =
-        find.text === "" ? "" : total === 0 ? "No match" : `${index + 1} of ${total}`;
-    }
-    findCase.classList.toggle("active", find.caseSensitive);
-    findRegex.classList.toggle("active", find.regex);
-    // A search with no match is not an empty history, so the rows are kept
-    // and the count is what says so.
-    renderRows();
-  };
-
-  const toggleFindCase = (): void => {
-    find = { ...find, caseSensitive: !find.caseSensitive };
-    applyFind();
-  };
-
-  const toggleFindRegex = (): void => {
-    find = { ...find, regex: !find.regex };
-    applyFind();
-  };
-
-  const openFind = (): void => {
-    findOpen = true;
-    findBox.hidden = false;
-    findInput.focus();
-    findInput.select();
-  };
-
-  const closeFind = (): void => {
-    findOpen = false;
-    findBox.hidden = true;
-    if (find.text !== "") {
-      find = { ...find, text: "" };
-      findInput.value = "";
-      applyFind();
-    }
-    listPane.focus();
-  };
-
-  const stepFind = (delta: 1 | -1): void => {
-    const next = stepMatch(commits, find, refTips, selected?.oid ?? null, delta);
-    if (next === null) return;
-    const index = visible.findIndex((commit) => commit.oid === next);
-    if (index < 0) return;
-    revealRow(index);
-    setCursor(visible[index], index);
-    // A step lands on a match the reader asked for, so the answer comes with
-    // it rather than waiting for the pointer — same rule as the arrow keys.
-    openBubble(visible[index], index);
-    // Each step flashes, so stepping through hits in a long list is visible
-    // rather than a silent jump.
-    flashRowAt(index);
   };
 
   // Scrolling a row into view only when the view itself asked for the scroll,
@@ -866,7 +762,6 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
 
   const placeholder = (message: string): void => {
     commits = [];
-    visible = [];
     hasMore = false;
     selected = null;
     selectedIndex = -1;
@@ -929,7 +824,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     namesRetry.hidden = !namesUnknown();
     updateCount();
     paintDetailNames();
-    if (visible.length > 0) renderRows();
+    if (commits.length > 0) renderRows();
   };
 
   // --- the branch this history is drawn from ---
@@ -1055,7 +950,6 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       refMap = buildRefMap(commits);
       refSummaries.clear();
       graphFolded = commits.some((commit) => commit.graph.folded);
-      visible = filterCommits(commits, find, refTips);
       listPane.hidden = false;
       splitter.hidden = false;
       emptyState.hidden = true;
@@ -1123,8 +1017,8 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   };
 
   const renderRows = (): void => {
-    if (visible.length === 0) return;
-    const rows = buildHistoryRows(visible);
+    if (commits.length === 0) return;
+    const rows = buildHistoryRows(commits);
     const fontPx = currentFontPx();
     const pan = graphWindow(fontPx);
     const rowHeightNow = rowHeightPx(fontPx, HISTORY_ROW_REM);
@@ -1193,7 +1087,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     // thing a bubble may not do — it would read as one commit's message
     // wearing another one's id.
     if (bubbleAt !== null) {
-      const still = anchorRow(visible, bubbleAt.index, bubbleAt.oid);
+      const still = anchorRow(commits, bubbleAt.index, bubbleAt.oid);
       if (still === null) closeBubble();
       else paintBubble(still);
     }
@@ -1225,26 +1119,13 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     // question no longer apply; page zero is read again.
     void loadPage(true);
   });
-  findInput.addEventListener("input", () => {
-    find = { ...find, text: findInput.value };
-    applyFind();
-  });
-  findInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      stepFind(event.shiftKey ? -1 : 1);
-      event.preventDefault();
-    } else if (event.key === "Escape") {
-      closeFind();
-      event.preventDefault();
-    }
-  });
   listPane.addEventListener("scroll", () => {
     // A scroll the view asked for is the cursor moving to a row it can be seen
     // on; a scroll the reader made is the reader leaving the row the bubble is
     // answering, and the bubble goes with the row it was pointing at.
     if (internalScroll) internalScroll = false;
     else if (bubbleAt !== null) closeBubble();
-    if (visible.length > 0) renderRows();
+    if (commits.length > 0) renderRows();
   }, { passive: true });
   // The bubble sits flush against its row so that the pointer can travel from
   // one to the other without crossing anything else, which is also what lets a
@@ -1272,18 +1153,18 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // cause — the panel split being dragged, interface zoom, a narrower window —
   // that a `window` listener would miss.
   const rowWatcher = new ResizeObserver(() => {
-    if (visible.length > 0) renderRows();
+    if (commits.length > 0) renderRows();
   });
   rowWatcher.observe(listPane);
   onDispose(() => rowWatcher.disconnect());
   listPane.addEventListener("keydown", (event) => {
-    if (visible.length === 0) return;
+    if (commits.length === 0) return;
     let target = -2;
     switch (event.key) {
-      case "ArrowDown": target = selectedIndex < 0 ? 0 : Math.min(selectedIndex + 1, visible.length - 1); break;
+      case "ArrowDown": target = selectedIndex < 0 ? 0 : Math.min(selectedIndex + 1, commits.length - 1); break;
       case "ArrowUp": target = selectedIndex < 0 ? 0 : Math.max(selectedIndex - 1, 0); break;
       case "Home": target = 0; break;
-      case "End": target = visible.length - 1; break;
+      case "End": target = commits.length - 1; break;
       case "ArrowLeft":
         // The sideways keys move the graph, not the selection: nothing here
         // scrolls horizontally, and the columns a pan reaches are the ones the
@@ -1296,28 +1177,23 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       case "Enter":
         // The key that says *work on this one*: the row key only shows what
         // the row already knows, this one opens the pane that reads the files.
-        if (selectedIndex >= 0) openDetail(visible[selectedIndex], selectedIndex);
-        event.preventDefault();
-        return;
-      case "/":
-        openFind();
+        if (selectedIndex >= 0) openDetail(commits[selectedIndex], selectedIndex);
         event.preventDefault();
         return;
       case "Escape":
         // The bubble is the topmost thing this view drew, so it goes first.
         if (bubbleAt !== null) closeBubble();
-        else if (findOpen) closeFind();
         return;
       default: return;
     }
     event.preventDefault();
     if (target < 0) return;
     revealRow(target);
-    setCursor(visible[target], target);
+    setCursor(commits[target], target);
     // A key press is already the decision to read this row, so the answer
     // comes on the key: no hover delay on the keyboard path, and no Git
     // process either — the pane stays where the last click left it.
-    openBubble(visible[target], target);
+    openBubble(commits[target], target);
   });
   // Leaving the list leaves the row the keyboard was reading. The check for
   // the pointer being inside the bubble is what keeps a selection of the id
@@ -1333,13 +1209,13 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   // rows a page carries are the rows the backend laid out, all of them, and the
   // only thing a reveal changes is which page that is.
   const reveal = (oid: string): RevealRoute => {
-    const locator = locateCommit(oid, visible.map((commit) => commit.oid));
+    const locator = locateCommit(oid, commits.map((commit) => commit.oid));
     if (locator.kind === "loaded") {
       revealRow(locator.index);
-      setCursor(visible[locator.index], locator.index);
+      setCursor(commits[locator.index], locator.index);
       // The answer comes with the jump rather than waiting for the pointer,
       // same as every other route to a row.
-      openBubble(visible[locator.index], locator.index);
+      openBubble(commits[locator.index], locator.index);
       flashRowAt(locator.index);
       return "loaded";
     }

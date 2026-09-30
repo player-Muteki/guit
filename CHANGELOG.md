@@ -390,6 +390,16 @@ release it belongs to did not measure.
   every process guit starts, so a partial clone or a repository that is missing
   objects keeps them missing. What Git will not answer without those objects is
   reported as a failure, never as a clean tree.
+- The box under the graph that looked for a commit among the rows already loaded.
+  It matched only the page on screen, so a commit older than that page came back as
+  absent, and it drew its graph out of the rows it left standing — a history with
+  the non-matching rows taken out of it is not the branch's topology. The field
+  above the panel answers "which commit" for the history instead, and it moves the
+  graph rather than editing it: a hit already on screen is scrolled to, one further
+  back is read as the start of a page and labelled as one. The `/` key reaches that
+  field from anywhere on the Main page, except from inside a box being typed in. The
+  branch picker keeps its own box, because that one asks which name out of a list
+  the panel already holds.
 
 ### Fixed
 

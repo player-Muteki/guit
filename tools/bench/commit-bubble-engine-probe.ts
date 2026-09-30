@@ -238,7 +238,6 @@ interface Stage {
   leave: (index: number) => void;
   click: (index: number) => void;
   scroll: () => void;
-  filter: (text: string) => void;
   boxes: (index: number) => Boxes | null;
 }
 
@@ -295,12 +294,6 @@ const stage = (width: number, height: number, sessionId: number, version: number
     },
     scroll: () => {
       list().dispatchEvent(new Event("scroll"));
-    },
-    filter: (text: string) => {
-      const input = pick<HTMLInputElement>(".history-find");
-      if (input === null) return;
-      input.value = text;
-      input.dispatchEvent(new Event("input"));
     },
     boxes: (index: number) => {
       const row = pick<HTMLElement>(`#commit-row-${index}`);
@@ -521,16 +514,13 @@ window.__probe = (): string => {
   });
 
   // --- the row that is gone ----------------------------------------------
-  narrow.press("Home");
-  const firstName = narrow.said().oid;
-  narrow.filter("subject of commit 3");
-  check(
-    "a list whose rows no longer match the answer closes rather than follows",
-    firstName === oid(0) && narrow.hidden(),
-    { named: firstName, hidden: narrow.hidden(), rows: narrow.rowCount() },
-  );
+  // The route that used to empty the rows under an open bubble was the page's
+  // own find box, and that box is gone: a filter drew a graph out of the rows
+  // it left standing, which is the one thing this panel refuses to do. What
+  // remains of the claim — that a bubble closes rather than following its index
+  // onto a different commit — is pinned as computation in `anchorRow` and its
+  // fixtures, and nothing here re-measures it.
   pending.clear();
-  narrow.filter("");
 
   // --- paying for the pane -----------------------------------------------
   wide.press("Home");

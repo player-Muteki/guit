@@ -590,16 +590,8 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
    button are standing in. The button beside it is the way back, so it never
    wraps alone. */
 .history-anchored { flex: 0 1 auto; min-width: 0; font-size: var(--text-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The find box takes the room the head has left and gives it back when it
-   closes, so opening it never squeezes the count or the Load-older button
-   into wrapping. */
-/* The find box searches what is loaded and says so; it never claims to have
-   searched commits that were never fetched. `[hidden]` is restated because a
-   flex rule would otherwise beat the browser's own `display: none`. */
-.history-findbox { display: flex; align-items: center; gap: 0.2rem; }
-.history-findbox[hidden] { display: none; }
 /* A row that has just been jumped to flashes once, so the eye can find where
-   a find step or a write landed in a long list. Respects reduced motion. */
+   a reveal or a write landed in a long list. Respects reduced motion. */
 .commit-row.flash { animation: row-flash 0.9s ease-out; }
 @keyframes row-flash {
   0% { background: var(--accent-soft); }
@@ -608,13 +600,8 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 @media (prefers-reduced-motion: reduce) {
   .commit-row.flash { animation: none; outline: 2px solid var(--accent); outline-offset: -2px; }
 }
-.history-find { min-width: 6rem; max-width: 16rem; flex: 1 1 auto; padding: 0.15rem 0.35rem; font: inherit; font-size: var(--text-sm); color: var(--text); background: var(--surface-input); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); }
-.history-find:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .btn-quiet { padding: 0.1rem 0.35rem; font-size: var(--text-xs); color: var(--text-muted); background: transparent; border: 1px solid transparent; }
 .btn-quiet:hover { background: var(--surface-hover); }
-.btn-quiet.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
-.find-count { min-width: 4.5rem; text-align: right; font-size: var(--text-xs); color: var(--text-muted); font-variant-numeric: tabular-nums; }
-.find-count[data-state="error"] { color: var(--danger); }
 .history-list { flex: 1 1 45%; min-height: 0; overflow-y: auto; padding-inline: 0.75rem; container-type: inline-size; }
 .commit-row { display: flex; align-items: baseline; gap: 0.4rem; height: var(--row-height-history); padding-inline: 0.3rem; border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-sm); overflow: hidden; }
 .commit-row:hover { background: var(--surface-hover); }
@@ -731,10 +718,10 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .detail-actions { display: flex; flex-wrap: wrap; gap: 0.3rem; }
 /* The bubble that answers the row the pointer rests on, or the row the
    keyboard moved to. It is a layer of the view rather than a child of the row,
-   because a row is replaced wholesale on every scroll, page and filter; the
+   because a row is replaced wholesale on every scroll and every page; the
    model keeps the box inside the list pane, so these rules only say what it is
-   made of. `display` is restated against `[hidden]` for the same reason the
-   find box is: a flex rule would otherwise beat the browser's own hiding. */
+   made of. `display` is restated against `[hidden]` because a flex rule would
+   otherwise beat the browser's own hiding. */
 .commit-bubble {
   position: absolute;
   z-index: 20;

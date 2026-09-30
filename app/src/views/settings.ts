@@ -147,6 +147,7 @@ export function createSettingsView(deps: SettingsDeps): SettingsView {
         el("dt", { text: "↑ / ↓ / Page keys" }), el("dd", { text: "Resize Main's split (divider focused)" }),
         el("dt", { text: "Ctrl/Cmd + Enter" }), el("dd", { text: "Commit (from the message box)" }),
         el("dt", { text: "Ctrl/Cmd + = / − / 0" }), el("dd", { text: "Interface zoom in / out / reset" }),
+        el("dt", { text: "/" }), el("dd", { text: "Search commits, tags and branches" }),
         el("dt", { text: THEME_RECOVERY_KEYS }), el("dd", { text: "Turn off the custom theme" }),
         el("dt", { text: "Escape" }), el("dd", { text: "Close a dialog, menu or layer" }),
       ]),

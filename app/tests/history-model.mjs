@@ -7,9 +7,6 @@ import {
   buildHistoryRows,
   buildRefMap,
   bubbleInsetPx,
-  commitMatches,
-  filterCommits,
-  findError,
   graphColumns,
   graphGutterMaxPx,
   graphLanePx,
@@ -19,12 +16,10 @@ import {
   historyPageStart,
   indexNames,
   includedInLine,
-  matchPosition,
   namesAt,
   placeBubble,
   refsIncluding,
   rowGeometry,
-  stepMatch,
   unknownNames,
   BUBBLE_INSET_REM,
   GRAPH_LANE_REM,
@@ -699,77 +694,6 @@ test("a namespace that could not be read is not an empty one", () => {
   assert.equal(unknown.unknown, true);
   assert.deepEqual(namesAt(unknown, oid(1)), []);
   assert.deepEqual(refsIncluding(map, unknown, oid(1)), { names: [], truncated: false });
-  // Nothing is claimed for a walk with no names either: the answer is that the
-  // view does not know, which is what the line above the list then says.
-  const query = { text: "main", regex: false, caseSensitive: false };
-  assert.equal(commitMatches(loaded[0], query, unknown), false);
-  assert.equal(commitMatches(loaded[0], query, some), true);
-});
-
-// --- finding a commit ---
-
-const find = (text, extra = {}) => ({ text, regex: false, caseSensitive: false, ...extra });
-const history = () => [
-  commit(1, { subject: "Fix the parser", authorName: "Ada" }),
-  commit(2, { subject: "add tests", authorName: "Grace" }),
-  commit(3, { subject: "Fix the reader", authorName: "ada" }),
-];
-
-test("a find matches the subject, the author, the object id and the names", () => {
-  const commits = history();
-  assert.ok(commitMatches(commits[0], find("parser"), noNames));
-  assert.ok(commitMatches(commits[0], find("Ada"), noNames), "an author matches");
-  assert.ok(
-    commitMatches(commits[0], find(commits[0].oid), noNames),
-    "an id pasted from a bug report finds its commit",
-  );
-  // Typing a branch or tag name finds the commit that name points at, and the
-  // name comes from the listing rather than from the row.
-  const names = listing({ branches: [["release-1.0", 9]] });
-  assert.ok(
-    commitMatches(commit(9, { subject: "nothing alike" }), find("release-1.0"), names),
-    "a branch name matches",
-  );
-  assert.equal(commitMatches(commits[1], find("parser"), noNames), false);
-});
-
-test("a find is case-insensitive unless asked otherwise", () => {
-  assert.ok(commitMatches(history()[2], find("ADA"), noNames));
-  assert.equal(commitMatches(history()[2], find("ADA", { caseSensitive: true }), noNames), false);
-  assert.ok(commitMatches(history()[2], find("ada", { caseSensitive: true }), noNames));
-});
-
-test("a regular expression find is a real regular expression", () => {
-  const commits = history();
-  assert.ok(commitMatches(commits[0], find("^Fix", { regex: true }), noNames));
-  assert.equal(commitMatches(commits[1], find("^Fix", { regex: true }), noNames), false);
-  assert.ok(commitMatches(commits[0], find("f(i|x)x", { regex: true }), noNames));
-  // An expression that does not compile matches nothing and is reported,
-  // rather than throwing at the reader mid-keystroke.
-  const broken = find("Fix (", { regex: true });
-  assert.equal(commitMatches(commits[0], broken, noNames), false);
-  assert.equal(findError(broken), "Not a valid regular expression.");
-  assert.equal(findError(find("Fix (")), null, "a substring is never a broken expression");
-});
-
-test("filtering keeps the loaded order, because a graph only reads downward", () => {
-  const kept = filterCommits(history(), find("Fix"), noNames);
-  assert.deepEqual(kept.map((c) => c.subject), ["Fix the parser", "Fix the reader"]);
-  assert.equal(filterCommits(history(), find(""), noNames).length, 3, "an empty query keeps everything");
-  assert.equal(filterCommits(history(), find("nothing here"), noNames).length, 0);
-});
-
-test("stepping through the matches wraps at both ends", () => {
-  const commits = history();
-  const query = find("Fix");
-  // Stepping into an empty selection starts at the first match.
-  assert.equal(stepMatch(commits, query, noNames, null, 1), commits[0].oid);
-  assert.equal(stepMatch(commits, query, noNames, commits[0].oid, 1), commits[2].oid);
-  assert.equal(stepMatch(commits, query, noNames, commits[2].oid, 1), commits[0].oid, "wraps forward");
-  assert.equal(stepMatch(commits, query, noNames, commits[0].oid, -1), commits[2].oid, "wraps back");
-  assert.equal(stepMatch(commits, find("absent"), noNames, null, 1), null, "no matches, no step");
-  assert.deepEqual(matchPosition(commits, query, noNames, commits[2].oid), { index: 1, total: 2 });
-  assert.deepEqual(matchPosition(commits, query, noNames, null), { index: -1, total: 2 });
 });
 
 // --- the bubble over a hovered or focused row ---

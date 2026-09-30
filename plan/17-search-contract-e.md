@@ -506,3 +506,81 @@ import `search_repository` 与 `history_page` 两条读"来担保，而 `history
 结论：完成（三句验收都有钉处；阶段退出门槛仍差 E04b 的删页内 find 与 E04c 的渲染证据
   和读预算）
 ```
+
+## 13. E04b 落地记录
+
+```text
+任务：E04b 撤掉页内 `Find in loaded commits`、删掉它在图里留下的第二份行列表，并把 `/`
+  接到统一搜索的字段上（§11 第 6 条排定的第二次提交）
+对应产品目标：G03 统一模糊搜索，也是阶段 E 退出门槛那句"原图拓扑不被过滤破坏"与 OUTLINE
+  "一个输入框"这两条的正身。上一行（§12）把字段、层与定位做成了一件完整的事，但整个仓库
+  同时还有一个会过滤行的框：它把 `filterCommits` 的结果写进 `visible`，然后 `renderRows`、
+  `reveal`、键盘边界全都读那份 `visible`——图于是由"留下的行"画出来。本阶段不给自己加一条
+  守卫，而是把那条路径连根删掉：判定留在模型里、行列表只有一份，验收第三句就此成为结构性
+  事实而不是被绕开的风险。
+起止提交与变更文件：起始代码基线 `8df9dad`（并行开发者的忽略清单测量）→ 本文与代码同一次
+  提交。变更文件：app/src/views/history.ts（−174 行里带着字段、大小写/正则两个开关、上/下
+  两个步进、计数、`findBox` 进 `listHead` 的那条、`find`/`visible`/`findOpen` 三个状态、
+  `// --- finding ---` 整节、两处 `visible = filterCommits(...)`、两个 `findInput` 监听、
+  `case "/"` 与 `else if (findOpen) closeFind()` 那条分支；剩下每个 `visible` 退回
+  `commits`，头注释改为说明"问哪一个提交"的控制为什么离开了这个头部）、
+  app/src/historyModel.ts（删 `FindQuery`/`commitMatches`/`filterCommits`/`findError`/
+  `matchPosition`/`stepMatch` 六个导出与整节，`anchorRow` 的文档改成"每次滚动、每一页、
+  每次分支换掉都整行重画"——过滤这一路不再是它要负责的一种重画）、
+  app/src/main.ts（`/` 从窗口的 keydown 绑进：`isSessionActive() && activeView() === "main"`、
+  事件的 `target` 不在 `input, textarea, select` 里、然后 `preventDefault()` +
+  `search.focusField()`；`activeView` 因此进了 `./state` 的 import）、
+  app/src/style.css（删 `.history-findbox` 与其 `[hidden]`、`.history-find` 与其
+  `:focus-visible`、`.btn-quiet.active`、`.find-count` 与其 `[data-state="error"]`，
+  flash 那条注释从"a find step or a write landed"改成"a reveal or a write landed"，气泡那条
+  注释去掉"and filter"和"同 find box 一个理由"）、app/src/views/settings.ts（Shortcuts 那列
+  加 `/` 一行）、app/tests/history-model.mjs（40→35：五条 find 夹具与它们的 `find`/`history`
+  helper 一起走，namespace 读不到那条里两句关于 `commitMatches` 的断言留下）、
+  app/tests/search-wiring.mjs（8→10）、
+  tools/bench/commit-bubble-engine-probe.ts（并行开发者的文件，见下一段）、CHANGELOG.md
+  （Removed 一条）、本文 §13、plan/README.md（E04a 行的"仍开着的"与本行）。
+  没有 `Cargo.toml` 与 Rust 变更，所以本轮没跑 cargo 三条：共享树里他手上正有
+  `app/src-tauri/src/reset.rs` 在飞，一个不写源码的 gate 也不该去碰别人的文件，而这次确实
+  没有任何 Rust 侧事实要它回答。
+输入条件及 fixture：前端净减 3 条（402→399）——5 条算得出过滤结果的夹具走了，2 条读源文件的
+  gate 进来。新 gate 一条钉"这页只有一个 search 字段、那个会过滤的盒子确实没了"：三个 Main
+  区域（`views/changes.ts`/`views/history.ts`/`views/mainPanel.ts`）都不许出现
+  `type: "search"`，`views/search.ts` 必须出现；`historyModel.ts` 里不许再有
+  `filterCommits|commitMatches|FindQuery`；`history.ts` 里不许再有 `find-mod|find-step|
+  history-find|find-count` 这四个类名；CSS 里不许再有 `.history-find|.find-count|.btn-quiet.active`
+  ——那两个开关本来没有自己的规则，它们骑在 `.btn-quiet` 上、只靠 `.active` 变色，所以这条
+  gate 查的是那条 `.active`。另一条钉"这一个键从页面的任何地方都到得了字段，但从一个正在写的
+  框里到不了"：读 `main.ts` 里那条监听的五件事（键、三个修饰键、两个前置条件、`closest`
+  的排除、`preventDefault` 与 `focusField`）。写这条 gate 时它自己先红过一次：我原来的前提是
+  "全仓只能有一个 `type: "search"`"，而 `views/branches.ts:58` 的分支选择器正当持有这样一个
+  框——它问的是"这些名字里要哪一个"，对象是内存里已经有的列表，不是"哪一个提交"。被修正的是
+  gate 的射程（三个 Main 区域），不是那个框，理由写进了夹具的注释。
+运行命令、退出码、日志位置：`npm run build` 退出 0（47 modules，产物 `index-ChZW8Nlx.js`
+  128.34 kB / `index-CCZkac2X.css` 33.70 kB，对照 §12 记的 130.57 kB / 34.42 kB）；
+  `npm run test:fixture` 399 pass / 0 fail；`responsive-check.py src/style.css
+  src/style/tokens.css` 与 `color-contrast.py dist/assets` 都 fails=0。输出不落盘。
+桌面/性能证据与环境：`tools/bench/commit-bubble-engine-probe.ts` 在真实 WebKitGTK 里重跑，
+  24 条 ok、fails=0、退出 0（`/usr/bin/python3 ../tools/bench/webkit-engine-probe.py`）。
+  它原来有 25 条，第 25 条"行被过滤掉之后气泡合上而不是跟过去"量的正是本阶段删掉的那条路：
+  探针的 `filter` 助手向 `.history-find` 写字节，字段没了它只能红。改法是把那条 claim 与
+  助手一起删掉并在原地写下为什么——留着一条永远拿不到断言的 stage 会让这份 24 变成假数，
+  让它红着提交又是把并行开发者的文件弄坏。那个不变式本身没有失去证据：命中行被换掉时气泡
+  合上而不是跟到新行，仍由 `historyModel.ts` 的 `anchorRow` 与它的夹具钉住，只是那不再是
+  一个渲染度量（它当时也确实是靠页内 find 才在浏览器里可达的）。他 D04 交付行记的"25 条"
+  同步改成 24 并写明那条去了哪里。除此之外本轮没有任何新的渲染度量：`layout-probe.mjs` 要
+  msedge/chromium，本宿主 `which msedge google-chrome chromium` 仍全空。宿主：Ubuntu 26.04、
+  Git 2.53、Node 26；Windows/macOS 仍只是构建配置。
+未解决限制：结果层的渲染证据与"输入到候选 warm p95 ≤150ms"那个数仍归 E04c（等待已经是
+  `SEARCH_DEBOUNCE_MS` 这个导出常量，正是为了能被算进那把尺子）。`cancel_search` 仍没有：
+  清空字段只停止下一次提问，已开始的那一趟走到自己那一窗结束。`/` 现在只在 Main 且只在有
+  会话时起作用，这是刻意的前置条件而不是遗漏，但它意味着从 Settings 按下去什么也不会发生——
+  这一点没有度量、只有源码 gate 里那句前置条件。旧存档里如果有人在页面上记住了那个盒子所在的
+  位置，本阶段之后那里只剩主线开关；没有保留任何"关掉新字段就退回旧盒子"的开关，那是两条
+  互相矛盾的行的来源，不是兼容。
+回退方式：把 §13 列的六个源文件与两个夹具文件按原样退回即可，一次 `git revert` 就够——这
+  一刀没有引入任何新的存储格式、命令注册或后端状态，删掉的全是前端源码与它的夹具。需要注意
+  `tools/bench/commit-bubble-engine-probe.ts` 与 `plan/README.md` 的 D04 那一行：回退这一刀要
+  把第 25 条 claim、`filter` 助手和"25 条"那个数一起带回，否则探针与它的记录会说不同的话。
+结论：完成（"一个输入框"与"原图拓扑不被过滤破坏"在本阶段之后是同一件事的两个说法；阶段退出
+  门槛仍差 E04c 的渲染证据与读预算）
+```
