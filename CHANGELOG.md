@@ -6,7 +6,16 @@ SemVer. This file is the record of what changed; what has never been verified
 is stated in the entry that introduces it, and no entry claims coverage the
 release it belongs to did not measure.
 
-## [Unreleased]
+## [0.0.1] - 2026-10-01
+
+Runtime verification is limited to Linux (Ubuntu, GTK/WebKit); Windows and
+macOS have build configuration only. This release consolidates the panel into
+two tabs, brings the unified search and the clean restore, and reworks the
+appearance, monitoring and file-modification surfaces. The four properties it
+was first released for are unchanged: local-only, no credentials stored, no
+file contents or diffs in the window, and one write lane with single-use
+confirmation tickets. A "Known limits" note in the README names what a real
+window exercised and what only the tests cover.
 
 ### Added
 
@@ -435,6 +444,21 @@ release it belongs to did not measure.
   and offers the read again — an unlabelled column is not presented as a
   repository with no branches.
 
+- The window is a title bar, an app bar (repository, branch chip with
+  ahead/behind, sync, commit, pin), an activity rail, one view at a time and a
+  status bar. Before, all ten areas were cards stacked on one long scrolling
+  page, so staging a change meant scrolling past stash, remotes and worktrees.
+- The six views that need a repository are grey with a reason when none is
+  open; Settings is application-level and stays reachable.
+- Rows act on click and stay legible at a narrow width: at 480 px and below
+  the duplicated wordmark and commit button go, the branch chip keeps a
+  readable floor, names keep their space and details ellipsize instead, and
+  worktree paths wrap onto deliberate lines rather than losing their tail.
+- Settings scrolls as a document, so its sections keep their natural height.
+  List views still scroll inside their own lists.
+- A progress line updates the status bar instead of redrawing the whole window,
+  and changing the interface zoom updates its own readout.
+
 ### Removed
 
 - The second hard reset. The detail pane beside the graph used to offer a "Reset
@@ -485,6 +509,13 @@ release it belongs to did not measure.
   field from anywhere on the Main page, except from inside a box being typed in. The
   branch picker keeps its own box, because that one asks which name out of a list
   the panel already holds.
+
+- Two command endpoints that nothing called: one that read the stored window
+  geometry (the backend already reads it directly while restoring the window)
+  and one that reported credential posture (the diagnostics export reads it
+  directly). Both were reachable from the webview and neither was ever used.
+- A graph-layout helper that only its own tests called. Lane assignment now
+  goes through the one function that does the work.
 
 ### Fixed
 
@@ -565,30 +596,6 @@ release it belongs to did not measure.
   icon inside an icon, which never matched the single `svg.icon` each glyph is,
   so every icon fell back to a filled black shape.
 
-## [0.0.1] - 2026-09-27
-
-First public release. Runtime verification is limited to Linux; Windows and
-macOS have build configuration only.
-
-### Changed
-
-- The window is a title bar, an app bar (repository, branch chip with
-  ahead/behind, sync, commit, pin), an activity rail, one view at a time and a
-  status bar. Before, all ten areas were cards stacked on one long scrolling
-  page, so staging a change meant scrolling past stash, remotes and worktrees.
-- The six views that need a repository are grey with a reason when none is
-  open; Settings is application-level and stays reachable.
-- Rows act on click and stay legible at a narrow width: at 480 px and below
-  the duplicated wordmark and commit button go, the branch chip keeps a
-  readable floor, names keep their space and details ellipsize instead, and
-  worktree paths wrap onto deliberate lines rather than losing their tail.
-- Settings scrolls as a document, so its sections keep their natural height.
-  List views still scroll inside their own lists.
-- A progress line updates the status bar instead of redrawing the whole window,
-  and changing the interface zoom updates its own readout.
-
-### Fixed
-
 - Write and external-tool failures now use an error status in the window instead of a success status.
 - A hard-reset preview refuses to proceed when Git cannot list or count the commits it would discard.
 - A failed background refresh stays visible in the monitor line until a refresh succeeds, with a prompt to refresh manually.
@@ -626,17 +633,6 @@ macOS have build configuration only.
   the window open indefinitely.
 - The commands guit probes at startup no longer describe themselves with an
   internal schedule label.
-
-### Removed
-
-- Two command endpoints that nothing called: one that read the stored window
-  geometry (the backend already reads it directly while restoring the window)
-  and one that reported credential posture (the diagnostics export reads it
-  directly). Both were reachable from the webview and neither was ever used.
-- A graph-layout helper that only its own tests called. Lane assignment now
-  goes through the one function that does the work.
-
-### Fixed
 
 - Staging and unstaging can no longer be given an operation they do not
   implement. The write lane picked its Git arguments from a table covering
@@ -719,9 +715,27 @@ macOS have build configuration only.
 
 ### Known gaps at this version
 
-- AppImage is produced and was launched on the verification host
-  (Ubuntu 26.04); distribution beyond that host is untested. deb/rpm are
-  the primary Linux artifacts.
-- Windows/macOS: configured, not runtime-verified.
-- Real-provider (GitHub/GitLab/Gitea) credential flows await a manual
-  user-attended pass.
+Stated plainly, because each of these is a limit on what this release claims.
+
+- **Runtime verification is Linux only.** Built and driven on Ubuntu with
+  GTK/WebKit. Windows and macOS are configured to build and have never been
+  run, so they are not claimed to work. deb/rpm are the Linux artifacts;
+  distribution beyond the verification host is untested.
+- **Committing and restoring to a typed commit id are covered by tests, not
+  by a click.** Both need text typed into a box, and the only channel available
+  on the verification host — a Wayland session with no key-injection tool, and
+  a WebKitGTK entry that exposes no `EditableText` interface — cannot type one.
+  Their behaviour is pinned by the Rust suite and by a probe that drives the
+  real view, but not by a hand on a real repository. Every other write path
+  (unstage, discard, delete untracked) was driven end to end in a real window
+  against a disposable repository and checked against `git status` and the
+  files on disk.
+- **Idle memory.** The panel is three processes sharing GTK and WebKit; about
+  130 MiB of that is the toolkit's and is present with no repository open. On
+  a repository of a few thousand files it holds roughly 45 MiB of its own and
+  about 180 MiB in total, measured as proportional set size. It does not grow
+  with the size of the history.
+- **Multi-monitor and non-default display scale factors are unverified**, the
+  verification host having one display.
+- **The whole-page Tab order has no recorded pass** for the same
+  key-injection reason; focus return and narrow-window reach are asserted.
