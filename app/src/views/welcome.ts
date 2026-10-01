@@ -16,7 +16,7 @@ export function createWelcomeView(deps: WelcomeDeps): { element: HTMLElement; re
   const headline = el("h2", { class: "welcome-headline", text: "guit" });
   const tagline = el("p", {
     class: "welcome-tagline",
-    text: "A low-resource Git client. Files and diffs open in your own tools.",
+    text: "A small Git client for local work. Files and diffs open in your own tools.",
   });
   // The no-repository instruction, and the one string the AT-SPI harness has
   // matched since 0.1.0 to recognise the empty state: keep it verbatim.

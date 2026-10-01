@@ -285,6 +285,13 @@ release it belongs to did not measure.
 
 ### Changed
 
+- The panel no longer describes itself by its memory where a user actually reads
+  it. The welcome screen opened with "A low-resource Git client" and the packaged
+  descriptions repeated it, both after the READMEs had stopped making the claim:
+  the panel holds about 45 MiB of its own against roughly 130 MiB of GTK and
+  WebKit that is there whether or not a repository is open. All three now say the
+  same thing. A gate keeps them saying it — it scans the packaged metadata as
+  well as the documents and the sources, and fails on the retired wording.
 - The READMEs say what is measured instead of saying "lightweight". The panel is
   three processes sharing GTK and WebKit, and the memory it holds was being
   quoted from a sum of resident sizes, which counts that shared library text once
