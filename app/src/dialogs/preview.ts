@@ -69,13 +69,6 @@ const previewCopy: Record<PreviewKindKey, PreviewCopy> = {
     confirm: "Pop stash",
     cancel: "Keep entry",
   },
-  resetHard: {
-    warning:
-      "Hard reset overwrites the listed working-copy changes with the selected commit's contents and moves the branch back. Staged-only files may be deleted from disk, and the commits left behind become unreachable; Git may garbage-collect them. This cannot be undone from guit.",
-    confirm: "Reset hard",
-    cancel: "Keep everything",
-    droppedLabel: "Commits left behind",
-  },
   restore: {
     warning:
       "A clean restore moves this branch to the selected commit, overwrites the listed changes, and deletes the listed untracked files. Every path below is one the restore touches, each by a different step. The commits it leaves behind become unreachable and Git may garbage-collect them; a path guit does not enter stays on disk. This cannot be undone from guit.",
@@ -292,7 +285,6 @@ function labelFor(kind: PreviewKindKey): string {
     case "tag": return "tag deletion";
     case "stashDrop": return "stash deletion";
     case "stashPop": return "stash pop";
-    case "resetHard": return "hard reset";
     case "restore": return "clean restore";
     case "worktreeRemove": return "worktree removal";
   }
@@ -306,7 +298,6 @@ function commandFor(kind: PreviewKindKey): string {
     case "tag": return "preview_delete_tag";
     case "stashDrop": return "preview_stash_drop";
     case "stashPop": return "preview_stash_pop";
-    case "resetHard": return "preview_reset_hard";
     case "restore": return "preview_restore";
     case "worktreeRemove": return "preview_remove_worktree";
   }
@@ -318,7 +309,6 @@ function requestArgs(pending: PendingPreview): Record<string, unknown> {
     case "tag": return { name: pending.tag.name };
     case "stashDrop":
     case "stashPop": return { index: pending.stash.index };
-    case "resetHard": return { target: pending.reset.target };
     case "restore": return { target: pending.restore.target };
     case "worktreeRemove": return { index: pending.worktree.index };
     case "discard":
@@ -353,7 +343,6 @@ function build(kind: FlatPreviewKind, preview: PreviewResult, args: Record<strin
     case "tag": return { kind, ...base, tag: { name: String(args.name), targetOid: preview.targetOid } };
     case "stashDrop": return { kind, ...base, stash: { index: Number(args.index), targetOid: preview.targetOid } };
     case "stashPop": return { kind, ...base, stash: { index: Number(args.index), targetOid: preview.targetOid } };
-    case "resetHard": return { kind, ...base, reset: { target: String(args.target) } };
     case "worktreeRemove": return { kind, ...base, worktree: { index: Number(args.index), targetOid: preview.targetOid } };
   }
 }
@@ -374,7 +363,6 @@ function rebuild(pending: FlatTicket, preview: PreviewResult): PendingPreview {
     case "tag": return { kind: "tag", names, dropped, nonce, tag: { ...pending.tag, targetOid: oid } };
     case "stashDrop":
     case "stashPop": return { kind: pending.kind, names, dropped, nonce, stash: { ...pending.stash, targetOid: oid } };
-    case "resetHard": return { kind: "resetHard", names, dropped, nonce, reset: { ...pending.reset } };
     case "worktreeRemove": return { kind: "worktreeRemove", names, dropped, nonce, worktree: { ...pending.worktree, targetOid: oid } };
   }
 }

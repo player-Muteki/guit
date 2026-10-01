@@ -341,7 +341,6 @@ export type PreviewKindKey =
   | "tag"
   | "stashDrop"
   | "stashPop"
-  | "resetHard"
   | "restore"
   | "worktreeRemove";
 

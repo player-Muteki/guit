@@ -214,3 +214,28 @@ test("the reset field and the button beside it take one line height", () => {
   assert.match(source("views/changes.ts"), /reset-input/,
     "the field the rule describes is the one the changes area builds");
 });
+
+// --- one reset, and it is the one that promises what it does ---
+
+test("the graph offers no second reset that binds less than the clean restore does", () => {
+  // The detail pane beside the graph used to carry a "Reset hard…" of its own.
+  // Its ticket bound the target, the observed HEAD and the tracked-dirty set —
+  // and that was the whole of it. A path the target tree writes over while the
+  // working tree holds it untracked was outside the promise, so `reset --hard`
+  // wrote over it with the preview silent, and one untracked path in the way of
+  // the target's own directory was destroyed the same way. The clean restore
+  // binds all of that, so the second entry was a known hole reached by one
+  // click from a commit row. There is one reset now, and it is that one.
+  const history = source("views/history.ts");
+  assert.doesNotMatch(history, /Reset hard/,
+    "the detail pane must not offer a reset that binds less than the clean restore");
+  assert.doesNotMatch(history, /resetHard/,
+    "no preview kind of its own may survive there either");
+  // And the soft and mixed resets stay: they move a branch and the index and
+  // overwrite nothing, so they carry no promise about the working tree.
+  assert.match(history, /resetSoft/, "the soft reset is still offered");
+  assert.match(history, /resetMixed/, "the mixed reset is still offered");
+  // The command surface carries one reset in, too.
+  assert.doesNotMatch(source("../tests/ipc-surface.mjs"), /preview_reset_hard|"reset_hard"/,
+    "neither hard-reset command may be registered or classified");
+});

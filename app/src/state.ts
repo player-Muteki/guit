@@ -32,7 +32,6 @@ export type PendingPreview =
       branch?: undefined;
       tag?: undefined;
       stash?: undefined;
-      reset?: undefined;
       worktree?: undefined;
     }
   | {
@@ -49,7 +48,6 @@ export type PendingPreview =
       branch?: undefined;
       tag?: undefined;
       stash?: undefined;
-      reset?: undefined;
       worktree?: undefined;
     }
   | {
@@ -60,7 +58,6 @@ export type PendingPreview =
       branch: { name: string; force: boolean; targetOid: string | null };
       tag?: undefined;
       stash?: undefined;
-      reset?: undefined;
       worktree?: undefined;
     }
   | {
@@ -71,7 +68,6 @@ export type PendingPreview =
       branch?: undefined;
       tag: { name: string; targetOid: string | null };
       stash?: undefined;
-      reset?: undefined;
       worktree?: undefined;
     }
   | {
@@ -82,18 +78,6 @@ export type PendingPreview =
       branch?: undefined;
       tag?: undefined;
       stash: { index: number; targetOid: string | null };
-      reset?: undefined;
-      worktree?: undefined;
-    }
-  | {
-      kind: "resetHard";
-      names: string[];
-      dropped: string[];
-      nonce: string;
-      branch?: undefined;
-      tag?: undefined;
-      stash?: undefined;
-      reset: { target: string };
       worktree?: undefined;
     }
   | {
@@ -116,7 +100,6 @@ export type PendingPreview =
       branch?: undefined;
       tag?: undefined;
       stash?: undefined;
-      reset?: undefined;
       worktree: { index: number; targetOid: string | null };
     };
 

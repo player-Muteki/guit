@@ -46,13 +46,6 @@ pub(crate) enum Bound {
         selector: String,
         oid: String,
     },
-    /// Reset hard: the target commit, the observed HEAD and the exact
-    /// tracked-dirty set; all three must still match at confirm.
-    ResetHard {
-        dirty: Vec<Vec<u8>>,
-        target_oid: String,
-        head_oid: String,
-    },
     /// A clean restore: the whole computed plan, not a display list. The
     /// preview may show these sets grouped and paginated, but every one of
     /// them is a fact the confirmation re-reads — the target and HEAD, the
@@ -172,30 +165,15 @@ impl WriteState {
         })
     }
 
-    /// Everything a hard reset confirmation is bound to: the target commit,
-    /// the HEAD observed at preview time and the exact tracked-dirty set.
-    /// Hard reset is the only operation that may silently drop committed
-    /// work, so `reset_hard` re-checks all three before Git runs.
-    pub(crate) fn stage_reset_hard(
-        &self,
-        work_root: PathBuf,
-        dirty: Vec<Vec<u8>>,
-        target_oid: String,
-        head_oid: String,
-    ) -> String {
-        self.stage_preview(Preview {
-            work_root,
-            bound: Bound::ResetHard {
-                dirty,
-                target_oid,
-                head_oid,
-            },
-        })
-    }
-
     /// Ticket for a clean restore, bound to the whole affected plan. Nothing is
     /// narrowed here: the plan that was computed is the plan that is re-read,
-    /// so a preview cannot promise a set the confirmation stops checking.
+    /// so a preview cannot promise a set the confirmation stops checking. A
+    /// hard reset's ticket used to bind only the target, the observed HEAD and
+    /// the tracked-dirty set, and that was the whole of it: a path the target
+    /// tree writes over and the working tree holds as untracked was outside the
+    /// promise, so a hard reset wrote over it with the preview silent. This one
+    /// binds every untracked path the two steps touch and every repository that
+    /// must still be in the way.
     pub(crate) fn stage_restore(
         &self,
         work_root: PathBuf,
@@ -518,7 +496,6 @@ pub enum OperationKind {
     Abort,
     Skip,
     Reset,
-    ResetHard,
     /// A clean restore: the two-step write — `reset --hard` to the target and a
     /// bounded `clean` over the paths the ticket named. It is its own kind
     /// rather than `ResetHard` with a longer message, because the answer it

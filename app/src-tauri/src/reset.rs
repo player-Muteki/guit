@@ -13,7 +13,7 @@
 
 use crate::probe::ProbeError;
 use crate::status::StatusEntry;
-use crate::write::{self, OperationKind, OperationResult, Outcome, PreviewResult, WriteState};
+use crate::write::{self, OperationKind, OperationResult, Outcome, WriteState};
 use crate::{branches, history, model, repo, runner, sequencer, session};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -22,8 +22,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// The wire-level mode of a plain reset. `hard` is deliberately not
-/// expressible here: it exists only as the ticketed `reset_hard`
-/// command, so no serialized request can reach it by accident.
+/// expressible here: reaching a hard reset means going through the clean
+/// restore, which is bound to a whole computed plan rather than to a mode
+/// flag, so no serialized request can reach it by accident.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModeArg {
@@ -1200,170 +1201,6 @@ fn short(oid: &str) -> String {
     oid.chars().take(10).collect()
 }
 
-/// How many discarded commit subjects the panel lists before summarising.
-const DROPPED_DISPLAY_LIMIT: usize = 20;
-
-pub(crate) fn preview_reset_hard(
-    state: &WriteState,
-    sessions: &session::SessionState,
-    snapshot_version: u64,
-    target: &str,
-) -> Result<PreviewResult, ProbeError> {
-    let (work_root, unborn) = sessions.commit_context(snapshot_version)?;
-    if unborn {
-        return Err(ProbeError::new(
-            "reset_unborn",
-            "Cannot reset before the first commit.",
-        ));
-    }
-    if let Some(refusal) = sequencer::in_progress_message(sessions)? {
-        return Err(ProbeError::new("reset_in_progress", refusal));
-    }
-    // Everything the ticket binds and every id the preview lists come from this
-    // one resolution, so a hard reset's target is Git's own full commit id and
-    // never the string that was typed.
-    let target_oid = resolve_target(&work_root, target)?;
-    let head_oid = resolve_commit(&work_root, "HEAD")
-        .ok_or_else(|| ProbeError::new("reset_head", "HEAD does not name a commit."))?;
-    let dirty = tracked_dirty_set(sessions)?;
-    // What leaving HEAD where it is would drop, listed from the same
-    // fresh read that produced the ids.
-    let mut dropped = Vec::new();
-    if head_oid != target_oid {
-        let listed = read_git(
-            &work_root,
-            &[
-                "rev-list",
-                "--max-count",
-                &(DROPPED_DISPLAY_LIMIT + 1).to_string(),
-                &head_oid,
-                &format!("^{target_oid}"),
-            ],
-        )
-        .ok_or_else(|| {
-            ProbeError::new(
-                "reset_preview_failed",
-                "Git could not list the commits a hard reset would discard; the reset was refused.",
-            )
-        })?;
-        let listed = listed.lines().map(str::to_owned).collect::<Vec<_>>();
-        if listed.len() > DROPPED_DISPLAY_LIMIT {
-            let total = read_git(
-                &work_root,
-                &["rev-list", "--count", &head_oid, &format!("^{target_oid}")],
-            )
-            .and_then(|count| count.parse::<usize>().ok())
-            .ok_or_else(|| {
-                ProbeError::new(
-                    "reset_preview_failed",
-                    "Git could not count the commits a hard reset would discard; the reset was refused.",
-                )
-            })?;
-            dropped.extend(listed[..DROPPED_DISPLAY_LIMIT].iter().map(|oid| short(oid)));
-            dropped.push(format!("… {} commits in total", total));
-        } else {
-            dropped.extend(listed.iter().map(|oid| short(oid)));
-        }
-    }
-    let nonce = state.stage_reset_hard(work_root, dirty.clone(), target_oid.clone(), head_oid);
-    let snapshot = session::refresh(sessions)?
-        .ok_or_else(|| ProbeError::new("write_no_session", "No repository session is open."))?;
-    Ok(PreviewResult {
-        nonce,
-        candidates: dirty.iter().map(|raw| model::display_name(raw)).collect(),
-        dropped,
-        snapshot,
-        target_oid: Some(target_oid),
-    })
-}
-
-pub(crate) fn reset_hard(
-    state: &WriteState,
-    sessions: &session::SessionState,
-    nonce: String,
-) -> Result<OperationResult, ProbeError> {
-    let operation_id = state.begin()?;
-    let result = run_reset_hard(state, sessions, &nonce);
-    state.finish();
-    result.map(|mut result| {
-        result.operation_id = operation_id;
-        result
-    })
-}
-
-fn run_reset_hard(
-    state: &WriteState,
-    sessions: &session::SessionState,
-    nonce: &str,
-) -> Result<OperationResult, ProbeError> {
-    write::confirm(
-        state,
-        sessions,
-        OperationKind::ResetHard,
-        nonce,
-        write::Refusals {
-            expired: "That confirmation has expired; preview the action again.",
-            session_changed: "A different repository is open now; preview the reset again.",
-            cancelled_before_git: "Cancelled before Git ran.",
-        },
-        |preview| match preview.bound {
-            write::Bound::ResetHard {
-                dirty,
-                target_oid,
-                head_oid,
-            } => Some((preview.work_root, (dirty, target_oid, head_oid))),
-            _ => None,
-        },
-        |work_root, (expected_dirty, target_oid, expected_head)| {
-            if let Some(refusal) = sequencer::in_progress_message(sessions)? {
-                return Ok(Err(refusal));
-            }
-            // The ticket promised exactly this HEAD, this target and this
-            // dirty set; anything else means the preview no longer describes
-            // reality.
-            let Some(head_now) = resolve_commit(work_root, "HEAD") else {
-                return Ok(Err(
-                    "HEAD no longer names a commit; preview the reset again.".to_owned(),
-                ));
-            };
-            if head_now != *expected_head {
-                return Ok(Err(
-                    "The branch moved since the preview; nothing was changed. Preview the reset again."
-                        .to_owned(),
-                ));
-            }
-            if resolve_commit(work_root, target_oid).as_deref() != Some(target_oid.as_str()) {
-                return Ok(Err(
-                    "The target commit is no longer reachable; preview the reset again.".to_owned(),
-                ));
-            }
-            let dirty_now = tracked_dirty_set(sessions)?;
-            if dirty_now != *expected_dirty {
-                return Ok(Err(
-                    "The working copy changed since the preview; nothing was changed. Preview the reset again."
-                        .to_owned(),
-                ));
-            }
-            Ok(Ok(()))
-        },
-        |work_root, (_, target_oid, _)| {
-            write::ran_from(
-                sequencer::run_git(work_root, false, &["reset", "--hard", target_oid], state),
-                write::Wording {
-                    ok: format!(
-                        "Hard reset to {}. Discarded the working-copy changes listed in the preview.",
-                        short(target_oid)
-                    ),
-                    failed: "git reset --hard reported a failure.".to_owned(),
-                    cancelled:
-                        "Cancelled while the Git process was running. The reset may have partly applied; the refreshed snapshot shows the actual state."
-                            .to_owned(),
-                },
-            )
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1468,90 +1305,6 @@ mod tests {
     }
 
     #[test]
-    fn hard_reset_lists_targets_and_only_then_applies() {
-        let root = dirty_repo();
-        let dir = root.path();
-        let (writes, sessions, version) = state_and_session(dir);
-        let c2 = read(dir, &["rev-parse", "HEAD"]);
-        let c1 = read(dir, &["rev-parse", "HEAD~1"]);
-        let preview = preview_reset_hard(&writes, &sessions, version, &c1).unwrap();
-        assert_eq!(preview.target_oid.as_deref(), Some(c1.as_str()));
-        // The promise: exactly the tracked-dirty files, and the commit
-        // left behind. Untracked files survive a hard reset and so must
-        // not appear in the list.
-        let names = preview.candidates.join("|");
-        assert!(
-            names.contains("b.txt") && names.contains("c.txt"),
-            "{names}"
-        );
-        assert!(
-            !names.contains("u.txt"),
-            "untracked files must not be listed"
-        );
-        assert_eq!(preview.dropped, vec![short(&c2)]);
-
-        let result = reset_hard(&writes, &sessions, preview.nonce.clone()).unwrap();
-        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
-        assert_eq!(read(dir, &["rev-parse", "HEAD"]), c1);
-        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "one\n");
-        assert_eq!(read(dir, &["show", ":a.txt"]), "one");
-        // c.txt was staged only, never committed — and a hard reset wipes
-        // index-tracked state, so Git deletes the file itself. That is
-        // precisely why the ticket lists it, while the purely untracked
-        // u.txt was never in danger and must survive.
-        assert!(!dir.join("c.txt").exists());
-        assert_eq!(
-            std::fs::read_to_string(dir.join("u.txt")).unwrap(),
-            "untracked\n"
-        );
-
-        // The ticket is spent: replay is refused without touching Git.
-        let replay = reset_hard(&writes, &sessions, preview.nonce).unwrap();
-        assert_eq!(replay.outcome, Outcome::Rejected);
-        assert!(replay.message.contains("expired"));
-        assert_eq!(replay.exit_code, None);
-    }
-
-    #[test]
-    fn dirty_set_drift_between_preview_and_confirm_is_refused() {
-        let root = dirty_repo();
-        let dir = root.path();
-        let (writes, sessions, version) = state_and_session(dir);
-        let c1 = read(dir, &["rev-parse", "HEAD~1"]);
-        let head = read(dir, &["rev-parse", "HEAD"]);
-        let preview = preview_reset_hard(&writes, &sessions, version, &c1).unwrap();
-        // An external edit to a previously clean tracked file changes what
-        // the reset would destroy — the preview no longer describes reality.
-        std::fs::write(dir.join("a.txt"), "externally edited\n").unwrap();
-        let refused = reset_hard(&writes, &sessions, preview.nonce).unwrap();
-        assert_eq!(refused.outcome, Outcome::Rejected);
-        assert!(refused.message.contains("working copy changed"));
-        assert_eq!(refused.exit_code, None, "refusal must not reach git");
-        assert_eq!(read(dir, &["rev-parse", "HEAD"]), head);
-        assert_eq!(
-            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
-            "b changed\n",
-            "nothing may be restored on a refusal"
-        );
-    }
-
-    #[test]
-    fn head_drift_between_preview_and_confirm_is_refused() {
-        let root = dirty_repo();
-        let dir = root.path();
-        let (writes, sessions, version) = state_and_session(dir);
-        let c1 = read(dir, &["rev-parse", "HEAD~1"]);
-        let preview = preview_reset_hard(&writes, &sessions, version, &c1).unwrap();
-        // An external commit means the set of dropped commits changed.
-        git(dir, &["commit", "--allow-empty", "-m", "external"]);
-        let refused = reset_hard(&writes, &sessions, preview.nonce).unwrap();
-        assert_eq!(refused.outcome, Outcome::Rejected);
-        assert!(refused.message.contains("branch moved"));
-        assert_eq!(refused.exit_code, None);
-        assert_eq!(read(dir, &["log", "-1", "--format=%s"]), "external");
-    }
-
-    #[test]
     fn reset_targets_are_validated_before_git() {
         let root = dirty_repo();
         let dir = root.path();
@@ -1577,14 +1330,14 @@ mod tests {
             // Each refusal re-read state, so the next attempt needs its version.
             version = result.snapshot.expect("re-read").version;
         }
-        // A well-formed but nonexistent commit is caught at hard preview too
+        // A well-formed but nonexistent commit is caught at restore preview too
         // (soft/mixed leave it to Git's own failure reporting).
         let ghost = "deadbeef".repeat(5);
-        let error = preview_reset_hard(&writes, &sessions, version, &ghost).unwrap_err();
+        let error = preview_restore(&writes, &sessions, version, &ghost).unwrap_err();
         assert_eq!(error.code.as_str(), "reset_target_absent");
-        // And a branch name is not a legitimate hard target either: the ticket
+        // And a branch name is not a legitimate target either: the ticket
         // would bind the commit it points at today and a different one later.
-        let error = preview_reset_hard(&writes, &sessions, version, "main").unwrap_err();
+        let error = preview_restore(&writes, &sessions, version, "main").unwrap_err();
         assert_eq!(error.code.as_str(), "reset_target_shape");
     }
 
@@ -1626,8 +1379,8 @@ mod tests {
         // resolved in a store of 124 objects and one of 40,083. This repository
         // holds five objects, so a four-digit prefix names one commit uniquely.
         let abbreviation = &c1[..4];
-        let preview = preview_reset_hard(&writes, &sessions, version, abbreviation).unwrap();
-        assert_eq!(preview.target_oid.as_deref(), Some(c1.as_str()));
+        let preview = preview_restore(&writes, &sessions, version, abbreviation).unwrap();
+        assert_eq!(preview.target_oid, c1);
         // What a soft reset acts on is the id Git answered, and what its
         // sentence reports is that id rather than the four characters typed.
         // The preview re-read the repository, so the write takes that snapshot.
@@ -1644,8 +1397,8 @@ mod tests {
         let dir = root.path();
         let (writes, sessions, version) = state_and_session(dir);
         let c1 = read(dir, &["rev-parse", "HEAD~1"]);
-        let preview = preview_reset_hard(&writes, &sessions, version, &c1.to_uppercase()).unwrap();
-        assert_eq!(preview.target_oid.as_deref(), Some(c1.as_str()));
+        let preview = preview_restore(&writes, &sessions, version, &c1.to_uppercase()).unwrap();
+        assert_eq!(preview.target_oid, c1);
     }
 
     #[test]
@@ -1657,7 +1410,7 @@ mod tests {
         // is what Git would accept: only the peel to a commit rules it out, so
         // this is the refusal that has to say "not a commit" and not "missing".
         let blob = read(dir, &["rev-parse", "HEAD:a.txt"]);
-        let error = preview_reset_hard(&writes, &sessions, version, &blob).unwrap_err();
+        let error = preview_restore(&writes, &sessions, version, &blob).unwrap_err();
         assert_eq!(error.code.as_str(), "reset_target_not_commit");
         assert!(
             !error.message.contains("does not exist"),
@@ -1749,7 +1502,7 @@ mod tests {
         // Git's peel answers "not exactly one" for both an absent id and an
         // ambiguous one; the count of commits is what makes these two different
         // sentences, and it comes from asking every candidate separately.
-        let error = preview_reset_hard(&writes, &sessions, version, &prefix).unwrap_err();
+        let error = preview_restore(&writes, &sessions, version, &prefix).unwrap_err();
         assert_eq!(error.code.as_str(), "reset_target_ambiguous");
         let count: String = error
             .message
@@ -1815,11 +1568,11 @@ mod tests {
             "{}",
             soft.message
         );
-        // The hard entry reports the same fact as an error code, because the
+        // The restore entry reports the same fact as an error code, because the
         // caller has nowhere to show a preview it cannot produce. The refusal
         // above re-read state, so the next call needs the newer version.
         let version = soft.snapshot.expect("re-read").version;
-        let error = preview_reset_hard(&writes, &sessions, version, "main").unwrap_err();
+        let error = preview_restore(&writes, &sessions, version, "main").unwrap_err();
         assert_eq!(error.code.as_str(), "reset_unborn");
     }
 
@@ -1858,108 +1611,24 @@ mod tests {
         );
     }
 
-    /// The same cancel, one entry later: the hard reset has already spent its
-    /// ticket and re-checked every bound fact, and the cancel flag is the
-    /// last gate before `git reset --hard`. The working copy must survive.
-    #[test]
-    fn a_cancelled_hard_reset_leaves_the_working_copy_alone() {
-        let root = dirty_repo();
-        let dir = root.path();
-        let (writes, sessions, version) = state_and_session(dir);
-        let c1 = read(dir, &["rev-parse", "HEAD~1"]);
-        let head = read(dir, &["rev-parse", "HEAD"]);
-        let preview = preview_reset_hard(&writes, &sessions, version, &c1).unwrap();
-        writes.begin().unwrap();
-        writes.cancel();
-        let result = run_reset_hard(&writes, &sessions, &preview.nonce).unwrap();
-        writes.finish();
-        assert_eq!(result.outcome, Outcome::Cancelled);
-        assert!(
-            result.message.contains("before Git ran"),
-            "{}",
-            result.message
-        );
-        assert_eq!(read(dir, &["rev-parse", "HEAD"]), head);
-        assert_eq!(
-            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
-            "b changed\n",
-            "a cancelled hard reset must not overwrite anything"
-        );
-        assert!(
-            dir.join("c.txt").exists(),
-            "a cancelled hard reset deletes nothing"
-        );
-    }
-
-    /// More than twenty dropped commits must be summarised with a real
-    /// count, not silently truncated to the display limit. The `… N commits
-    /// in total` line is the only thing telling the user the list is partial.
-    #[test]
-    fn a_long_dropped_history_is_summarised_with_its_true_count() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path();
-        git(dir, &["init", "--quiet", "--initial-branch=main"]);
-        git(dir, &["config", "user.name", "guit test"]);
-        git(dir, &["config", "user.email", "test@example.invalid"]);
-        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
-        git(dir, &["add", "."]);
-        git(dir, &["commit", "-m", "first"]);
-        let first = read(dir, &["rev-parse", "HEAD"]);
-        for i in 0..25 {
-            git(
-                dir,
-                &["commit", "--allow-empty", "-m", &format!("filler {i}")],
-            );
-        }
-        std::fs::write(dir.join("a.txt"), "dirty\n").unwrap();
-        let (writes, sessions, version) = state_and_session(dir);
-        let preview = preview_reset_hard(&writes, &sessions, version, &first).unwrap();
-        // Twenty ids plus the summary line.
-        assert_eq!(preview.dropped.len(), DROPPED_DISPLAY_LIMIT + 1);
-        let summary = preview.dropped.last().unwrap();
-        assert_eq!(summary, "… 25 commits in total", "{summary}");
-        // Every listed id is a real, short commit id — the panel shows these
-        // to the user, so a truncated or padded one would be a lie.
-        for oid in &preview.dropped[..DROPPED_DISPLAY_LIMIT] {
-            assert_eq!(oid.len(), 10, "{oid}");
-            assert!(oid.bytes().all(|b| b.is_ascii_hexdigit()), "{oid}");
-        }
-        assert_eq!(preview.candidates, vec!["a.txt"]);
-    }
-
-    /// Resetting to HEAD drops nothing, so the preview's dropped list is
-    /// empty — the panel must not imply that commits are about to be lost.
-    #[test]
-    fn a_reset_to_head_drops_nothing() {
-        let root = dirty_repo();
-        let dir = root.path();
-        let (writes, sessions, version) = state_and_session(dir);
-        let head = read(dir, &["rev-parse", "HEAD"]);
-        let preview = preview_reset_hard(&writes, &sessions, version, &head).unwrap();
-        assert!(preview.dropped.is_empty(), "{:?}", preview.dropped);
-        assert_eq!(preview.target_oid.as_deref(), Some(head.as_str()));
-        let result = reset_hard(&writes, &sessions, preview.nonce).unwrap();
-        assert_eq!(result.outcome, Outcome::Success, "{}", result.message);
-        assert_eq!(read(dir, &["rev-parse", "HEAD"]), head);
-    }
-
     /// The ticket is bound to the repository that produced it. Switching to
     /// another open repository and then confirming must be refused even
     /// though the nonce, the target and the dirty set would all still match.
     #[test]
     fn a_ticket_does_not_survive_switching_repositories() {
-        let first = dirty_repo();
-        let second = dirty_repo();
-        let (writes, sessions, version) = state_and_session(first.path());
-        let c1 = read(first.path(), &["rev-parse", "HEAD~1"]);
-        let preview = preview_reset_hard(&writes, &sessions, version, &c1).unwrap();
-        // Same shape, same commit ids, same dirty set: only the identity
-        // check can tell these two repositories apart, so the ticket binding
-        // it to a work root is the only thing standing between a preview of
-        // one repository and a reset of another.
+        let (root, target) = restore_repo();
+        let second = restore_repo().0;
+        let dir = root.path();
+        let (writes, sessions, version) = state_and_session(dir);
+        let preview = preview_restore(&writes, &sessions, version, &target).unwrap();
+        // The two repositories are clones of one fixture: same shape, same
+        // commit ids, same dirty set. Only the identity check can tell them
+        // apart, so the ticket binding itself to a work root is the only thing
+        // standing between a preview of one repository and a restore of
+        // another.
         session::open(&sessions, second.path()).unwrap();
         let second_head = read(second.path(), &["rev-parse", "HEAD"]);
-        let refused = reset_hard(&writes, &sessions, preview.nonce).unwrap();
+        let refused = restore_clean(&writes, &sessions, preview.nonce).unwrap();
         assert_eq!(refused.outcome, Outcome::Rejected);
         assert!(
             refused.message.contains("different repository"),
@@ -1967,96 +1636,19 @@ mod tests {
             refused.message
         );
         // The second repository's working copy is untouched, and it is the
-        // *open* one, so a wrong reset here would be the most destructive
+        // *open* one, so a wrong restore here would be the most destructive
         // bug this module could have.
         assert_eq!(read(second.path(), &["rev-parse", "HEAD"]), second_head);
         assert_eq!(
-            std::fs::read_to_string(second.path().join("b.txt")).unwrap(),
-            "b changed\n",
+            std::fs::read_to_string(second.path().join("plain.txt")).unwrap(),
+            "untracked\n",
             "the newly opened repository must be untouched"
         );
         assert_eq!(
-            std::fs::read_to_string(first.path().join("b.txt")).unwrap(),
-            "b changed\n"
+            std::fs::read_to_string(dir.join("plain.txt")).unwrap(),
+            "untracked\n",
+            "nor may the confirmed one be cleaned"
         );
-    }
-
-    /// `git reset --hard` failing is a reported outcome, not an error, and
-    /// the failure Git reports is the one the user is shown. A stale
-    /// `index.lock` is the honest way to make Git itself fail: `git status`
-    /// still reads, so the ticket's own re-checks pass and the failure lands
-    /// on the write, which is the branch under test. Unlike a permission
-    /// change this also fails for a process running as root.
-    #[test]
-    fn a_failing_hard_reset_is_reported_with_its_own_stderr() {
-        let root = dirty_repo();
-        let dir = root.path();
-        let (writes, sessions, version) = state_and_session(dir);
-        let c1 = read(dir, &["rev-parse", "HEAD~1"]);
-        let head = read(dir, &["rev-parse", "HEAD"]);
-        let preview = preview_reset_hard(&writes, &sessions, version, &c1).unwrap();
-        let lock = dir.join(".git/index.lock");
-        std::fs::write(&lock, "").unwrap();
-        let result = reset_hard(&writes, &sessions, preview.nonce).unwrap();
-        std::fs::remove_file(&lock).unwrap();
-
-        assert_eq!(result.outcome, Outcome::Failed, "{}", result.message);
-        assert_eq!(result.exit_code, Some(128), "git's own status, not a guess");
-        assert!(
-            result.message.contains("reported a failure"),
-            "{}",
-            result.message
-        );
-        // The detail is Git's first stderr line, which names index.lock; a
-        // generic "the reset failed" here would leave the user with nothing.
-        let detail = result.details.expect("the first stderr line must be shown");
-        assert!(detail.contains("index.lock"), "{detail}");
-        // A failed reset is still a reason to re-read: the snapshot is what
-        // the user sees next, and it must show the untouched working copy.
-        let snapshot = result
-            .snapshot
-            .expect("a failed reset still re-reads state");
-        assert!(snapshot.files.iter().any(|f| f.display == "b.txt"));
-        // HEAD did not move: the reset failed, so the branch is still where
-        // the preview found it and the working copy still holds the edit.
-        assert_eq!(read(dir, &["rev-parse", "HEAD"]), head);
-        assert_eq!(
-            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
-            "b changed\n"
-        );
-    }
-
-    /// A conflicted index is a dirty set in its own right: both sides of the
-    /// conflict belong in the hard-reset candidate list, because a hard reset
-    /// overwrites them.
-    #[test]
-    fn a_conflicted_file_is_listed_as_a_hard_reset_candidate() {
-        let root = crate::sequencer::tests::diverged_repo(false);
-        let dir = root.path();
-        let (writes, sessions, version) = state_and_session(dir);
-        // A conflict is the state a hard reset is most often wanted for, and
-        // it is the one dirty shape the ordinary tracked/untracked filter
-        // cannot see: both sides of the conflict are in the index, marked
-        // unmerged rather than changed.
-        let started = crate::sequencer::merge_start(&writes, &sessions, version, "side").unwrap();
-        let conflicted = tracked_dirty_set(&sessions).unwrap();
-        let names: Vec<String> = conflicted
-            .iter()
-            .map(|raw| model::display_name(raw))
-            .collect();
-        assert_eq!(
-            names,
-            vec!["base.txt"],
-            "the conflicted path is the candidate"
-        );
-        // The same file is what the whole session reports as a conflict.
-        let view = started.snapshot.expect("in-flight");
-        let entry = view
-            .files
-            .iter()
-            .find(|file| file.display == "base.txt")
-            .expect("the conflicted file is in the snapshot");
-        assert_eq!(entry.group, model::FileGroup::Conflict);
     }
 
     fn init(dir: &Path) {

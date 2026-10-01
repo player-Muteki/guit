@@ -1081,35 +1081,6 @@ async fn reset(
 }
 
 #[tauri::command]
-async fn preview_reset_hard(
-    app: tauri::AppHandle,
-    snapshot_version: u64,
-    target: String,
-) -> Result<write::PreviewResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        reset::preview_reset_hard(&state, &sessions, snapshot_version, &target)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
-async fn reset_hard(
-    app: tauri::AppHandle,
-    nonce: String,
-) -> Result<write::OperationResult, ProbeError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<write::WriteState>();
-        let sessions = app.state::<session::SessionState>();
-        reset::reset_hard(&state, &sessions, nonce)
-    })
-    .await
-    .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
-}
-
-#[tauri::command]
 async fn preview_restore(
     app: tauri::AppHandle,
     snapshot_version: u64,
@@ -1361,8 +1332,6 @@ fn main() {
             pick_commit,
             revert_commit,
             reset,
-            preview_reset_hard,
-            reset_hard,
             preview_restore,
             restore_clean,
             list_worktrees,

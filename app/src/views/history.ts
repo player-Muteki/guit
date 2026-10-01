@@ -296,12 +296,9 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   const resetMixed = button("Reset mixed", () => {
     if (opened) void runCommitWrite("reset", { mode: "mixed", target: opened.oid }, `Resetting (mixed) to ${opened.oid.slice(0, 10)}…`);
   }, { class: "btn", title: "Move the branch and index to this commit; keep file contents" });
-  const resetHard = button("Reset hard…", () => {
-    if (opened) void deps.preview.request("resetHard", { target: opened.oid }, null);
-  }, { class: "btn btn-danger", title: "Move the branch to this commit and overwrite working-copy changes (with confirmation)" });
 
   const actions = el("div", { class: "detail-actions" }, [
-    copyOid, diffCommit, branchFrom, tagFrom, cherryPick, revert, resetSoft, resetMixed, resetHard,
+    copyOid, diffCommit, branchFrom, tagFrom, cherryPick, revert, resetSoft, resetMixed,
     el("div", { class: "spacer" }), closeDetail,
   ]);
   detail.append(detailMessage, detailMeta, detailFiles, actions);
@@ -415,7 +412,6 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     revert.disabled = locked;
     resetSoft.disabled = locked;
     resetMixed.disabled = locked;
-    resetHard.disabled = locked;
   };
 
   const copyOidNow = async (): Promise<void> => {
