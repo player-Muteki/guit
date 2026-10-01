@@ -1,0 +1,33 @@
+# guit is a cross-platform project whose tests read source text and match
+# literal newlines and construct filesystem paths from URLs. Both break when a
+# checkout rewrites line endings, and GitHub's Windows runners check out with
+# core.autocrlf=true by default — which is why several fixture gates failed
+# there while passing on Linux and macOS.
+#
+# Pin text to LF in the repository so every platform reads the same bytes the
+# tests were written against. Binary assets are declared so no future checkout
+# mangles an icon.
+
+* text=auto eol=lf
+
+*.ts    text eol=lf
+*.rs    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.mjs   text eol=lf
+*.py    text eol=lf
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.svg   text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+
+# Binary: never touched by eol conversion.
+*.png   binary
+*.ico   binary
+*.icns  binary
+*.AppImage binary
+*.deb   binary
+*.rpm   binary

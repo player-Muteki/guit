@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   clampSplit as panelClampSplit,
   SPLIT_DEFAULT as panelSPLIT_DEFAULT,
@@ -278,15 +280,17 @@ test("one module holds the record, and the rest ask it", () => {
   const found = [];
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = `${dir}/${entry.name}`;
+      // `join` and a real path rather than `URL.pathname`, which on Windows is
+      // `/D:/a/...` and produces a doubled drive prefix.
+      const path = join(dir, entry.name);
       if (entry.isDirectory()) walk(path);
       else if (entry.name.endsWith(".ts") && !owners.includes(entry.name)) {
         const hits = readFileSync(path, "utf8").match(/\b(loadPreferences|updatePreferences)\s*\(/g);
-        if (hits !== null) found.push(`${path.slice(path.indexOf("src/"))}: ${hits.join(", ")}`);
+        if (hits !== null) found.push(`${path.slice(path.indexOf("src"))}: ${hits.join(", ")}`);
       }
     }
   };
-  walk(new URL("../src", import.meta.url).pathname);
+  walk(fileURLToPath(new URL("../src", import.meta.url)));
   assert.deepEqual(found, [], "only appearanceStore.ts may hold the record");
 });
 

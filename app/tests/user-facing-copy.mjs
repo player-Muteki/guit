@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -64,6 +64,12 @@ const RETIRED_CLAIMS = [
 // An icon is SVG path data, and a path starts with a move-to command: `M2 4h5`
 // reads as a round label from here. Only an array whose first entry is shaped
 // like path data is excused; a sentence that quotes a label is not.
+// Repository-relative, with forward slashes on every platform. A Windows
+// checkout yields `app\src-tauri\tauri.conf.json`, and comparing that against
+// a forward-slash literal made this gate report a file as unscanned when it was
+// scanned — the gate failing on the fix it was written to enforce.
+const relative = (path) => path.slice(root.length + 1).split(sep).join("/");
+
 const PATH_DATA_TABLE = /^\s*\w+: \["M[0-9]/;
 
 function* filesIn(directory, extensions) {
@@ -102,7 +108,7 @@ test("shipped text names behaviour, never the development schedule", () => {
         pattern.lastIndex = 0;
         if (!pattern.test(line)) continue;
         offenders.push(
-          `${path.slice(root.length + 1)}:${index + 1} ${name}: ${line.trim().slice(0, 90)}`,
+          `${relative(path)}:${index + 1} ${name}: ${line.trim().slice(0, 90)}`,
         );
       }
     });
@@ -120,7 +126,7 @@ test("shipped text makes no claim the measurements do not support", () => {
         pattern.lastIndex = 0;
         if (!pattern.test(line)) continue;
         offenders.push(
-          `${path.slice(root.length + 1)}:${index + 1} ${name}: ${line.trim().slice(0, 90)}`,
+          `${relative(path)}:${index + 1} ${name}: ${line.trim().slice(0, 90)}`,
         );
       }
     });
@@ -136,7 +142,7 @@ test("the scanned surface covers the packaged descriptions too", () => {
   // A scan that quietly stops covering a file is how a claim drifts into the
   // one surface nobody re-reads: the .deb description and the welcome screen
   // both kept saying "low-resource" after the READMEs had stopped.
-  const scanned = targets.map((path) => path.slice(root.length + 1));
+  const scanned = targets.map(relative);
   for (const required of [
     "app/src-tauri/tauri.conf.json",
     "README.md",

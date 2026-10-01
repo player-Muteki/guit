@@ -503,6 +503,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
         git(dir, &["init", "--quiet", "--initial-branch=main"]);
+        // An identity stored in the repository, not passed with `-c` for the
+        // fixture commit alone. Creating a tag runs `git tag -a`, which signs a
+        // tagger line and needs an identity of its own — and a real repository
+        // has one, because the person using it configured it. Leaving this to
+        // the host's global config made the operation under test pass on a
+        // developer's machine and fail on a runner that has none.
+        git(dir, &["config", "user.name", "guit test"]);
+        git(dir, &["config", "user.email", "test@example.invalid"]);
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();
         git(dir, &["add", "--", "a.txt"]);
         git(dir, &["commit", "-q", "-m", "base"]);

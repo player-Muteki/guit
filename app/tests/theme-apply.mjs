@@ -15,7 +15,13 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { THEME_RECOVERY_KEYS } from "../src/themeFindings.ts";
 
-const source = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
+// Newlines are normalised to LF on the way in. Several gates here compare
+// positions in the source (`indexOf("render();\n})")`), and a checkout that
+// rewrote the file to CRLF made those comparisons silently wrong rather than
+// obviously broken. `.gitattributes` pins LF, so this is belt and braces for a
+// developer or tool that bypasses it.
+const source = (path) =>
+  readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
 // --- the recovery entry ---
 

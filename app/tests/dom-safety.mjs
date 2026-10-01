@@ -13,6 +13,8 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 const FORBIDDEN = [
   { pattern: /\binnerHTML\b/, why: "parses a string as markup" },
@@ -25,7 +27,10 @@ const FORBIDDEN = [
 
 function sources(dir, into = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = `${dir}/${entry.name}`;
+    // `join` rather than string concatenation, and a real filesystem path
+    // rather than `URL.pathname`: on Windows the latter is `/D:/a/...`, which
+    // readdirSync rejects with a doubled drive prefix.
+    const path = join(dir, entry.name);
     if (entry.isDirectory()) sources(path, into);
     else if (entry.name.endsWith(".ts")) into.push(path);
   }
@@ -34,7 +39,7 @@ function sources(dir, into = []) {
 
 test("no source file gives the document a string to parse", () => {
   const hits = [];
-  for (const file of sources(new URL("../src", import.meta.url).pathname)) {
+  for (const file of sources(fileURLToPath(new URL("../src", import.meta.url)))) {
     readFileSync(file, "utf8").split("\n").forEach((line, index) => {
       for (const { pattern, why } of FORBIDDEN) {
         if (pattern.test(line)) hits.push(`${file}:${index + 1} ${pattern.source} — ${why}`);
