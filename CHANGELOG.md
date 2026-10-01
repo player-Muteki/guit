@@ -739,3 +739,11 @@ Stated plainly, because each of these is a limit on what this release claims.
   verification host having one display.
 - **The whole-page Tab order has no recorded pass** for the same
   key-injection reason; focus return and narrow-window reach are asserted.
+- **Two continuous-integration tests fail on macOS and Windows, and did so
+  before this release.** The macOS one is a `git mergetool` case where a tool
+  that resolves a conflict and then exits non-zero is expected to be accepted
+  unless `trustExitCode` is set; on that runner Git reports a failure instead.
+  The Windows one diffs a deleted worktree file, where Git passes an empty
+  remote that resolves against the device namespace rather than a path. Both
+  exercise real Git behaviour on platforms this release was not run on, and are
+  left as found rather than adjusted until green. The Linux job passes.
