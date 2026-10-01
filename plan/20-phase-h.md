@@ -145,7 +145,7 @@
 | G07 Git Graph | **达成** | 六支图相关引擎探针 fails=0；深页 p50 1.8→14.4 ms（§4.2） | 约十万提交深度碰捕获上界那条仍是算术 |
 | G08 字体与主题 | **达成** | `theme-check.py` fails=0（三档切换后缩放偏好都在）；`restart-persistence-check.py` 坏/新版几何文件可恢复；`font-engine-probe.ts` fails=0 | 打字的三类字段（无通道，manual 4） |
 | G09 实时低占用 | **达成（预算内），但有一处必须说清** | idle 0.76% 单核当量（预算 <1%）；风暴下刷新未被饿死（§4.4）；`read-budget.mjs` 十二次往返六项平衡；内存 179 MiB PSS 对修订后 200 MiB 预算达标，地板 167 MiB 与斜率 ~1 KiB/文件见 §4.1 | idle CPU 这个数**只在 Watch 5 s 兜底轮询开着时成立**（每 5 s 一次 `git status` 捕获），A02 那句"idle 不触发 Git"要改口成"不触发**额外**扫描，但 Watch 自己的上界会"；RSS 相加的口径与 150 MiB 先验预算都已作废，修订记录见 [04-validation §4.1](04-validation.md) |
-| G10 本地与安全边界 | **达成** | `ipc-surface.mjs` 四分表覆盖注册表且无重叠；`EXITED_COMMANDS` 里远程一条不在注册面；无文件内容进 DOM（架构约束）；本轮又撤掉一个重复重置 | Windows/macOS 仍只是构建配置；RSS 缺口未闭合 |
+| G10 本地与安全边界 | **达成** | `ipc-surface.mjs` 四分表覆盖注册表且无重叠；`EXITED_COMMANDS` 里远程一条不在注册面；无文件内容进 DOM（架构约束）；本轮又撤掉一个重复重置 | Windows/macOS 仍只是构建配置；内存那一条已按 §4.1 的修订预算收口 |
 
 ### 5.2 发布阻断条件（`04-validation.md` §6 第一段）逐条
 

@@ -19,8 +19,8 @@
     "copyright": "2026 player-Muteki",
     "license": "MIT",
     "category": "DeveloperTool",
-    "shortDescription": "Low-resource desktop Git client",
-    "longDescription": "guit is a low-resource desktop Git client inspired by the VS Code source control sidebar. It drives the Git installed on your system, respects your Git configuration, hooks, signing setup and credential helpers, and never stores credentials itself.",
+    "shortDescription": "Small desktop Git client for local work",
+    "longDescription": "guit is a small desktop Git client inspired by the VS Code source control sidebar. It drives the Git installed on your system, respects your Git configuration, hooks, signing setup and credential helpers, and never stores credentials itself.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
