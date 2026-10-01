@@ -672,6 +672,16 @@ async fn search_repository(
 }
 
 #[tauri::command]
+fn cancel_search(state: State<'_, search::SearchState>, session_id: u64, query_id: u64) {
+    // A cleared field is no longer asking its question, so the scan answering the
+    // old one is stopped where it stands rather than walked to its window's end.
+    // It carries no repository state of its own: it names a question by the two
+    // numbers that identify it, and does nothing to either if the lane holds a
+    // different one.
+    state.cancel(session_id, query_id);
+}
+
+#[tauri::command]
 async fn list_refs(
     app: tauri::AppHandle,
     context: session::ReadContext,
@@ -1323,6 +1333,7 @@ fn main() {
             cancel_exttool,
             history_page,
             search_repository,
+            cancel_search,
             commit_files,
             open_commit_diff,
             list_refs,

@@ -377,6 +377,7 @@ const NOT_SESSION_BOUND = [
   "cancel_process_probe",
   "cancel_write",
   "cancel_exttool",
+  "cancel_search",
   "export_diagnostics",
 ];
 

@@ -26,13 +26,19 @@ const css = source("style.css");
 
 // --- the one read, and no other ---
 
-test("the search field asks one bound read and reaches nothing else", () => {
+test("the search field asks one bound read, cancels at most, and reaches nothing else", () => {
   // The import of `invoke` is a bare word, so anything that calls it is
   // immediately followed by its generic argument or by the name itself.
   const calls = search.match(/\binvoke[<(]/g) ?? [];
-  assert.equal(calls.length, 1, "the view owns exactly one command call");
+  // One bound read, plus the cancellation that stops a scan the reader has
+  // stopped waiting for. A cancellation is neither a read nor a write: it names
+  // a question by the two numbers that identify it and changes no repository
+  // state. Anything a third call would be is something this view may not do.
+  assert.equal(calls.length, 2, "the view owns one read and at most the cancellation");
   const ask = search.match(/invoke<SessionRead<SearchPage>>\("search_repository", \{[\s\S]*?\}\)/);
-  assert.ok(ask, "and it is the search read");
+  assert.ok(ask, "and one of them is the search read");
+  assert.match(search, /invoke\("cancel_search", \{ sessionId: lane\.sessionId, queryId: lane\.queryId \}\)/,
+    "the other is the cancellation, naming the question by the pair the lane is keyed on");
   // The bound-read gate in `ipc-surface.mjs` reads the frontend literals for
   // every command it classifies; this is the same rule stated where a search
   // answer could otherwise be read as belonging to no session at all.
@@ -40,6 +46,19 @@ test("the search field asks one bound read and reaches nothing else", () => {
   // A write carries the snapshot version it was bound to. Nothing in this file
   // may mention one, because nothing in this file may write.
   assert.doesNotMatch(search, /snapshot_version|snapshotVersion/, "a search never names a snapshot to write against");
+});
+
+test("an emptied field and a closing session stop the scan, not just the next question", () => {
+  // A fresh query displaces the one before it by itself — the backend stops the
+  // lane when a newer question claims it. What nothing displaces is a scan whose
+  // question the reader has taken away: an emptied field, a closed repository and
+  // a view that goes away. Without a cancellation in those three, the walk under
+  // way is run to its window's end for an answer nobody is waiting for.
+  assert.match(search, /const stopScan = \(\): void => \{[\s\S]*?invoke\("cancel_search"/,
+    "the view has one way to stop a scan");
+  const callers = search.match(/stopScan\(\)/g) ?? [];
+  // Three call sites: the emptied field, the closed session, and the disposal.
+  assert.equal(callers.length, 3, "stopScan is called from the emptied field, the closed session and the disposal");
 });
 
 test("the layer is its own, not the shell's single overlay slot", () => {

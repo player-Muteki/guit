@@ -781,6 +781,25 @@ impl Ticket<'_> {
     }
 }
 
+impl SearchState {
+    /// Stops the scan of one question where it stands.
+    ///
+    /// The lane is left in place: the window already on its way holds a `Ticket`
+    /// and gives the lane back when it returns, and clearing it here would hand a
+    /// second search a free lane while the first is still walking the history. A
+    /// claim that names another question, or another repository, is not this
+    /// reader's to stop — a field that was cleared and retyped must not cancel
+    /// the question it is now asking.
+    pub fn cancel(&self, session_id: u64, query_id: u64) {
+        let lane = crate::util::guard(&self.lane);
+        if let Some(claim) = lane.as_ref() {
+            if claim.session_id == session_id && claim.query_id == query_id {
+                claim.cancelled.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 /// The commit a scan walks: the one the session was published with, or, when the
 /// snapshot names none — a bare repository, where Git reports no status — the
 /// one `HEAD` resolves to. `HEAD` itself never reaches argv: what does is the
@@ -1827,6 +1846,59 @@ mod tests {
             .expect("second window");
         assert!(Arc::ptr_eq(&first.claim.cancelled, &second.claim.cancelled));
         assert!(!second.cancelled().load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn cancelling_the_question_on_screen_stops_its_scan_where_it_stands() {
+        let opened = open_session(five());
+        let lane = SearchState::default();
+        let ticket = lane.begin(opened.view.session_id, 7).expect("begin");
+        assert!(!ticket.cancelled().load(Ordering::Relaxed));
+        // An emptied field stops the question that was on screen.
+        lane.cancel(opened.view.session_id, 7);
+        assert!(ticket.cancelled().load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_cancellation_names_one_question_and_leaves_the_lane_held() {
+        let opened = open_session(five());
+        let lane = SearchState::default();
+        let ticket = lane.begin(opened.view.session_id, 3).expect("begin");
+        // Neither another question nor another repository is this reader's to
+        // stop: a field that was cleared and retyped must not cancel the
+        // question it is asking now.
+        lane.cancel(opened.view.session_id, 4);
+        lane.cancel(opened.view.session_id + 1, 3);
+        assert!(!ticket.cancelled().load(Ordering::Relaxed));
+        // And the lane stays held by the window already on its way, which gives
+        // it back when it returns — clearing it here would hand a second search
+        // a free lane while the first is still walking the history.
+        assert!(crate::util::guard(&lane.lane)
+            .as_ref()
+            .is_some_and(|claim| claim.query_id == 3));
+        // A cancellation for a question that was never asked is simply nothing.
+        lane.cancel(opened.view.session_id, 99);
+        assert!(!ticket.cancelled().load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_cancelled_scan_reports_that_it_was_stopped() {
+        // The same refusal a superseded question gets, reached by a different
+        // door: a view rendering an empty answer instead would say "nothing
+        // matched" about a search that was cut off.
+        let opened = open_session(five());
+        let lane = SearchState::default();
+        let ticket = lane.begin(opened.view.session_id, 2).expect("begin");
+        lane.cancel(opened.view.session_id, 2);
+        let error = scan(
+            opened.fixture.dir(),
+            &opened.fixture.head,
+            "crash",
+            0,
+            ticket.cancelled(),
+        )
+        .expect_err("cancelled");
+        assert_eq!(error.code.as_str(), "process_cancelled");
     }
 
     #[test]

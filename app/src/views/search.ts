@@ -144,6 +144,18 @@ export function createSearchView(deps: SearchDeps): SearchView {
     field.removeAttribute("aria-activedescendant");
   };
 
+  // Stops a scan that is no longer answering a question on screen. A fresh
+  // query displaces the old one by itself — the backend stops the lane when a
+  // newer question claims it — but an emptied field never claims anything, so
+  // without this the scan under way would be walked to its window's end for an
+  // answer nobody is waiting for. It names the question by the pair the lane is
+  // keyed on, so a field that was cleared and retyped stops the question that
+  // was on screen, never the one being asked now.
+  const stopScan = (): void => {
+    if (lane.queryId === 0 || lane.sessionId === 0) return;
+    void invoke("cancel_search", { sessionId: lane.sessionId, queryId: lane.queryId });
+  };
+
   // --- asking -------------------------------------------------------
 
   const clearAnswer = (): void => {
@@ -227,6 +239,7 @@ export function createSearchView(deps: SearchDeps): SearchView {
     if (state === null) return;
     if (state.query === null) {
       // An empty field is not a half-typed question; it is no question at all.
+      stopScan();
       clearAnswer();
       render();
       return;
@@ -473,6 +486,7 @@ export function createSearchView(deps: SearchDeps): SearchView {
   onDispose(() => {
     document.removeEventListener("click", onOutside, true);
     if (timer !== undefined) window.clearTimeout(timer);
+    stopScan();
   });
 
   // --- lifecycle ----------------------------------------------------
@@ -487,6 +501,7 @@ export function createSearchView(deps: SearchDeps): SearchView {
         window.clearTimeout(timer);
         timer = undefined;
       }
+      stopScan();
       typing = null;
       field.value = "";
       synced = null;

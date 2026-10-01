@@ -66,6 +66,11 @@ const NEVER_READ = ["stash_list", "list_worktrees", "submodule_status", "commit_
 // keystroke, so every case above that counts a refresh must also be able to say
 // that the field asked for nothing.
 const SEARCH_READS = ["search_repository"];
+// The commands that stop work rather than ask for it. A cancellation carries no
+// repository state and produces no answer, so it is counted on its own: folded
+// into the reads it would either hide a scan that is still walking the history
+// or make a read budget that never wanted to count it look wrong.
+const CANCELLATIONS = ["cancel_search"];
 
 const fileView = (id, group, display, extra) => ({
   id,
@@ -908,6 +913,13 @@ async function main() {
   check("emptying the field asks for nothing and takes the layer down",
     total(emptied, SEARCH_READS) === 0 && (await evaluate("document.querySelector('.search-results').hidden")),
     JSON.stringify(emptied));
+  // The scan that was answering the question the reader just took away is
+  // stopped where it stands rather than walked to its window's end. A
+  // cancellation is not a read, so the count of reads above stays at zero while
+  // this one command is emitted exactly once, naming the question by the pair
+  // the backend's lane is keyed on.
+  check("emptying the field cancels the scan it stopped waiting for, once",
+    total(emptied, CANCELLATIONS) === 1, JSON.stringify(emptied));
 
   // The search reads the history on screen, so it follows the graph's own rule:
   // the backend's counter retired the answer, and the reader's question is still
