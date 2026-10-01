@@ -7,6 +7,23 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { createGitFixture } from "./helpers/git.mjs";
 
+// Windows (NTFS) forbids `"`, `*`, `?` and several others in a filename, and
+// this test's whole point is names a careless implementation would mangle. A
+// host that cannot represent a name is not a host this test can run on, so the
+// name is probed and dropped rather than the assertion being weakened for
+// everyone: the names the filesystem does accept are still carried verbatim
+// through porcelain v2 -z.
+function canRepresent(root, name) {
+  const path = join(root, name);
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 test("a hostile GIT_* environment in the parent process cannot reach the fixture", () => {
   const previous = process.env.GIT_DIR;
   process.env.GIT_DIR = "/does/not/exist";
@@ -93,7 +110,8 @@ test("hostile file names survive init, add and porcelain v2 -z untouched", () =>
       "back\\slash.txt",
       "ünïcödé-🎸.txt",
       `${"very-long-directory-name-".repeat(4)}x/${"f".repeat(80)}.txt`,
-    ];
+    ].filter((name) => canRepresent(fixture.directory, name));
+    assert.ok(names.length >= 5, "the host filesystem refused almost every hostile name");
     for (const name of names) {
       mkdirSync(dirname(join(fixture.directory, name)), { recursive: true });
       writeFileSync(join(fixture.directory, name), "content\n");
