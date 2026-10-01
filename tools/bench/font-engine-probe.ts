@@ -95,11 +95,18 @@ function drawn(text: string, stack: string): string {
 }
 
 function measuredHeight(className: string): number {
+  // A commit row is a row of the graph's list, and the sheet says so: the rule
+  // that gives it its height is named under `.history-list`. A bare `div` in the
+  // body would measure nothing, which is the point — the row is only a row
+  // inside the list that draws it.
+  const host = document.createElement("div");
+  host.className = className === "commit-row" ? "history-list" : "";
   const row = document.createElement("div");
   row.className = className;
-  document.body.appendChild(row);
+  host.appendChild(row);
+  document.body.appendChild(host);
   const height = row.getBoundingClientRect().height;
-  row.remove();
+  host.remove();
   return height;
 }
 

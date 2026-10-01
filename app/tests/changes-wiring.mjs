@@ -168,3 +168,49 @@ test("the verbs of one row are decided in one place", () => {
     assert.match(model, new RegExp(`export function ${name}\\(`), `${name} must live in the pure model`);
   }
 });
+
+// --- the commit box is not a row of the graph ---
+
+test("the commit box carries its own name, and the graph's row name stays in the graph", () => {
+  // One name for two boxes is how a box ends up wearing another one's rules.
+  // `.commit-row` fixes a row's height, pointer and hover tint because it is a
+  // selectable commit in the graph's list; the commit box in the changes area is
+  // a row of controls, and inheriting that made it as tall as a commit row and
+  // lit it up under the mouse as though it were selected. The two stylesheets
+  // are kept apart here so that cannot come back by renaming.
+  assert.match(changes, /class: "commit-actions"/,
+    "the changes area's commit box is named for what it is");
+  assert.doesNotMatch(changes, /class: "commit-row"/,
+    "the changes area must not claim the graph's row name");
+  const css = source("style.css");
+  // Every rule that draws a commit row is named under the graph's own list.
+  for (const selector of [
+    /\.history-list \.commit-row \{/,
+    /\.history-list \.commit-row:hover \{/,
+    /\.history-list \.commit-row\.selected \{/,
+    /\.history-list \.commit-row\.flash \{/,
+    /\.history-list \.commit-row\.head \.graph-gutter/,
+    /\.history-list \.commit-row\.selected \.graph-gutter/,
+  ]) {
+    assert.match(css, selector, `style.css must draw the graph's rows under ${selector}`);
+  }
+  // And no bare `.commit-row` rule is left to be inherited by whatever comes next.
+  assert.doesNotMatch(css, /(^|[},]\s*)\.commit-row(?![\w-])/,
+    "no unscoped .commit-row rule may remain");
+  assert.match(css, /\.commit-footer \.commit-actions \{/,
+    "the commit box's own row rule names it as it is now called");
+});
+
+test("the reset field and the button beside it take one line height", () => {
+  // `.btn` writes `font: inherit` and `.reset-input` did not, so the input's line
+  // height came from the engine's default and the two boxes in a
+  // `align-items: center` row could not share a top edge — measured at 8.5px
+  // apart at the narrowest supported width and the largest interface scale.
+  const css = source("style.css");
+  const rule = css.match(/\.reset-input\s*\{[^}]*\}/);
+  assert.ok(rule, "the reset field is styled");
+  assert.match(rule[0], /font:\s*inherit;/,
+    "the reset field takes the panel's own text before it names a family and a size");
+  assert.match(source("views/changes.ts"), /reset-input/,
+    "the field the rule describes is the one the changes area builds");
+});

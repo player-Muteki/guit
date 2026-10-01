@@ -568,11 +568,21 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .file-list { flex: 1 1 auto; padding-inline: 0.75rem; }
 .commit-footer { flex: 0 0 auto; border-top: 1px solid var(--line); padding: 0.4rem 0.75rem 0.5rem; background: var(--surface-panel); }
 .commit-input { width: 100%; min-height: 2.4rem; resize: vertical; padding: 0.35rem 0.5rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text); font: inherit; font-size: var(--text-sm); }
-.commit-footer .commit-row { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; }
+.commit-footer .commit-actions { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; }
 /* The clean restore's ask, beside the commit's: an id is typed and read in the
    same shape the graph prints it in, so a monospace field is the honest width. */
-.commit-footer .reset-row { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; }
-.reset-input { flex: 1 1 auto; min-width: 0; padding: 0.25rem 0.5rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text); font-family: var(--font-mono); font-size: var(--text-sm); }
+.commit-footer .reset-row { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.3rem; }
+/* The button's label is one line whatever the window, and the row wraps the
+   field onto its own line above it rather than letting the label break across
+   three: a button three lines tall beside a one-line field leaves
+   `align-items: center` centring a short box in a tall one, so their top edges
+   stop agreeing — measured at the narrowest supported width under the largest
+   interface scale. `flex: 1 1 8rem` on the field is what asks for the wrap. */
+.reset-row .btn { white-space: nowrap; }
+/* `font: inherit` before the family and the size: an input that does not take
+   the panel's line height is a different height from the button beside it, and
+   `align-items: center` then centres two boxes whose tops cannot agree. */
+.reset-input { flex: 1 1 8rem; min-width: 0; padding: 0.25rem 0.5rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text); font: inherit; font-family: var(--font-mono); font-size: var(--text-sm); }
 .reset-input:disabled { opacity: 0.55; }
 
 /* --- history view --- */
@@ -597,20 +607,24 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .history-anchored { flex: 0 1 auto; min-width: 0; font-size: var(--text-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A row that has just been jumped to flashes once, so the eye can find where
    a reveal or a write landed in a long list. Respects reduced motion. */
-.commit-row.flash { animation: row-flash 0.9s ease-out; }
+.history-list .commit-row.flash { animation: row-flash 0.9s ease-out; }
 @keyframes row-flash {
   0% { background: var(--accent-soft); }
   100% { background: transparent; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .commit-row.flash { animation: none; outline: 2px solid var(--accent); outline-offset: -2px; }
+  .history-list .commit-row.flash { animation: none; outline: 2px solid var(--accent); outline-offset: -2px; }
 }
 .btn-quiet { padding: 0.1rem 0.35rem; font-size: var(--text-xs); color: var(--text-muted); background: transparent; border: 1px solid transparent; }
 .btn-quiet:hover { background: var(--surface-hover); }
 .history-list { flex: 1 1 45%; min-height: 0; overflow-y: auto; padding-inline: 0.75rem; container-type: inline-size; }
-.commit-row { display: flex; align-items: baseline; gap: 0.4rem; height: var(--row-height-history); padding-inline: 0.3rem; border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-sm); overflow: hidden; }
-.commit-row:hover { background: var(--surface-hover); }
-.commit-row.selected { background: var(--surface-active); }
+/* A commit row is a row of the graph's list, so every rule that draws one is
+   named under that list. The commit box in the changes area carries its own
+   name for the same reason: a row's height, its pointer and its hover tint are
+   facts about a selectable commit, not about any box with a box in it. */
+.history-list .commit-row { display: flex; align-items: baseline; gap: 0.4rem; height: var(--row-height-history); padding-inline: 0.3rem; border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-sm); overflow: hidden; }
+.history-list .commit-row:hover { background: var(--surface-hover); }
+.history-list .commit-row.selected { background: var(--surface-active); }
 /* Each cell is a fixed width and the subject flexes, so the subject's left
    edge and the author/date columns all line up down the whole list. A reader
    can scan a column instead of re-finding where each row's text begins. rem,
@@ -699,8 +713,8 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 /* The graph acknowledges where you are. The checked-out commit's node is a
    heavier ring, and the selected row's node gains a halo, so following the
    eye down the gutter lands on a marked dot rather than on tinted text. */
-.commit-row.head .graph-gutter .graph-node[data-shape="normal"] { fill: none; stroke: currentColor; stroke-width: var(--graph-ring); }
-.commit-row.selected .graph-gutter .graph-node { stroke-width: var(--graph-ring); filter: drop-shadow(0 0 0.1rem currentColor); }
+.history-list .commit-row.head .graph-gutter .graph-node[data-shape="normal"] { fill: none; stroke: currentColor; stroke-width: var(--graph-ring); }
+.history-list .commit-row.selected .graph-gutter .graph-node { stroke-width: var(--graph-ring); filter: drop-shadow(0 0 0.1rem currentColor); }
 /* The graph answers the mouse: entering a row's gutter grows that row's
    node, so the eye learns the gutter is live without opening the detail
    pane first. `r` rather than `transform`, because a scale would thicken

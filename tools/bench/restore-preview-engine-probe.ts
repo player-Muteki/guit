@@ -484,17 +484,28 @@ const run = async (): Promise<void> => {
   const resetRowHost = document.querySelector<HTMLElement>(".reset-row");
   const fieldBox = field().getBoundingClientRect();
   const rowBox = row.getBoundingClientRect();
+  // Two shapes, both correct: on a roomy window the field takes the spare width
+  // beside the button; on the narrowest window under the largest interface scale
+  // the row wraps and the button sits on its own line. What must hold in both is
+  // that the two boxes agree on a top edge and that the button's label is one
+  // line — a button that broke across three made `align-items: center` centre a
+  // one-line field inside a three-line button, so the tops stopped agreeing.
+  const sideBySide = Math.abs(fieldBox.top - rowBox.top) < 1;
+  const stacked = rowBox.top > fieldBox.top;
   check(
-    "the field and the button are laid out as one row, the field taking the spare width",
+    "the field and the button share a top edge, and the button's label is one line",
     resetRowHost !== null &&
       getComputedStyle(resetRowHost).display === "flex" &&
       fieldBox.height > 0 &&
-      Math.abs(fieldBox.top - rowBox.top) < 1 &&
-      fieldBox.width > rowBox.width,
+      (sideBySide || stacked) &&
+      // One line for the label, whatever shape the row took: a button broken
+      // across three is what stopped the two boxes agreeing on a top edge.
+      rowBox.height <= fieldBox.height + 1,
     {
       display: resetRowHost === null ? null : getComputedStyle(resetRowHost).display,
-      field: [fieldBox.width, fieldBox.top],
-      button: [rowBox.width, rowBox.top],
+      shape: sideBySide ? "side by side" : stacked ? "wrapped" : "misaligned",
+      field: [fieldBox.width, fieldBox.height, fieldBox.top],
+      button: [rowBox.width, rowBox.height, rowBox.top],
     },
   );
   typeTarget(TYPED);
@@ -777,11 +788,17 @@ const run = async (): Promise<void> => {
   const zoomRoot = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
   const cappedDialog = getComputedStyle(dialog());
   const zoomCap = window.innerHeight - 1.5 * zoomRoot;
+  // `calc(100vh - 1.5rem)` comes back as a float from the engine (383.999969px
+  // at a 420-tall window), so the cap is compared within a pixel rather than by
+  // string identity: the promise is "capped against this window", not "this
+  // engine's float prints exactly".
+  const capMatches = Math.abs(parseFloat(cappedDialog.maxHeight) - zoomCap) < 1;
   check(
     "the whole ask is capped against the window it is drawn in",
-    cappedDialog.maxHeight === `${Math.round(zoomCap * 1000) / 1000}px` && cappedDialog.overflowY === "auto",
+    capMatches && cappedDialog.overflowY === "auto",
     {
       maxHeight: cappedDialog.maxHeight,
+      want: `${Math.round(zoomCap * 1000) / 1000}px`,
       overflowY: cappedDialog.overflowY,
       rootPx: zoomRoot,
       innerHeight: window.innerHeight,

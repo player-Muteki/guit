@@ -138,7 +138,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   });
   const commitFooter = el("div", { class: "commit-footer" }, [
     commitMessage,
-    el("div", { class: "commit-row" }, [
+    el("div", { class: "commit-actions" }, [
       el("label", { class: "checkbox" }, [commitAmend, el("span", { text: "Amend" })]),
       el("div", { class: "spacer" }),
       commitButton,
