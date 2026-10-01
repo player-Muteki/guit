@@ -240,8 +240,14 @@ def main():
         report.check("the commit box survives 340x400", "Commit message" in narrow)
         # The two regions are one page, and a page that only fits one of them at
         # the minimum size is the layout failure this whole stage exists to
-        # catch: the graph is there, scrollable or capped, not gone.
-        report.check("the commit history shares the page at 340x400", "Commit history" in narrow)
+        # catch: the graph is there, scrollable or capped, not gone. Asked
+        # through `reach()` rather than the showing-name set: at 340x400 the
+        # graph sits below the fold, and SHOWING carries this scroll position,
+        # not reachability — the node reports SHOWING the moment focus brings
+        # it into view. A check that read absence here would be reporting the
+        # scroll offset as a missing region.
+        report.check("the commit history shares the page at 340x400",
+                     reach("Commit history") is not None, "reached by focus")
         report.check("a file row's actions survive 340x400",
                      any(name.startswith("More actions for ") for name in narrow))
 
