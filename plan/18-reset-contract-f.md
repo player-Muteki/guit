@@ -1001,10 +1001,11 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
 
 ## 11. F06 的落地：入口开在更改区，这份预览第一次在窗口里被读出来
 
-三次提交：`c5fe9aa`（六类名单的名字：`restoreModel.ts` + `types.ts` + 新文件
+五次提交：`c5fe9aa`（六类名单的名字：`restoreModel.ts` + `types.ts` + 新文件
 `app/tests/restore-model.mjs`）、`ac1afd9`
-（注册表、更改区那一行、票据的分组渲染与样式）、以及本记录这两次（`1c02b2c` 修样式表里那两条
-死掉的规则并加一道守门，`1145bf4` 那份引擎探针）。`OUTLINE.md` §5.2（G06）那条要求到此第一次能用
+（注册表、更改区那一行、票据的分组渲染与样式）、本记录先前那两次（`1c02b2c` 修样式表里那两条
+死掉的规则并加一道守门，`1145bf4` 那份引擎探针），以及把退出门槛第三条关掉的那一次
+（`2d9add8`：整份询问封顶在它自己的窗口上）。`OUTLINE.md` §5.2（G06）那条要求到此第一次能用
 手指按到：更改区有提交号输入栏和重置按钮，直接按 Enter 只会起预览。
 
 ### 11.1 规则落到代码的哪一处
@@ -1030,6 +1031,11 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
   或夺走焦点"在代码里就是这一处条件。
 - **样式**：那 12rem 的上限放在包名单的那一层（`.dialog-names`）而不是某一条 `<ul>` 上，因为六段
   会各自叠起来；一份六段的预览需要一个滚动壳，而不是一串滚动壳。
+- **整份询问封顶在自己的窗口上**（`2d9add8`）：`.dialog` 取 `max-height: var(--dialog-cap)` 加
+  `overflow-y: auto`，而 `--dialog-cap` 是 `calc(100vh - 1.5rem)`——一个居中的盒子要保住居中所需
+  的那圈边距，写成 `rem` 所以界面缩放会带走它。它是 token 而不是表里的字面值，因为这张表禁止裸
+  `vh`，`responsive-check.py` 那条"这些 token 真的存在"的清单因此收了它。名单那一层同时加了
+  `flex-shrink: 0`：见 §11.3 那一格，它是矮窗口量出来的，不是设计时想到的。
 
 ### 11.2 动手时才定下来的三条
 
@@ -1044,9 +1050,9 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
   状态行说的是拒绝（`{"kind":"info","message":"The clean restore was refused before anything changed."}`）
   而不是把它画成一份空预览。
 
-### 11.3 引擎探针量到的，与它抓到的一处缺陷
+### 11.3 引擎探针量到的，与它抓到的两处缺陷
 
-`tools/bench/restore-preview-engine-probe.ts`：**44 条断言，fails=0**，引擎
+`tools/bench/restore-preview-engine-probe.ts`：**48 条断言，fails=0**，引擎
 `WebKit/605.1.15`。它建的是**一份真的更改区视图加一份真的预览控制器**（`probe-tauri-stub.ts` 仍是
 第一条 import，那条规则照旧），`preview_restore` 由一张会记录的表回答、`restore_clean` 由
 探针自己 settle，所以它能问"票是不是在 Git 答话之前就已经花掉了"这一类夹具问不了的问题。几条带
@@ -1070,6 +1076,15 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
 - 名单那一层：`{"maxHeight":"192px","overflowY":"auto","rootPx":16}`；40 条路径那一份是
   `{"scroll":759,"client":192}`，对话框盒子 `[150.297, 674, 549.688, 226]` 仍在 900×700 窗口之内，
   滚到底后最后一条 `src/module-39.ts` 的 bottom `502.688` 落在宿主 `[310.297, 502.297]` 之内。
+- 整份询问对窗口高度那四条，是在**面板自己能取的最大缩放**（`applyFontPx(FONT_MAX)`，rootPx 24）
+  上量的，措辞只问"这两种形状都要成立的那一句"，最后一格的 `which` 说本次量到的是哪一种：
+  900×700 里 `{"maxHeight":"664px","overflowY":"auto","rootPx":24,"innerHeight":700}`、盒子
+  `[48.203, 786, 651.797, 114]`、名单 `{"hostScroll":1181,"hostClient":288}`、
+  `{"which":"the ask fits this window","actionsBottom":635.203,"scrollTop":0}`；
+  900×400 里同一批断言给 `maxHeight:364px`、盒子 `[18, 786, 382, 114]`、名单仍是
+  `{"hostScroll":1181,"hostClient":288}`、`{"which":"the ask scrolls, and its buttons come with the
+  scroll","actionsBottom":365,"scrollTop":240}`；420×640 那趟是 `scrollTop:140`、
+  `actionsBottom:605`。
 - 空类那一格：0 段、一条 `<li>` 都没有，而标题那句照说。
 - 整场只发过 `preview_restore` 与 `restore_clean` 这两条命令；八次提问的参数键恰是各自命令绑的
   那些（`snapshotVersion+target` 七次、`nonce` 一次）；结尾 `{"open":false,"ticket":null}`。
@@ -1082,7 +1097,24 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
 经在树上活了两个提交。`1c02b2c` 因此带一道不需要显示器的守门：`app/tests/theme-css-model.mjs` 扫
 `style.css` 与 `style/tokens.css`，任何以 `//` 开头的行都红。
 
-**这一处的代价跨到别人那一行**：这两条规则自 `ac1afd9` 落地起就是死的，所以阶段 E 那一行先记下的
+**它抓到的第二处缺陷，只在矮窗口里存在**：给 `.dialog` 加上那条上限之后，那一条上限本身制造了
+这一格——一个 column flex 容器会压缩任何还能压缩的孩子，而整个对话框里唯一"有高度可让"的孩子就是
+那份受影响名单。探针先按原样量了一次 900×400：`.dialog-names` 的 `clientHeight` 从 288 掉到
+**48**；再到面板声明的最小窗口 340×400，它是 **0**——名单整层被挤没了，而它正是这份询问存在的理由。
+"窗口变化不藏住受影响清单"这一条就这样被一次正确的封顶给违反了。修法是一个属性：
+`.dialog-names { flex-shrink: 0; }`，于是名单守住自己的 12rem，多出来的高度由询问自己滚动（上面
+那批 900×400 的数就是修完之后量的：`hostClient:288`、`scrollTop:240`、按钮 bottom 365 落在 400
+之内）。这一格也说明为什么 `--window` 值得加：`webkit-engine-probe.py` 从此接受
+`--window=WIDTHxHEIGHT`（默认仍是 900×700），并把形状印在数字上面——一轮不说自己高度的探针，
+读起来跟另一轮形状下的那一轮没有区别。
+
+同一次 340×400 还让一条更早的断言变红了：`{"display":"flex","field":[160.5,193.859],"
+button":[149.109,185.359]}`——那一行的输入框与按钮不再共一条顶边（差 8.5px，按钮的字在小宽度下
+换成两行）。它量的是那一行的**宽度**事实，与这次的高度封顶无关：对话框在那一刻是关着的，而这条
+断言在 `applyFontPx` 之前跑。九支引擎探针过去只在 900×700 画过，所以它从未被这样问过；本轮不改
+它，把它记进 §11.5。
+
+**第一处缺陷的代价跨到别人那一行**：这两条规则自 `ac1afd9` 落地起就是死的，所以阶段 E 那一行先记下的
 数（"他的更改区按档位高了 29 到 54px"）是在缺陷存在的树上量的。本轮把九支引擎探针在 `1145bf4`
 重跑过（§11.4）；两支 CDP 探针由并行开发者在同一棵 `1145bf4` 上重跑（`layout-probe.mjs` 568 条
 ok、`read-budget.mjs` 50 条 ok，均 fails=0），他们把"结果层每一个数与 `ac1afd9` 一字不差"与"只有
@@ -1102,15 +1134,37 @@ ok、`read-budget.mjs` 50 条 ok，均 fails=0），他们把"结果层每一个
   src/style/tokens.css` **fails=0**。
 - 引擎探针全绿：restore 入口 **44 条**、branch-selector 44、appearance 34、search-layer 26、
   commit-bubble 24，theme / theme-lifecycle / graph-pan / font 各 **fails=0**。
+
+`2d9add8` 那一次在同一棵共享树上取（那一刻树上没有别人未提交的改动，HEAD 就是那一个提交）：
+
+- `npm run build` ✓ **48 modules transformed**（`index-Bj9BDPIF.css` 34.27 kB、
+  `index-BR-rB_l0.js` 131.05 kB）；`npm run test:fixture` **412 pass / 0 fail**（这一片没加夹具，
+  那两道样式门仍在这条通道里）。
+- `color-contrast.py dist/assets` **fails=0**；`responsive-check.py` **fails=0**——它先红过一次，
+  红的是 style.css 里那条裸 `100vh`，也就是 `--dialog-cap` 存在的原因。
+- 九支引擎探针全绿：restore 入口 **48 条**（在 900×700、900×400、420×640 三个形状上各一遍
+  fails=0，340×400 那一趟见 §11.3 末与 §11.5）、branch-selector 44、theme-lifecycle 36、
+  appearance 34、font 26、search-layer 26、theme 25、commit-bubble 24、graph-pan 15。
+- `layout-probe.mjs` 由本轮亲手跑：九个窗口尺寸、**568 条 ok、fails=0**，用的就是上面那一份
+  `app/dist`；headless Edge 154.0.4258.48 以临时 profile 起、跑完关掉删掉。
+- `cargo test` **398 passed / 0 failed**、`cargo fmt --check` 零 diff、
+  `cargo clippy --locked --all-targets` **0 告警**——Rust 一行未动，这三条是回归确认。
 - `cargo test` **398 passed / 0 failed**（`reset` 过滤器仍 45 条——这一片没加 Rust 用例，注册与
   前端只是把已经写完的那条链接通）、`cargo fmt --check` 零 diff、
   `cargo clippy --locked --all-targets` **0 告警**。
 
 ### 11.5 这一片没做完的
 
-- **两支 CDP 探针不是本轮重跑的**：`layout-probe.mjs`（568 条 ok）与 `read-budget.mjs`（50 条 ok）
-  在 `1145bf4` 上各跑过一遍且 fails=0，但那是并行开发者为他们自己那一刀做的，本轮只是引用他们的
-  数（§11.3 末尾）。本轮亲手跑的是 build、夹具、两道样式 gate 与九支引擎探针。
+- **`read-budget.mjs` 不是本轮重跑的**：它上一次由并行开发者在 `1145bf4` 上跑（50 条 ok、
+  fails=0），本轮只重跑了同一组的 `layout-probe.mjs`（§11.4）。这一片只动 `.dialog` 与
+  `.dialog-names` 两条规则、外加探针的窗口参数，那条通道量的是搜索一层从按键到首行的时间，
+  但"没量"仍然是"没量"，不写成"不影响"。
+- **340×400 那一格开着**：面板声明的最小宽度配上最大缩放时，重置行的输入框与按钮不再共一条
+  顶边（§11.3 末）。它是那一行的宽度事实，本轮把它量出来了、没有修；修它要在 `.btn` 或
+  `.reset-row` 上做一个关于换行的决定，而那一条决定的归属是九窗口那道门，不是这份恢复。
+- **名单在真短窗口里还剩几行没量**：`--dialog-cap` 让询问自己滚动，340×400 那一趟也证了名单
+  守住了 12rem；但"400px 高的窗口里滚动一份 40 条路径的名单，用户实际看见几行"这一问本轮没
+  有断言——它问的是可读性，不是可达性，那一条通道是 AT-SPI 那三支探针而不是这支。
 - **端到端毫秒没量**：`preview_restore` 在探针里由一张表于微任务中回答，所以"按下 Enter 到名单
   出现"不是这条通道的时间。后端那一窗只有 §6.6 的七条进程加和（约 15 ms 中位）与 §10.3 的事后两
   条（约 17 ms），两者都不是这条通道上的一次墙钟观测；真 Tauri 的 IPC 往返同理没量。

@@ -213,7 +213,9 @@ release it belongs to did not measure.
   refresh and are cleared by opening another repository and by nothing else. What is
   measured here is this surface — the six groups drawn in the order the steps do them,
   focus returning to the row that opened the dialog, a forty-path list scrolling inside
-  the window instead of growing past it — on the one Linux host and rendering engine
+  the window instead of growing past it, and the whole ask capped against the height of
+  the window it is drawn in so that a short one scrolls the ask rather than hiding the
+  paths or the button under its own edge — on the one Linux host and rendering engine
   every other record here comes from. The two steps' own outcomes, a restore that ran
   one of them and not the other and which promised paths are still on disk, are
   reported and tested in the backend; the time from Enter to that list has not been
