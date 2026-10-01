@@ -305,9 +305,6 @@ const BOUND_READS = [
   "open_commit_diff",
   "list_refs",
   "show_tag",
-  "stash_list",
-  "list_worktrees",
-  "submodule_status",
 ];
 
 // Writes and previews: bound by the snapshot they were decided from. The version
@@ -326,10 +323,6 @@ const SNAPSHOT_BOUND = [
   "preview_delete_branch",
   "create_tag",
   "preview_delete_tag",
-  "stash_save",
-  "stash_apply",
-  "preview_stash_pop",
-  "preview_stash_drop",
   "merge_start",
   "rebase_start",
   "operation_continue",
@@ -339,9 +332,6 @@ const SNAPSHOT_BOUND = [
   "revert_commit",
   "reset",
   "preview_restore",
-  "add_worktree",
-  "preview_remove_worktree",
-  "prune_worktrees",
 ];
 
 // The confirming half of a destructive operation: bound by the single-use ticket
@@ -351,10 +341,7 @@ const TICKET_BOUND = [
   "clean_files",
   "delete_branch",
   "delete_tag",
-  "stash_pop",
-  "stash_drop",
   "restore_clean",
-  "remove_worktree",
 ];
 
 // Everything else, listed by why it is exempt: these commands open, close,

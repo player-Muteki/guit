@@ -37,15 +37,6 @@ pub(crate) enum Bound {
         oid: String,
         force: bool,
     },
-    /// A `stash@{N}` entry, bound to the commit oid that selector resolved to.
-    /// `action` keeps a drop confirmation from ever authorizing a pop: the two
-    /// share a shape but never a confirmation, because one discards the
-    /// changes and the other applies them.
-    StashEntry {
-        action: StashAction,
-        selector: String,
-        oid: String,
-    },
     /// A clean restore: the whole computed plan, not a display list. The
     /// preview may show these sets grouped and paginated, but every one of
     /// them is a fact the confirmation re-reads — the target and HEAD, the
@@ -54,8 +45,6 @@ pub(crate) enum Bound {
     /// not be in the way. A plan read out of a ticket can therefore never be
     /// narrower than the plan that was shown.
     Restore { plan: crate::reset::Restoration },
-    /// Remove a worktree bound to the HEAD it had when previewed.
-    WorktreeRemove { path: String, head: String },
 }
 
 #[derive(Debug)]
@@ -71,15 +60,6 @@ pub(crate) struct Preview {
 pub(crate) enum RefTarget {
     Branch,
     Tag,
-}
-
-/// Which end of a stash entry a `StashEntry` ticket is for. Dropping and
-/// popping are confirmed separately: pop re-applies the entry, drop throws it
-/// away, so one confirmation must never authorize the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StashAction {
-    Drop,
-    Pop,
 }
 
 /// Serializes every Git write in the repository, strictly in order.
@@ -146,25 +126,6 @@ impl WriteState {
         })
     }
 
-    /// Ticket for a stash entry, bound to the commit its selector resolved
-    /// to at preview time.
-    pub(crate) fn stage_stash_entry(
-        &self,
-        action: StashAction,
-        work_root: PathBuf,
-        selector: String,
-        oid: String,
-    ) -> String {
-        self.stage_preview(Preview {
-            work_root,
-            bound: Bound::StashEntry {
-                action,
-                selector,
-                oid,
-            },
-        })
-    }
-
     /// Ticket for a clean restore, bound to the whole affected plan. Nothing is
     /// narrowed here: the plan that was computed is the plan that is re-read,
     /// so a preview cannot promise a set the confirmation stops checking. A
@@ -182,20 +143,6 @@ impl WriteState {
         self.stage_preview(Preview {
             work_root,
             bound: Bound::Restore { plan },
-        })
-    }
-
-    /// Ticket for removing a worktree, bound to the path and the HEAD oid
-    /// it carried when previewed.
-    pub(crate) fn stage_worktree_remove(
-        &self,
-        work_root: PathBuf,
-        path: String,
-        head: String,
-    ) -> String {
-        self.stage_preview(Preview {
-            work_root,
-            bound: Bound::WorktreeRemove { path, head },
         })
     }
 
@@ -484,10 +431,6 @@ pub enum OperationKind {
     BranchDelete,
     TagCreate,
     TagDelete,
-    StashSave,
-    StashApply,
-    StashPop,
-    StashDrop,
     Merge,
     Rebase,
     CherryPick,
@@ -501,9 +444,6 @@ pub enum OperationKind {
     /// rather than `ResetHard` with a longer message, because the answer it
     /// reports is about two Git processes and not one.
     Restore,
-    WorktreeAdd,
-    WorktreeRemove,
-    WorktreePrune,
 }
 
 /// The write kinds that run as a bare path-scoped `git <prefix> -- <paths>`.
@@ -1324,14 +1264,14 @@ mod tests {
                 }
             )
         }
-        fn read_pop(ticket: Preview) -> bool {
-            matches!(
-                ticket.bound,
-                Bound::StashEntry {
-                    action: StashAction::Pop,
-                    ..
-                }
-            )
+        // A discard and a clean are the two tickets a reader could confuse: both
+        // name paths, both take a work root, and one removes what the other
+        // restores.
+        fn read_discard(ticket: Preview) -> bool {
+            matches!(ticket.bound, Bound::Discard { .. })
+        }
+        fn read_clean(ticket: Preview) -> bool {
+            matches!(ticket.bound, Bound::Clean { .. })
         }
         let root = PathBuf::from("/repository");
         let oid = "0".repeat(40);
@@ -1375,24 +1315,37 @@ mod tests {
             }
         }));
 
-        // A pop ticket is not a drop ticket.
-        let pop_state = WriteState::default();
-        let pop_nonce = pop_state.stage_stash_entry(
-            StashAction::Pop,
-            root.clone(),
-            "stash@{0}".to_owned(),
-            oid.clone(),
+        // A discard ticket is not a clean ticket, and a clean the other way
+        // round is not a discard: the second restores work-tree edits, the
+        // first deletes untracked paths. Both are staged through the same
+        // slot, so what the dispatcher reads back is all that separates them.
+        let clean_state = WriteState::default();
+        let clean_nonce = clean_state.stage_preview(Preview {
+            work_root: root.clone(),
+            bound: Bound::Discard {
+                paths: vec![b"tracked.txt".to_vec()],
+            },
+        });
+        assert!(read_discard(clean_state.take_bound(&clean_nonce).unwrap()));
+        assert!(
+            !read_clean(Preview {
+                work_root: root.clone(),
+                bound: Bound::Discard {
+                    paths: vec![b"tracked.txt".to_vec()],
+                },
+            }),
+            "the clean reader must not accept a discard ticket"
         );
-        let pop_ticket = pop_state.take_bound(&pop_nonce).unwrap();
-        assert!(read_pop(pop_ticket));
-        assert!(!read_pop(Preview {
-            work_root: root,
-            bound: Bound::StashEntry {
-                action: StashAction::Drop,
-                selector: "stash@{0}".to_owned(),
-                oid,
-            }
-        }));
+        assert!(
+            !read_discard(Preview {
+                work_root: root.clone(),
+                bound: Bound::Clean {
+                    paths: vec![b"extra.txt".to_vec()],
+                    all_untracked: false,
+                },
+            }),
+            "the discard reader must not accept a clean ticket"
+        );
     }
 
     #[test]

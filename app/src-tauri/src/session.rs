@@ -62,7 +62,12 @@ pub enum ReadDomain {
     /// The branch, tag and remote-tracking names in the repository.
     Refs,
     /// A listing no refresh domain owns yet: bound to the session alone, so it
-    /// survives a refresh and dies with the session.
+    /// survives a refresh and dies with the session. No command asks this today
+    /// — the listings that used to (`stash_list`, `list_worktrees`,
+    /// `submodule_status`) left with the views no page reached — but the arm
+    /// stays because it is what the next such listing must ask with, and its
+    /// semantics are pinned by the test below rather than left to be inferred.
+    #[allow(dead_code)]
     Session,
 }
 
