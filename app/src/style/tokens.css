@@ -427,6 +427,12 @@
      the same height would ask for and scrolls inside it; nothing below it
      moves, because it is not in the panel's flow. */
   --search-cap: 40vh;
+  /* A modal is drawn in the top layer, so no window scrolls for it: an ask that
+     does not fit its own height has to scroll itself, or the controls at its
+     bottom are a target the pointer cannot land on. The cap leaves the margin a
+     centred box needs to stay centred, and it is a token like the caps above
+     because nothing else in the sheet may take a bare vh. */
+  --dialog-cap: calc(100vh - 1.5rem);
 }
 
 /* Short windows. Height is the axis that runs out first: the shell spends

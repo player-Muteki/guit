@@ -49,6 +49,8 @@ import {
 import { publishSnapshot } from "../../app/src/snapshotBus";
 import { createChangesView } from "../../app/src/views/changes";
 import { createPreviewController } from "../../app/src/dialogs/preview";
+import { applyFontPx } from "../../app/src/font";
+import { FONT_DEFAULT, FONT_MAX } from "../../app/src/preferencesModel";
 import type { BranchView, OperationResult, RestorePreviewResult, SnapshotView } from "../../app/src/types";
 
 interface Check {
@@ -761,10 +763,61 @@ const run = async (): Promise<void> => {
     lastBox !== undefined && lastBox.bottom <= hostBox.bottom + 1 && lastBox.top >= hostBox.top - 1,
     { last: host.querySelector("li:last-child")?.textContent, lastBox, hostBox: [hostBox.top, hostBox.bottom] },
   );
+  // --- the ask against the height of the window it is drawn in ---
+  // A modal is drawn in the top layer, so no window scrolls for it: the ask either
+  // fits the window or scrolls itself, and the second case is where a name or a
+  // button can end up under the bottom edge. Two of the panel's own forces decide
+  // which case a user is in — the window's height, and the interface zoom, which
+  // grows every `rem` in the sheet while `100vh` stays the window's — so this is
+  // measured at the largest zoom the panel offers and phrased to hold whichever way
+  // the two come out. The last detail says which case the run measured; a short
+  // `--window` on the harness is how the other one is read.
+  applyFontPx(FONT_MAX);
+  await settle();
+  const zoomRoot = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+  const cappedDialog = getComputedStyle(dialog());
+  const zoomCap = window.innerHeight - 1.5 * zoomRoot;
+  check(
+    "the whole ask is capped against the window it is drawn in",
+    cappedDialog.maxHeight === `${Math.round(zoomCap * 1000) / 1000}px` && cappedDialog.overflowY === "auto",
+    {
+      maxHeight: cappedDialog.maxHeight,
+      overflowY: cappedDialog.overflowY,
+      rootPx: zoomRoot,
+      innerHeight: window.innerHeight,
+    },
+  );
+  const tallBox = dialog().getBoundingClientRect();
+  check(
+    "so the ask is drawn inside the window instead of past its bottom edge",
+    tallBox.top >= 0 && tallBox.bottom <= window.innerHeight + 1,
+    { box: [tallBox.top, tallBox.right, tallBox.bottom, tallBox.left], window: [window.innerWidth, window.innerHeight] },
+  );
+  const zoomHost = namesHost();
+  check(
+    "the list keeps its own scroll, so the ask's cap does not swallow the names",
+    zoomHost.scrollHeight > zoomHost.clientHeight && zoomHost.clientHeight > 0,
+    { hostScroll: zoomHost.scrollHeight, hostClient: zoomHost.clientHeight },
+  );
+  const actions = dialog().querySelector(".dialog-actions") as HTMLElement | null;
+  const askScrolls = actions !== null && actions.getBoundingClientRect().bottom > window.innerHeight + 1;
+  dialog().scrollTop = dialog().scrollHeight;
+  await settle();
+  const reached = actions?.getBoundingClientRect();
+  check(
+    "and the buttons that confirm or refuse are reachable by scrolling the ask itself",
+    reached !== undefined && reached.bottom <= window.innerHeight + 1 && reached.top >= tallBox.top - 1,
+    {
+      which: askScrolls ? "the ask scrolls, and its buttons come with the scroll" : "the ask fits this window",
+      actionsBottom: reached?.bottom,
+      scrollTop: dialog().scrollTop,
+    },
+  );
+  dialog().scrollTop = 0;
+  applyFontPx(FONT_DEFAULT);
+  await settle();
   actionNamed("Keep everything").click();
   await settle();
-
-  // --- a target that no longer names one commit ---
   openStage(AMBIGUOUS_SESSION);
   await settle();
   typeTarget(AMBIGUOUS);

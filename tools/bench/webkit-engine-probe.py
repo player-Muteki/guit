@@ -19,11 +19,15 @@ file whose tokens are missing; one that steps outside the app directory is refus
 rather than served, because a probe measuring against a sheet that is not the
 panel's is evidence about nothing.
 
-Usage: webkit-engine-probe.py [-v] [entry.ts|sheet.css ...]
-       (default entry: theme-engine-probe.ts)
+Usage: webkit-engine-probe.py [-v] [--window=WIDTHxHEIGHT] [entry.ts|sheet.css ...]
+       (default entry: theme-engine-probe.ts; default window 900x700)
 
 `-v` prints the detail of every check, not only the failed ones: a passing
 measurement is still the number the next reader wants.
+
+`--window` draws the probe in a different window, because a claim about a height
+that a window caps is only worth what the measured shape says. The shape is
+printed with the result, so a passing number cannot be read as another shape's.
 
 Needs a display, the WebKitGTK GObject bindings, and the app's installed
 node_modules for esbuild. A failure here is a rendering fact, not a flaky test:
@@ -132,7 +136,7 @@ def read_result(result) -> str:
     raise RuntimeError(f"cannot read a value of type {type(result).__name__}")
 
 
-def run_one(bundle_path: Path, sheets: list[str], verbose: bool) -> int:
+def run_one(bundle_path: Path, sheets: list[str], verbose: bool, size: tuple[int, int]) -> int:
     from gi.repository import GLib, Gtk, WebKit2  # noqa: PLC0415 - only after the display check
 
     directory = bundle_path.parent
@@ -147,7 +151,7 @@ def run_one(bundle_path: Path, sheets: list[str], verbose: bool) -> int:
 
     view = WebKit2.WebView()
     window = Gtk.OffscreenWindow()
-    window.set_default_size(900, 700)
+    window.set_default_size(*size)
     window.add(view)
     window.show_all()
 
@@ -196,6 +200,10 @@ def run_one(bundle_path: Path, sheets: list[str], verbose: bool) -> int:
 
     report = json.loads(text)
     print(f"engine: {report['engine']}")
+    # The shape belongs under the numbers it produced: what a window's own height
+    # caps is a different measurement at 700px than at 400px, and a run that leaves
+    # its height unstated cannot be told apart from either.
+    print(f"window: {size[0]}x{size[1]}")
     failed = 0
     for row in report["checks"]:
         if row["ok"] and not verbose:
@@ -212,6 +220,15 @@ def run_one(bundle_path: Path, sheets: list[str], verbose: bool) -> int:
 def main() -> int:
     argv = [one for one in sys.argv[1:] if one != "-v"]
     verbose = len(argv) != len(sys.argv) - 1
+    wanted = [one for one in argv if one.startswith("--window=")]
+    if len(wanted) > 1:
+        return fail("give one --window, not several")
+    argv = [one for one in argv if not one.startswith("--window=")]
+    shape = wanted[0].split("=", 1)[1] if wanted else "900x700"
+    window = re.fullmatch(r"([1-9]\d*)x([1-9]\d*)", shape)
+    if window is None:
+        return fail(f"--window wants WIDTHxHEIGHT in pixels, not {shape}")
+    size = (int(window.group(1)), int(window.group(2)))
     names = argv or ["theme-engine-probe.ts"]
     entries, sheets = [], []
     for name in names:
@@ -241,7 +258,7 @@ def main() -> int:
         for sheet in sheets:
             serve_sheet(sheet, work, sheet.name, seen)
             served.append(sheet.name)
-        codes = [run_one(out, served, verbose) for out in bundle(entries, work)]
+        codes = [run_one(out, served, verbose, size) for out in bundle(entries, work)]
         return max(codes)
     finally:
         shutil.rmtree(work, ignore_errors=True)
