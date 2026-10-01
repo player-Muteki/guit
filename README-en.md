@@ -90,10 +90,14 @@ a manual override. Both preferences persist across restarts.
 
 ## Destructive operations are never one click
 
-Hard resets, branch deletion and discarding changes all go
-through the same path: guit computes exactly what would be affected, shows you
-that list, and refuses the confirmation if the candidate set changed in the
-meantime. A confirmation is single-use and dies with the process — quitting
+Restoring a commit to a clean state, deleting a branch and discarding changes
+all go through the same path: guit computes exactly what would be affected,
+shows you that list, and refuses the confirmation if the candidate set changed
+in the meantime. For the restore that list has a section per kind of path —
+tracked files the two commits disagree about, local edits that are dropped,
+untracked files that are written over or deleted, and anything in the way that
+makes a clean state unreachable — because `git reset --hard` writes over an
+untracked file without being asked, and the panel would rather say so first. A confirmation is single-use and dies with the process — quitting
 guit mid-dialog cannot leave a pending destructive action behind for you to
 walk into after a restart.
 

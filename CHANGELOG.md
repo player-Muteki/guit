@@ -421,6 +421,25 @@ release it belongs to did not measure.
 
 ### Removed
 
+- The second hard reset. The detail pane beside the graph used to offer a "Reset
+  hard…" of its own, and the ticket it handed out bound the target commit, the
+  HEAD observed at preview time and the tracked files that were dirty — and that
+  was the whole of it. A path the target's tree writes over while the working
+  tree happens to hold it untracked was outside the promise, so `reset --hard`
+  wrote over it with the preview silent, and an untracked directory standing
+  where the target writes a file was destroyed the same way. The clean restore
+  binds all of that, so this was a known way to reach a loss the panel does not
+  promise, one click from a commit row. There is one reset now and it is that
+  one. The two resets that move a branch and the index without overwriting
+  anything — soft and mixed — stay where they were.
+- The stash and linked-worktree pages, and what only they reached for. Both views
+  were built for a suite of pages this panel no longer has and nothing imported
+  either of them; they were also the only place fourteen commands were named, so
+  those commands stayed registered on nothing but their own text. The views, the
+  commands, the three backend modules behind them, and the write-lane shapes that
+  existed only to serve them are gone together. The repository is still yours:
+  nothing about your remotes, your stashes or your worktrees was touched, and
+  `git` still does all of it.
 - guit does not touch the network. Cloning, fetching, pulling, pushing, force
   pushing, publishing a branch, adding or removing a remote, deleting a
   remote-tracking branch and setting a branch's upstream are gone: their entry
@@ -453,6 +472,30 @@ release it belongs to did not measure.
 
 ### Fixed
 
+- Clearing the search field now stops the search it was answering, instead of
+  letting it run. The scan that was walking the history kept going to the end of
+  its window for a question nobody was waiting for any more. A new question
+  already displaced the old one by itself; an emptied field, a closed repository
+  and a closed window did not. A cancellation names one question and changes
+  nothing if the panel has moved on to another.
+- The commit box is no longer drawn as a row of the graph. It carried the same
+  class a commit row in the history list carries, so the stylesheet's rules for a
+  row — its height, its pointer, its highlight under the mouse — fell on a box of
+  controls that is neither selectable nor a row. The graph's own rules are now
+  named under the list that draws them.
+- The restore's commit field and its button sit on the same line again at the
+  narrowest window under the largest interface size. The button's label used to
+  break across three lines there, and the row centred a one-line field inside a
+  three-line button, so their top edges stopped agreeing. The label stays on one
+  line now and the row wraps instead of squeezing the field.
+- Two desktop checks were asking the wrong question, and were red on the build
+  that preceded this one. The narrow-window check looked for the commit graph in
+  the set of on-screen names; at 340x400 the graph sits below the fold, and the
+  window reports a node as on-screen only once focus has brought it into view, so
+  the check was reading a scroll position as a missing region. It now asks
+  whether the graph can be reached, which it can. The other check assumed a
+  fixture small enough to fit every change group on screen; the virtualised list
+  is honest about not drawing the ones below the fold, and the fixture now is.
 - Discarding one changed file no longer discards the files whose names happen to fit
   it. The path a confirmation binds comes out of Git's own listing, so it is a name
   and never a pattern — but Git reads an unquoted pathspec as a pattern, and
