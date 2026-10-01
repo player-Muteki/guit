@@ -191,9 +191,33 @@ release it belongs to did not measure.
   id are all reported as the panel failing to read — never as a commit that does not
   exist. Merge and rebase keep accepting branch names, because there a name is what
   the operation means. These are the backend's rules and the words behind them; the
-  panel does not yet have a box to type an id into, so no screen has been measured
-  showing them, and the abbreviations themselves are verified against the one host and
-  Git version every other record here comes from.
+  row that types an id into them is the entry below, which is also where the screen
+  that shows them was measured — the abbreviations themselves are verified against
+  the one host and Git version every other record here comes from.
+- The changes area can restore the repository to a commit that was typed in, not only
+  to one selected in the graph. A row under the commit message holds the field and the
+  button. An abbreviation is accepted as far as it names exactly one commit, and what
+  is confirmed is always the id Git resolved rather than the characters typed. Pressing
+  Enter asks for the preview and never runs the restore. That preview is the whole ask:
+  where HEAD moves, in the two ids Git resolved, then one heading per class of path the
+  two steps touch, because what is done to them differs — tracked paths the target's
+  version changes, local changes this throws away, untracked paths the restore writes
+  over, ignored paths the target holds anyway, untracked paths deleted after the
+  restore, and untracked paths that stay because guit does not enter another
+  repository. A class with nothing in it contributes no heading, and every name is put
+  on screen as the text Git named it. The confirmation is the same one-time ticket every
+  other destructive action uses, so a refresh recomputes those lists and the ask has to
+  be confirmed again: a target that no longer names one commit is refused before
+  anything is written, a second ask is impossible while the ticket is open, and closing
+  the dialog spends nothing. The typed id and an unfinished commit message outlive a
+  refresh and are cleared by opening another repository and by nothing else. What is
+  measured here is this surface — the six groups drawn in the order the steps do them,
+  focus returning to the row that opened the dialog, a forty-path list scrolling inside
+  the window instead of growing past it — on the one Linux host and rendering engine
+  every other record here comes from. The two steps' own outcomes, a restore that ran
+  one of them and not the other and which promised paths are still on disk, are
+  reported and tested in the backend; the time from Enter to that list has not been
+  measured end to end, and Windows and macOS remain build configuration.
 - Main now carries a search field, above the changes area and the graph, and it asks
   Git rather than the rows already on screen. A message subject, a message body, a
   commit id and an author name are all matched, in any of them and by the same

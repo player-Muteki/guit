@@ -998,3 +998,126 @@ E04b 占着（`npm run build` 停在 `src/views/history.ts` 里那些还不存�
 - **§6.9 那一整列仍未量**，这一片新增两格也仍在同一台 Linux 宿主、同一份 Git 上：1600 条承诺路径
   那一格的 64 KB 上限、以及那条未可写目录的 `Permission denied`，都是 POSIX 形状；Windows 上这两
   格长什么样（`core.protectNTFS` 那一类名字、被占用文件的错误码）仍只是构建配置。
+
+## 11. F06 的落地：入口开在更改区，这份预览第一次在窗口里被读出来
+
+三次提交：`c5fe9aa`（六类名单的名字：`restoreModel.ts` + `types.ts` + 新文件
+`app/tests/restore-model.mjs`）、`ac1afd9`
+（注册表、更改区那一行、票据的分组渲染与样式）、以及本记录这两次（`1c02b2c` 修样式表里那两条
+死掉的规则并加一道守门，`1145bf4` 那份引擎探针）。`OUTLINE.md` §5.2（G06）那条要求到此第一次能用
+手指按到：更改区有提交号输入栏和重置按钮，直接按 Enter 只会起预览。
+
+### 11.1 规则落到代码的哪一处
+
+- **注册**：`preview_restore` 落在 `ipc-surface.mjs` 的 SNAPSHOT_BOUND 那一格（参数只有
+  `snapshotVersion` 与 `target`——它问的是一份计划，不是屏上某一行），`restore_clean` 落在
+  TICKET_BOUND。注册表和前端两处 `invoke` 字面量同在 `ac1afd9`，`reset.rs` 那 12 处
+  `allow(dead_code)` 一起撤下。
+- **六类名单的名字只住在一处**：`restoreModel.ts::SECTION_ORDER` 按两步的先后排 changed /
+  discarded / overwritten / ignoredWritten / removed / leftBehind，每段标题带自己的 `(n)`，空类
+  一条标题都不贡献；`shortId` 从此是面板里唯一把 oid 截成十个字符的地方，扁平名单那句
+  `· at <oid>` 注解也改用它。
+- **票据从此有两种形状**：`confirm.ts` 的 `ConfirmNames` 是 `{ candidates, targetOid }` 与
+  `{ heading, sections }` 的联合，`nameNodes` 照着画、自己不判断是哪一种；其它票仍是那一份扁平
+  名单。唯一那个非破坏性消费者——Settings 的诊断导出——也得把它的四条搬进 `names`，这一处与
+  恢复无关，是这次改动顺带要求的一次接线。
+- **续约按打进去的字**：`state.ts` 那条 restore arm 存 `{ target, preview }`，`preview.ts` 重问
+  只送 `{ target }`（`case "restore"` 那一句），所以"目标不再唯一解析"是在动手之前被拒的，而不是
+  带着一个换掉的目标走下去——§5.2 记的那条偏离在这里第一次有界面可走。
+- **入口**：`views/changes.ts` 在 commit-row 底下加 `.reset-row`；Enter 走 `preventDefault()`
+  之后只请求预览；写通道被占或票已开时整行 disabled；`resetTarget.value = ""` 在全文件只有一处
+  写，条件是 `sessionId !== draftSession`——`OUTLINE.md` §3.1 那句"刷新不得清空提交草稿、重置输入
+  或夺走焦点"在代码里就是这一处条件。
+- **样式**：那 12rem 的上限放在包名单的那一层（`.dialog-names`）而不是某一条 `<ul>` 上，因为六段
+  会各自叠起来；一份六段的预览需要一个滚动壳，而不是一串滚动壳。
+
+### 11.2 动手时才定下来的三条
+
+- **分组是前端的规则模块，不是后端的第七次读数**：后端交来的六个数组已经足够，"这一类叫什么"是
+  产品语言问题（*changes* / *throws away* / *writes over* / *deletes* / *stays*），所以它住在
+  `restoreModel.ts`，与 §6 那张"哪一条读取供哪一类"的表各自独立——那张表定的是集合，这一模块定
+  的是名词。
+- **恢复的名单不带对象 id 注解**：标题那句 `HEAD moves from <10> to <10>` 已经把两个 id 说完，
+  六条路径再各带一次同一个 id，只会把注意力从"这一步对它做什么"上挪开。
+- **歧义目标复用既有的错误路径**：`reset_ambiguous_target` 走 `preview.ts` 那条错误出口，探针
+  量的是"什么都没变"而不是"有一句错误"：没有票发下来、没有多一条写命令、被拒的那串字留在原处、
+  状态行说的是拒绝（`{"kind":"info","message":"The clean restore was refused before anything changed."}`）
+  而不是把它画成一份空预览。
+
+### 11.3 引擎探针量到的，与它抓到的一处缺陷
+
+`tools/bench/restore-preview-engine-probe.ts`：**44 条断言，fails=0**，引擎
+`WebKit/605.1.15`。它建的是**一份真的更改区视图加一份真的预览控制器**（`probe-tauri-stub.ts` 仍是
+第一条 import，那条规则照旧），`preview_restore` 由一张会记录的表回答、`restore_clean` 由
+探针自己 settle，所以它能问"票是不是在 Git 答话之前就已经花掉了"这一类夹具问不了的问题。几条带
+数的（`-v` 那一栏的细节）：
+
+- 那一行确实是一行：`display:flex`，字段 `714.797×188.547`、按钮 `154.813×189.047`（同一顶边，
+  字段吃掉多余宽度），按下之前一条命令都不发。
+- 一次提问绑的是**按下那一刻屏上的**版本：`{"cmd":"preview_restore","args":{"snapshotVersion":1,
+  "target":"9f3c1a2"}}`，而那份预览自己带进来的版本已经是 2。
+- 六段各说自己的动词与自己的数；`weird "quoted"<b>.txt` 落在第一段，而那段宿主 HTML 里它是
+  `weird "quoted"&lt;b&gt;.txt`——是文字，不是标记。
+- 取消：`{"focus":"button#reset-button.btn","framesSeen":3}`，字段仍留着 `9f3c1a2`，那条焦点
+  fallback 计数 0；Enter 只开预览且 `restore_clean` 计数 0；票与对话框都开着时第二次提问
+  `{"disabled":true,"asked":[]}`。
+- 一次被接受的刷新：恰好多一条 `preview_restore`、仍按那串打进去的字、换进第二份名单，而
+  `{"target":"9f3c1a2","draft":"half a commit message"}` 前后一样，焦点字符串 `before` 与 `after`
+  相同。
+- 确认：一条 `restore_clean`，参数键恰是 `nonce`；票在 Git 答话之前已花掉；期间
+  `{"running":true,"disabled":true,"status":{"kind":"progress","message":"Restoring to a clean state…"}}`；
+  跑完 HEAD 到 `3000000000…`、行解锁、通道交还、两条草稿都还在屏上。
+- 名单那一层：`{"maxHeight":"192px","overflowY":"auto","rootPx":16}`；40 条路径那一份是
+  `{"scroll":759,"client":192}`，对话框盒子 `[150.297, 674, 549.688, 226]` 仍在 900×700 窗口之内，
+  滚到底后最后一条 `src/module-39.ts` 的 bottom `502.688` 落在宿主 `[310.297, 502.297]` 之内。
+- 空类那一格：0 段、一条 `<li>` 都没有，而标题那句照说。
+- 整场只发过 `preview_restore` 与 `restore_clean` 这两条命令；八次提问的参数键恰是各自命令绑的
+  那些（`snapshotVersion+target` 七次、`nonce` 一次）；结尾 `{"open":false,"ticket":null}`。
+
+**它抓到的缺陷**：`ac1afd9` 里我写的两处 CSS `//` 注释不是注释——解析器把这两行折进后一条规则的
+选择器里，于是 `.commit-footer .reset-row`（那一行的 flex 布局）与 `.dialog-names`（那个滚动壳）
+整条被丢掉：重置行退化成块级，一份六段的名单能长过窗口。没有一道静态门看得见这件事——vite 原样
+抄这份表，`color-contrast.py` 与 `responsive-check.py` 读的是 token 与颜色而不是花括号，那时 411
+条夹具解析的是声明。只有问到 computed style 的那一条断言会红，而它报 `max-height: none` 时缺陷已
+经在树上活了两个提交。`1c02b2c` 因此带一道不需要显示器的守门：`app/tests/theme-css-model.mjs` 扫
+`style.css` 与 `style/tokens.css`，任何以 `//` 开头的行都红。
+
+**这一处的代价跨到别人那一行**：这两条规则自 `ac1afd9` 落地起就是死的，所以阶段 E 那一行先记下的
+数（"他的更改区按档位高了 29 到 54px"）是在缺陷存在的树上量的。本轮把九支引擎探针在 `1145bf4`
+重跑过（§11.4）；两支 CDP 探针由并行开发者在同一棵 `1145bf4` 上重跑（`layout-probe.mjs` 568 条
+ok、`read-budget.mjs` 50 条 ok，均 fails=0），他们把"结果层每一个数与 `ac1afd9` 一字不差"与"只有
+更改区自己的高度随那次注释修复又挪了 1–5px（340x400 `342.391 → 341.391`、1100x700
+`295.188 → 300.188`）"分开了写，见 [阶段 E 记录 §15](17-search-contract-e.md)。也就是说这条缺陷
+动的是**别人量到的那两处几何**，而它由那一次重跑而不是由本轮第一次说清。
+
+### 11.4 门禁与度量
+
+数从 detached worktree 的 `1145bf4` 上取；`app/src-tauri/` 与 `ac1afd9` 逐字节相同，所以 Rust 那
+三条在上一片那棵 warm worktree 上取，不重复建 target：
+
+- `npm run build` ✓ **48 modules transformed**（`index-DXZLO-EZ.css` 34.18 kB、
+  `index-CB9Yqv57.js` 131.05 kB）；`npm run test:fixture` **412 pass / 0 fail**（`c5fe9aa` 那份
+  分组夹具之外，本记录那条样式表语法守门把 411 顶到 412）。
+- `color-contrast.py dist/assets` **fails=0**；`responsive-check.py src/style.css
+  src/style/tokens.css` **fails=0**。
+- 引擎探针全绿：restore 入口 **44 条**、branch-selector 44、appearance 34、search-layer 26、
+  commit-bubble 24，theme / theme-lifecycle / graph-pan / font 各 **fails=0**。
+- `cargo test` **398 passed / 0 failed**（`reset` 过滤器仍 45 条——这一片没加 Rust 用例，注册与
+  前端只是把已经写完的那条链接通）、`cargo fmt --check` 零 diff、
+  `cargo clippy --locked --all-targets` **0 告警**。
+
+### 11.5 这一片没做完的
+
+- **两支 CDP 探针不是本轮重跑的**：`layout-probe.mjs`（568 条 ok）与 `read-budget.mjs`（50 条 ok）
+  在 `1145bf4` 上各跑过一遍且 fails=0，但那是并行开发者为他们自己那一刀做的，本轮只是引用他们的
+  数（§11.3 末尾）。本轮亲手跑的是 build、夹具、两道样式 gate 与九支引擎探针。
+- **端到端毫秒没量**：`preview_restore` 在探针里由一张表于微任务中回答，所以"按下 Enter 到名单
+  出现"不是这条通道的时间。后端那一窗只有 §6.6 的七条进程加和（约 15 ms 中位）与 §10.3 的事后两
+  条（约 17 ms），两者都不是这条通道上的一次墙钟观测；真 Tauri 的 IPC 往返同理没量。
+- **探针答的是表，不是 Git**：那份名单是按 `RestorePreview` 的字段构造的，不是任何一次真仓库读数
+  的结果。写前拒绝、部分完成那几格仍只有 `reset.rs` 的夹具与 §6 那份探针在说，窗口里没演过。
+- **Escape 那条焦点路径没量**：探针只证明取消路径上那个 fallback 计数为 0。
+- **§6.9 那一整列仍未量**，加上真 `probe_timeout` 与 `plan_restore` 的进程内墙钟；Windows/macOS
+  仍只是构建配置。
+- **退出门槛的另一半没动**：旧的 hard reset 按钮、`preview_reset_hard` 与 `reset_hard` 仍是它们
+  自己那一条，既没被改名成"干净恢复"，也没并进这条通道。
