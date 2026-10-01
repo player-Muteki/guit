@@ -7,15 +7,16 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { createGitFixture } from "./helpers/git.mjs";
 
-// A filename the host filesystem cannot hold. Windows (NTFS) forbids `"` and
-// treats `\` as a path separator, so two of the names below cannot exist there
-// as names. Rather than probing the filesystem — which leaves artefacts and
-// whose failures are hard to read from a CI log — the impossible names are
-// excluded by the platform that cannot represent them, and the assertion fails
-// if too few remain, so a host that silently lost them cannot pass quietly. The
-// names that survive are still carried verbatim through porcelain v2 -z.
+// A filename the host filesystem cannot hold. Windows (NTFS) forbids `"`, treats
+// `\` as a path separator, and rejects every control character including tab — so
+// three of the names below cannot exist there as names. Rather than probing the
+// filesystem — which leaves artefacts and whose failures are hard to read from a
+// CI log — the impossible names are excluded by the platform that cannot
+// represent them, and the assertion fails if too few remain, so a host that
+// silently lost them cannot pass quietly. The names that survive are still
+// carried verbatim through porcelain v2 -z.
 const WINDOWS = process.platform === "win32";
-const illegalOnWindows = (name) => /["\\:*?<>|]/.test(name);
+const illegalOnWindows = (name) => /["\\:*?<>|\u0000-\u001f]/.test(name);
 const representable = (name) => !(WINDOWS && illegalOnWindows(name));
 
 test("a hostile GIT_* environment in the parent process cannot reach the fixture", () => {
