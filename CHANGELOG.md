@@ -285,6 +285,15 @@ release it belongs to did not measure.
 
 ### Changed
 
+- The READMEs say what is measured instead of saying "lightweight". The panel is
+  three processes sharing GTK and WebKit, and the memory it holds was being
+  quoted from a sum of resident sizes, which counts that shared library text once
+  per process. Measured as it is actually charged: about 45 MiB of its own and
+  roughly 180 MiB for the tree. It does not grow with the size of the history —
+  the same numbers on a 10-file repository and a 5,000-file one — and it does
+  not drift over time. The header now names the platform that has actually been
+  run, and the requirements section lists what a real window has exercised and
+  what only the tests have.
 - Settings is grouped by what a choice changes. The page opened with a block
   called General that held the theme, the interface zoom, the three font names,
   the age line's refresh period, always-on-top and a nine-row list of keys, so

@@ -1,7 +1,10 @@
 # guit
 
-A lightweight, low-resource desktop Git client.
-一个轻量、低占用的桌面 Git 客户端。
+A small desktop Git client.
+一个桌面 Git 客户端。
+
+Built and run on Linux; Windows and macOS build but have never been run here.
+在 Linux 上构建与运行；Windows 与 macOS 能构建，但从未在这里跑过。
 
 - **[English](README-en.md)**
 - **[中文](README-zh.md)**

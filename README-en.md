@@ -1,13 +1,24 @@
 # guit
 
-A small, low-resource desktop Git client for the work in front of you. It
-covers the everyday local workflow — working-copy status, staging, commits,
-branches, tags, history, merge and rebase conflicts — in one compact window,
-with an optional always-on-top mode for keeping it beside a terminal.
+A small desktop Git client for the work in front of you. It covers the everyday
+local workflow — working-copy status, staging, commits, branches, tags, history,
+merge and rebase conflicts — in one compact window, with an optional
+always-on-top mode for keeping it beside a terminal.
 
 guit runs **your** installed `git` with **your** own configuration. Hooks,
 commit signing, credential helpers and ssh-agent behave exactly as they do in
 a terminal, because there is no second Git implementation hiding underneath.
+
+**Status.** Built and run on Linux (Ubuntu, GTK/WebKit). Windows and macOS are
+configured to build but have never been run here, so they are not claimed to
+work. Memory: the panel is three processes sharing GTK and WebKit; it holds
+roughly 45 MiB of its own and about **180 MiB** in total (proportional set
+size) on a repository of a few thousand files. It does not grow with the size
+of your repository's history — paging 6,000 commits moves nothing. Idle CPU is
+under 1% of one core, with a status read every five seconds as the floor for
+noticing changes made outside the panel. See
+[Known limits](README-en.md#requirements) for what has and has not been
+exercised.
 
 ## What it deliberately does not do
 
@@ -35,6 +46,27 @@ working tree.
 - **Linux** with WebKitGTK 4.1 / GTK 3, which the package dependencies pull in.
 - Windows and macOS packages are configured and buildable, but the app has
   **never been run on either platform**, so anything there counts as untested.
+
+### What has actually been exercised
+
+Verified on Linux, in a real window, against real repositories: opening a
+repository and reading it; staging, unstaging, discarding a changed file and
+deleting untracked files, each through its confirmation and each checked against
+`git status` and the files on disk afterwards; searching; restoring a commit to a
+clean state through its preview; the appearance settings and their persistence
+across restarts; the four window buttons; the minimum window size; and recovery
+from a corrupt or newer-than-this-build settings file.
+
+Two things are covered by tests rather than by a click, and are named here
+instead of being implied: **committing** and **restoring to a commit id** both
+need text typed into a box, and the only channel available on this test host
+(a Wayland session with no key-injection tool and no `EditableText` interface
+on a WebKitGTK entry) cannot type one. Their behaviour is pinned by the Rust
+suite and by a probe that drives the real view, but not by a hand on a real
+repository.
+
+Also unverified here: more than one monitor, and displays that report a
+different scale factor.
 
 ## Install (Linux)
 
