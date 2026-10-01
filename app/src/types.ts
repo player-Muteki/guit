@@ -141,10 +141,6 @@ export type OperationResult = {
     | "branchdelete"
     | "tagcreate"
     | "tagdelete"
-    | "stashsave"
-    | "stashapply"
-    | "stashpop"
-    | "stashdrop"
     | "merge"
     | "rebase"
     | "cherrypick"
@@ -153,11 +149,7 @@ export type OperationResult = {
     | "abort"
     | "skip"
     | "reset"
-    | "resethard"
-    | "restore"
-    | "worktreeadd"
-    | "worktreeremove"
-    | "worktreeprune";
+    | "restore";
   outcome: "success" | "failed" | "cancelled" | "rejected" | "conflicted" | "partial";
   exitCode: number | null;
   message: string;
@@ -295,43 +287,6 @@ export type HistoryPage = { start: number; commits: CommitView[]; hasMore: boole
 
 export type CommitFileView = { status: string; path: string; oldPath: string | null };
 
-// --- stash --------------------------------------------------------
-
-export type StashEntry = { index: number; date: string; subject: string };
-
-// --- worktrees / submodules -------------------------------
-
-export type WorktreeView = {
-  index: number;
-  path: string;
-  head: string | null;
-  branch: string | null;
-  detached: boolean;
-  orphan: boolean;
-  bare: boolean;
-  locked: boolean;
-  prunable: boolean;
-  addressable: boolean;
-};
-
-export type SubmoduleView = {
-  index: number;
-  path: string;
-  name: string | null;
-  url: string | null;
-  recordedOid: string;
-  checkedOutOid: string | null;
-  state: "upToDate" | "uninitialized" | "outOfSync" | "conflicted" | "unmapped";
-};
-
-export const SUBMODULE_STATE_LABELS: Readonly<Record<SubmoduleView["state"], string>> = {
-  upToDate: "up to date",
-  uninitialized: "not initialized",
-  outOfSync: "checked-out commit differs from the index",
-  conflicted: "conflicted",
-  unmapped: "no .gitmodules mapping",
-};
-
 // --- destructive-operation tickets --
 
 export type PreviewKindKey =
@@ -339,10 +294,7 @@ export type PreviewKindKey =
   | "clean"
   | "branch"
   | "tag"
-  | "stashDrop"
-  | "stashPop"
-  | "restore"
-  | "worktreeRemove";
+  | "restore";
 
 export type PreviewCopy = {
   warning: string;

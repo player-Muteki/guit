@@ -1,9 +1,8 @@
 // Destructive-operation confirmation as a native modal <dialog>.
 //
-// One dialog serves every ticket kind (discard, clean, branch, tag, stash
-// pop/drop, hard reset, a clean restore, worktree/remote removal, remote-branch
-// delete and force push). The copy table travels with each request so the wording
-// for a given kind always travels with the single-use nonce it belongs to.
+// One dialog serves every ticket kind (discard, clean, branch, tag and a clean
+// restore). The copy table travels with each request so the wording for a given
+// kind always travels with the single-use nonce it belongs to.
 // Escape and Cancel both take the cancel path, which consumes nothing on the
 // server; focus returns to the element that opened the dialog.
 

@@ -272,10 +272,7 @@ preview.onConfirm((pending) => {
       case "clean": return confirmTicket("clean_files", nonce, "Deleting untracked files…");
       case "branch": return confirmTicket("delete_branch", nonce, "Deleting branch…", pending.branch.name);
       case "tag": return confirmTicket("delete_tag", nonce, "Deleting tag…");
-      case "stashDrop": return confirmTicket("stash_drop", nonce, "Deleting stash entry…");
-      case "stashPop": return confirmTicket("stash_pop", nonce, "Popping stash entry…");
       case "restore": return confirmTicket("restore_clean", nonce, "Restoring to a clean state…");
-      case "worktreeRemove": return confirmTicket("remove_worktree", nonce, "Removing worktree…");
     }
   })();
 });

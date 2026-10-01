@@ -57,29 +57,11 @@ const previewCopy: Record<PreviewKindKey, PreviewCopy> = {
     confirm: "Delete tag",
     cancel: "Keep tag",
   },
-  stashDrop: {
-    warning:
-      "Deleting discards this stashed snapshot permanently. Its commits become unreachable and Git may garbage-collect them. This cannot be undone from guit.",
-    confirm: "Delete stash",
-    cancel: "Keep stash",
-  },
-  stashPop: {
-    warning:
-      "Popping re-applies these changes to the working copy and discards the stash entry. If the apply conflicts, Git keeps the entry and reports a failure.",
-    confirm: "Pop stash",
-    cancel: "Keep entry",
-  },
   restore: {
     warning:
       "A clean restore moves this branch to the selected commit, overwrites the listed changes, and deletes the listed untracked files. Every path below is one the restore touches, each by a different step. The commits it leaves behind become unreachable and Git may garbage-collect them; a path guit does not enter stays on disk. This cannot be undone from guit.",
     confirm: "Restore to clean state",
     cancel: "Keep everything",
-  },
-  worktreeRemove: {
-    warning:
-      "Removing unregisters this linked worktree and deletes its Git metadata link. guit never forces: if the worktree has uncommitted work, Git itself refuses and nothing is removed.",
-    confirm: "Remove worktree",
-    cancel: "Keep worktree",
   },
 };
 
@@ -283,10 +265,7 @@ function labelFor(kind: PreviewKindKey): string {
     case "clean": return "clean";
     case "branch": return "branch deletion";
     case "tag": return "tag deletion";
-    case "stashDrop": return "stash deletion";
-    case "stashPop": return "stash pop";
     case "restore": return "clean restore";
-    case "worktreeRemove": return "worktree removal";
   }
 }
 
@@ -296,10 +275,7 @@ function commandFor(kind: PreviewKindKey): string {
     case "clean": return "preview_clean";
     case "branch": return "preview_delete_branch";
     case "tag": return "preview_delete_tag";
-    case "stashDrop": return "preview_stash_drop";
-    case "stashPop": return "preview_stash_pop";
     case "restore": return "preview_restore";
-    case "worktreeRemove": return "preview_remove_worktree";
   }
 }
 
@@ -307,10 +283,7 @@ function requestArgs(pending: PendingPreview): Record<string, unknown> {
   switch (pending.kind) {
     case "branch": return { name: pending.branch.name, force: pending.branch.force };
     case "tag": return { name: pending.tag.name };
-    case "stashDrop":
-    case "stashPop": return { index: pending.stash.index };
     case "restore": return { target: pending.restore.target };
-    case "worktreeRemove": return { index: pending.worktree.index };
     case "discard":
     case "clean": return {};
   }
@@ -320,9 +293,6 @@ function targetOidOf(pending: PendingPreview): string | null {
   switch (pending.kind) {
     case "branch": return pending.branch.targetOid;
     case "tag": return pending.tag.targetOid;
-    case "stashDrop":
-    case "stashPop": return pending.stash.targetOid;
-    case "worktreeRemove": return pending.worktree.targetOid;
     default: return null;
   }
 }
@@ -341,9 +311,6 @@ function build(kind: FlatPreviewKind, preview: PreviewResult, args: Record<strin
     case "branch":
       return { kind, ...base, branch: { name: String(args.name), force: Boolean(args.force), targetOid: preview.targetOid } };
     case "tag": return { kind, ...base, tag: { name: String(args.name), targetOid: preview.targetOid } };
-    case "stashDrop": return { kind, ...base, stash: { index: Number(args.index), targetOid: preview.targetOid } };
-    case "stashPop": return { kind, ...base, stash: { index: Number(args.index), targetOid: preview.targetOid } };
-    case "worktreeRemove": return { kind, ...base, worktree: { index: Number(args.index), targetOid: preview.targetOid } };
   }
 }
 
@@ -361,8 +328,5 @@ function rebuild(pending: FlatTicket, preview: PreviewResult): PendingPreview {
     case "clean": return { kind: "clean", names, dropped, nonce, allUntracked: pending.allUntracked };
     case "branch": return { kind: "branch", names, dropped, nonce, branch: { ...pending.branch, targetOid: oid } };
     case "tag": return { kind: "tag", names, dropped, nonce, tag: { ...pending.tag, targetOid: oid } };
-    case "stashDrop":
-    case "stashPop": return { kind: pending.kind, names, dropped, nonce, stash: { ...pending.stash, targetOid: oid } };
-    case "worktreeRemove": return { kind: "worktreeRemove", names, dropped, nonce, worktree: { ...pending.worktree, targetOid: oid } };
   }
 }

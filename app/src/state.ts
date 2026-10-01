@@ -31,8 +31,6 @@ export type PendingPreview =
       nonce: string;
       branch?: undefined;
       tag?: undefined;
-      stash?: undefined;
-      worktree?: undefined;
     }
   | {
       kind: "clean";
@@ -47,8 +45,6 @@ export type PendingPreview =
       allUntracked: boolean;
       branch?: undefined;
       tag?: undefined;
-      stash?: undefined;
-      worktree?: undefined;
     }
   | {
       kind: "branch";
@@ -57,8 +53,6 @@ export type PendingPreview =
       nonce: string;
       branch: { name: string; force: boolean; targetOid: string | null };
       tag?: undefined;
-      stash?: undefined;
-      worktree?: undefined;
     }
   | {
       kind: "tag";
@@ -67,18 +61,6 @@ export type PendingPreview =
       nonce: string;
       branch?: undefined;
       tag: { name: string; targetOid: string | null };
-      stash?: undefined;
-      worktree?: undefined;
-    }
-  | {
-      kind: "stashDrop" | "stashPop";
-      names: string[];
-      dropped: string[];
-      nonce: string;
-      branch?: undefined;
-      tag?: undefined;
-      stash: { index: number; targetOid: string | null };
-      worktree?: undefined;
     }
   | {
       // The restore's promise is not one list of paths: the two steps touch six
@@ -91,16 +73,6 @@ export type PendingPreview =
       dropped: string[];
       nonce: string;
       restore: { target: string; preview: RestorePreviewResult };
-    }
-  | {
-      kind: "worktreeRemove";
-      names: string[];
-      dropped: string[];
-      nonce: string;
-      branch?: undefined;
-      tag?: undefined;
-      stash?: undefined;
-      worktree: { index: number; targetOid: string | null };
     };
 
 let sessionActive = false;
