@@ -11,10 +11,11 @@ a terminal, because there is no second Git implementation hiding underneath.
 
 **Status.** Built and run on Linux (Ubuntu, GTK/WebKit). Windows and macOS are
 configured to build but have never been run here, so they are not claimed to
-work. Memory: the panel is three processes sharing GTK and WebKit; it holds
-roughly 45 MiB of its own and about **180 MiB** in total (proportional set
-size) on a repository of a few thousand files. It does not grow with the size
-of your repository's history — paging 6,000 commits moves nothing. Idle CPU is
+work. Memory: the panel is three processes sharing GTK and WebKit, and about
+130 MiB of that is the toolkit's, present even with no repository open. On a
+repository of a few thousand files it holds roughly 45 MiB of its own and about
+**180 MiB** in total (proportional set size). It does not grow with the size of
+your repository's history — paging 6,000 commits moves nothing. Idle CPU is
 under 1% of one core, with a status read every five seconds as the floor for
 noticing changes made outside the panel. See
 [Known limits](README-en.md#requirements) for what has and has not been
