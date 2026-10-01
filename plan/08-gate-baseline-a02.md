@@ -32,6 +32,8 @@
 
 处置:RSS 预算缺口按 04-validation §4 的修订路径处理——记录基线、在 C/H 依据测量修订预算或给出削减方案(WebViewNetworkProcess 是否可抑制属平台配置研究);不得在未测量前改写 README 承诺。
 
+**后续更正(阶段 H,提交 58b9917 之后)**:本行"超预算 2.9 倍"这个结论有两个错,都已在 [04-validation §4.1](04-validation.md) 改正并重定预算——(1) 上表"进程树 RSS 终值"是把三个进程映射同一份 ~170 MiB 的 GTK/WebKit 文本的驻留集**相加**,同一份共享代码被数了三遍;正确口径是 PSS(按映射进程数分摊)。(2) ≤150 MiB 那个预算从未被量过,而任何 WebKitGTK 面板的地板(欢迎页、未开仓库)是 **167.3 MiB**,本来就高于它。实测地板 167 / 1,000 文件 179 / 5,000 文件 184 MiB,斜率 ~1 KiB/跟踪文件,**没有泄漏**。修订后预算 PSS ≤200 MiB(常规夹具)/≤250 MiB(>50k 文件),本行与"超预算 2.9 倍"的判定一并作废。
+
 ## 3. 主窗口/提交历史路径证据与缺口
 
 - 应用实际启动并进入稳态:perf 日志含 `startup.restore_*`、`git.status`、`history.graph/parse`、`refs.parse`、`git.stash/worktree/remote/config` 等阶段行;进程全程存活,收尾 terminate 正常。
