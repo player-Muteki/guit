@@ -2,25 +2,33 @@
 // environment stripping, configuration isolation, hostile paths and scale.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, basename } from "node:path";
 import test from "node:test";
 import { createGitFixture } from "./helpers/git.mjs";
 
 // Windows (NTFS) forbids `"`, `*`, `?` and several others in a filename, and
-// this test's whole point is names a careless implementation would mangle. A
-// host that cannot represent a name is not a host this test can run on, so the
-// name is probed and dropped rather than the assertion being weakened for
-// everyone: the names the filesystem does accept are still carried verbatim
-// through porcelain v2 -z.
+// a backslash is a path separator there rather than a character, so this test's
+// whole point is names a careless implementation would mangle. A host that
+// cannot represent a name is not a host this test can run on, so the name is
+// probed and dropped rather than the assertion being weakened for everyone: the
+// names the filesystem does accept are still carried verbatim through
+// porcelain v2 -z. The probe checks the name survived as a name, because a
+// backslash on Windows does not fail — it silently becomes a directory level.
 function canRepresent(root, name) {
-  const path = join(root, name);
+  // Probed in a throwaway subdirectory so a probe cannot leave a file or a
+  // directory where the real one is about to go.
+  const scratch = join(root, `.probe-${process.pid}`);
   try {
+    mkdirSync(scratch, { recursive: true });
+    const path = join(scratch, name);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, "");
-    return true;
+    return basename(path) === name && existsSync(path);
   } catch {
     return false;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 }
 
