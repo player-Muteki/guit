@@ -186,12 +186,12 @@ test("the capability file grants the native actions the four buttons call", () =
   assert.match(main, /onDispose\(installWindowChrome\(shell\.appbar, showError\)\)/);
 });
 
-test("Linux prefers X11 before GTK initializes while allowing an explicit Wayland choice", () => {
+test("Linux selects X11 first before initialization even when the desktop exports Wayland", () => {
   const entry = rust("src/main.rs");
   const start = entry.indexOf("fn main()");
-  const backend = entry.indexOf('gdk::set_allowed_backends("x11,wayland")', start);
+  const backend = entry.indexOf('std::env::set_var("GDK_BACKEND", "x11,wayland")', start);
+  const initialization = entry.indexOf("perf::init()", start);
   const runtime = entry.indexOf("tauri::Builder::default()", start);
-  assert.ok(backend > start && backend < runtime);
-  assert.match(entry.slice(start, backend), /#\[cfg\(target_os = "linux"\)\]/);
-  assert.match(rust("Cargo.toml"), /\[target\.'cfg\(target_os = "linux"\)'\.dependencies\][\s\S]*?gdk = "0\.18"/);
+  assert.ok(backend > start && backend < initialization && initialization < runtime);
+  assert.match(entry.slice(start, backend), /fn main\(\) \{\s*#\[cfg\(target_os = "linux"\)\]\s*$/);
 });

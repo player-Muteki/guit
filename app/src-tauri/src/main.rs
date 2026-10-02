@@ -1066,7 +1066,7 @@ async fn export_diagnostics(app: tauri::AppHandle, path: String) -> Result<Strin
 
 fn main() {
     #[cfg(target_os = "linux")]
-    gdk::set_allowed_backends("x11,wayland");
+    std::env::set_var("GDK_BACKEND", "x11,wayland");
     perf::init();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

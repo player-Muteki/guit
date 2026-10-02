@@ -41,9 +41,6 @@ unicode-segmentation = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-gdk = "0.18"
-
 # Lints are a gate, not a suggestion: `cargo clippy --locked --all-targets` is
 # part of the build checks, so a warning that survives here reaches the release
 # binary and new code cannot quietly accumulate more. The groups chosen are

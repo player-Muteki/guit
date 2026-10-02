@@ -11,7 +11,7 @@
 
 ## 修复
 
-1. Linux 在 GTK/Tauri 初始化之前设置 GDK 后端顺序 `x11,wayland`。GNOME Wayland 会话可使用 XWayland；X11 不可用时仍能回退。GDK 自己遵守显式 `GDK_BACKEND` 设置，不改写用户环境变量。直接声明已有传递依赖 `gdk 0.18`，没有新增版本或下载新包。
+1. Linux 在 `main` 的第一步、GTK/Tauri 和应用线程初始化之前，将进程内的 `GDK_BACKEND` 设置为 `x11,wayland`。覆盖启动环境继承的 Wayland 单后端选择，使直接运行二进制也优先尝试 X11/XWayland；X11 不可用时仍可回退至 Wayland。这不改变系统或桌面会话配置，但应用启动的子进程会继承该变量。移除已不需要的直接 `gdk` 依赖；GTK 仍由 Tauri 间接使用。
 2. 置顶请求后读取 `isAlwaysOnTop()`，允许至多约一秒等待窗口管理器异步确认；无法确认则展示错误，不把愿望当结果。
 3. 焦点变化时重新同步实际状态。保存的用户偏好与当前实际状态分开，防止一次被忽略的启动请求将用户的置顶偏好永久覆盖为关闭。
 4. 更新浏览器桩，使新 getter 返回原生接口承诺的布尔值，setter 改变桩自己的状态。这只是保持桩契约，不作为真实置顶证据。
@@ -27,4 +27,26 @@
 
 关闭旧 guit 后运行新构建的 `app/src-tauri/target/release/guit`，置顶开启时聚焦普通窗口，确认 guit 仍在其上；再关闭置顶，确认普通窗口可覆盖；最后重新开启并重启检查保存。
 
-本轮启动环境已显式选择 Wayland，因此应使用 `GDK_BACKEND=x11 app/src-tauri/target/release/guit` 启动修复版进行复核。默认后端优先级不会覆盖用户显式设置，不能声称直接重启当前终端中的二进制就必然切换到 XWayland。新程序会在窗口管理器未确认请求时明确报错，不会通过反复抢焦点模拟置顶。
+应直接启动新构建的 `app/src-tauri/target/release/guit`，不再需要终端环境前缀。X11 无法连接而回退 Wayland 时，仍不能保证置顶；程序保留原生状态检查，不通过反复抢焦点模拟置顶。
+
+## 直接启动的后续修正
+
+用户在提交 `9f28eff` 后直接启动程序，看到 `The desktop did not apply the requested always-on-top setting.`。这条提示来自前端等待约一秒后仍未读到预期状态的检查，本身不能证明桌面已经拒绝请求。
+
+前次 `gdk::set_allowed_backends("x11,wayland")` 只改默认候选顺序；当前桌面导出的 `GDK_BACKEND=wayland` 仍会覆盖它。用户确认没有使用终端覆盖变量的启动命令，因此这条常用启动路径并未得到前次修复。现在在单线程启动入口设置进程的实际选择顺序，保留 Wayland 回退和失败提示。启动顺序的源码回归检查在修改生产代码前失败；该检查只验证初始化接线，不等同于原生置顶验收。
+
+本轮普通权限的 GTK 探测仍返回 `gtk_init=False`，提升权限的只读探测仍因自动审批服务故障未执行；不宣称已观察用户窗口的后端或堆叠状态。
+
+### GTK 初始化边界探针
+
+`tools/bench/window-backend-probe.c` 在 GTK 初始化入口读取环境并退出，不建立窗口、不读取用户偏好。它可在没有桌面访问权限时检查实际 release 二进制是否在初始化之前设置了后端选择：
+
+```sh
+cc -shared -fPIC -Wall -Wextra -Werror tools/bench/window-backend-probe.c -o /tmp/guit-topmost-backend-probe.so
+env GDK_BACKEND=wayland LD_PRELOAD=/tmp/guit-topmost-backend-probe.so app/src-tauri/target/release/guit
+env -u GDK_BACKEND LD_PRELOAD=/tmp/guit-topmost-backend-probe.so app/src-tauri/target/release/guit
+```
+
+本轮两次均输出 `GDK_BACKEND at GTK initialization: x11,wayland`、退出码 0。另用旧启动调用 `gdk_set_allowed_backends("x11,wayland")` 的最小原生程序经过同一探针，继承 `GDK_BACKEND=wayland` 时仍输出 `wayland`、退出码 1，确认旧调用不能覆盖环境。该对比验证后端选择的传递，不验证连接到 X11、Wayland 回退或窗口覆盖关系。
+
+构建和校验：`npm run bin:release`、12 条窗口接线测试、8 条置顶行为测试、文案门禁、367 条 Rust 测试、`cargo fmt --check`、`cargo clippy --locked --offline --all-targets` 和两道样式门禁通过。完整前端夹具为 31 个测试文件通过、5 个失败；失败均为涉及 Git 子进程的既有夹具，其中 `git-fixture.mjs` 单独重跑明确报告 `spawnSync git EPERM`。不宣称完整前端套件通过。

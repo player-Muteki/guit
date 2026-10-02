@@ -35,9 +35,10 @@ here claims them verified.
 
 ### Fixed
 
-- Linux prefers X11/XWayland for window controls, with native Wayland available
-  as a fallback or an explicit launch choice. This avoids relying on a
-  keep-above request that the Wayland backend may ignore.
+- Linux selects X11/XWayland first for window controls, including when the
+  launch environment specifies Wayland. Native Wayland remains a fallback
+  when X11 is unavailable. Direct launches no longer require a terminal
+  override to select X11.
 - The pin now follows the window's reported state after applying a request and
   when focus changes. A request the desktop does not apply reports an error
   instead of displaying the requested state as confirmed. A failed startup
