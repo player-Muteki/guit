@@ -34,6 +34,7 @@
 //        (-v prints the detail of passing checks too, which is the point here)
 
 import { el, openMenu } from "../../app/src/dom";
+import { emptyFigure } from "../../app/src/emptyState";
 
 interface Check {
   name: string;
@@ -593,6 +594,60 @@ function __probe(): string {
     ratio: Number((uiCh / monoCh).toFixed(3)),
   });
   chHost.remove();
+
+  // --- 6. the shapes an empty region wears ------------------------------------
+  //
+  // An empty state that is one line of grey text is, in a 340x400 window, the
+  // same thing to look at whether the answer is "nothing to show" or "the read
+  // failed". The figures beside those sentences are meant to tell the two apart
+  // at a glance, using the graph's own geometry.
+  //
+  // Asserted: each figure has a real box, resolved a real colour, and drew
+  // something — a shape that resolves to a 0x0 box, or a colour of
+  // `rgba(0,0,0,0)`, is an empty state that still says nothing, and that is the
+  // failure this section exists to catch.
+  //
+  // Also asserted, and this is the part that keeps it from being decoration
+  // smuggled past a screen reader: the figure is hidden from assistive
+  // technology, so the sentence beside it remains the only thing that says what
+  // is happening. A figure that leaked a name would be a second, invented name
+  // for a state the product already words carefully.
+
+  const figureHost = host();
+  const KINDS = ["clean", "no-commits", "unavailable", "no-repo"] as const;
+  const figures = KINDS.map((kind) => {
+    const node = emptyFigure(kind);
+    figureHost.append(node);
+    const style = getComputedStyle(node);
+    const box = node.getBoundingClientRect();
+    return {
+      kind,
+      width: Number(box.width.toFixed(2)),
+      height: Number(box.height.toFixed(2)),
+      color: style.color,
+      hidden: node.hasAttribute("hidden"),
+      ariaHidden: node.getAttribute("aria-hidden"),
+      shapes: node.children.length,
+      strokes: node.querySelectorAll(".empty-figure-line, .empty-figure-node").length,
+    };
+  });
+  check(
+    "every empty figure has a box and drew at least one shape",
+    figures.every((one) => one.width > 0 && one.height > 0 && one.strokes > 0 && one.shapes > 0),
+    figures,
+  );
+  check(
+    "every empty figure resolved the graph's own colour rather than nothing",
+    figures.every((one) => one.color !== "" && !/rgba\(0,\s*0,\s*0,\s*0\)/.test(one.color)),
+    figures.map((one) => `${one.kind}: ${one.color}`),
+  );
+  check(
+    "no empty figure carries a name: the sentence beside it is the only thing read",
+    figures.every((one) => one.ariaHidden === "true"),
+    figures.map((one) => `${one.kind}: aria-hidden=${one.ariaHidden}`),
+  );
+  check("REPORT the empty figures", true, figures);
+  figureHost.remove();
 
   document.querySelectorAll("[data-probe-host]").forEach((node) => node.remove());
 

@@ -31,6 +31,14 @@ release it belongs to did not measure.
   plane — a row, a panel, the page — gained one. Each scheme has its own depth;
   the dark one trades warmth for strength, because a shadow's job is to darken
   what is under a lifted thing and a near-black ground has little left to give.
+- Every gap in the interface is now a step on one 4px-base scale, so the panels
+  line up with each other under interface zoom instead of each being “about
+  right” on its own. Two numbers that change while the panel is watched hold a
+  fixed figure width so they stop nudging what is beside them; inputs and list
+  rows now show focus with the two-part ring the tokens already declared; and
+  an empty region draws its shape in the commit graph's own geometry, so “there
+  is nothing here” and “that read failed” are no longer the same grey line. The
+  wording of every empty state is unchanged.
 
 The integrated title bar has build and source-test coverage, and its rendered
 layout has been measured in a real browser engine across nine window sizes and

@@ -8,6 +8,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { button, el, icon, openMenu, plural, type MenuItem } from "../dom";
+import { emptyFigure, showFigure, type EmptyKind } from "../emptyState";
 import { branchChoices, branchLabel } from "../headModel";
 import { onDispose } from "../lifecycle";
 import {
@@ -157,6 +158,18 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     tabIndex: 0,
   }, [virtual]);
   const emptyState = el("p", { class: "empty-state", hidden: true });
+  // The history pane is empty for four different reasons, each with its own
+  // figure. All four exist from the start and only one is ever shown, so
+  // switching the empty state never rebuilds a node and never races the paint.
+  // The sentence beside them is the same paragraph as before, carrying the same
+  // words; the figures are decoration and are hidden from assistive technology.
+  const emptyFigures: Record<EmptyKind, SVGSVGElement> = {
+    clean: emptyFigure("clean"),
+    "no-commits": emptyFigure("no-commits"),
+    unavailable: emptyFigure("unavailable"),
+    "no-repo": emptyFigure("no-repo"),
+  };
+  for (const figure of Object.values(emptyFigures)) showFigure(figure, false);
 
   const splitter = el("div", { class: "splitter", role: "separator", "aria-orientation": "horizontal", "aria-label": "Resize commit details" });
 
@@ -176,7 +189,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
   ]);
 
   // The view is the box the bubble is placed in and confined to.
-  element.append(listHead, listPane, splitter, emptyState, detail, bubble);
+  element.append(listHead, listPane, splitter, ...Object.values(emptyFigures), emptyState, detail, bubble);
 
   let commits: CommitView[] = [];
   let hasMore = false;
@@ -756,7 +769,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     return `${head}${kind}${commit.subject} — ${commit.authorName}, ${commit.authorDate.slice(0, 10)}.${beyond}`;
   };
 
-  const placeholder = (message: string): void => {
+  const placeholder = (kind: EmptyKind, message: string): void => {
     commits = [];
     hasMore = false;
     selected = null;
@@ -777,6 +790,9 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     splitter.hidden = true;
     emptyState.hidden = false;
     emptyState.textContent = message;
+    for (const [name, figure] of Object.entries(emptyFigures)) {
+      showFigure(figure, name === kind);
+    }
   };
 
   // --- what the list says about itself ---
@@ -949,12 +965,13 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       listPane.hidden = false;
       splitter.hidden = false;
       emptyState.hidden = true;
+      for (const figure of Object.values(emptyFigures)) showFigure(figure, false);
       updateCount();
       renderAnchor();
       renderRows();
     } catch (error) {
       deps.onError(error);
-      placeholder("History could not be loaded.");
+      placeholder("unavailable", "History could not be loaded.");
     } finally {
       loading = false;
       moreButton.disabled = !hasMore;
@@ -1237,7 +1254,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
       // the session that just closed has no screen to arrive on.
       graphContext = undefined;
       void readNames();
-      placeholder("Open a repository to browse its history.");
+      placeholder("no-repo", "Open a repository to browse its history.");
       render();
       return;
     }
@@ -1257,7 +1274,7 @@ export function createHistoryView(deps: HistoryDeps): HistoryView {
     // this side of the refresh to hang off.
     closeBubble();
     detail.hidden = true;
-    if (head === null) placeholder("No commits yet.");
+    if (head === null) placeholder("no-commits", "No commits yet.");
     else void loadPage(true);
     render();
   };

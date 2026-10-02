@@ -29,6 +29,7 @@ import {
   type IntervalApplied,
 } from "../activityModel";
 import { button, el, icon, openMenu, plural } from "../dom";
+import { emptyFigure, showFigure } from "../emptyState";
 import { currentFontPx } from "../font";
 import { onDispose } from "../lifecycle";
 import {
@@ -107,6 +108,12 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     tabIndex: 0,
   }, [fileVirtual]);
   const emptyState = el("p", { class: "empty-state", hidden: true });
+  // A sibling of the sentence, not a wrapper around it: the sentence stays the
+  // element that carries the wording and the only thing an assistive technology
+  // reads, and the figure is decoration beside it. Wrapping would have changed
+  // what the empty state is and where the name comes from, for no gain.
+  const emptyFigureClean = emptyFigure("clean");
+  showFigure(emptyFigureClean, false);
 
   // --- commit footer ---
   const commitMessage = el("textarea", {
@@ -147,7 +154,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     el("div", { class: "reset-row" }, [resetTarget, resetButton]),
   ]);
 
-  element.append(operationBanner, fileList, emptyState, commitFooter);
+  element.append(operationBanner, fileList, emptyFigureClean, emptyState, commitFooter);
 
   let listRows: ListRow[] = [];
   let currentFiles: FileView[] = [];
@@ -435,6 +442,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
       fileRowsHost.style.transform = "translateY(0px)";
       fileRowsHost.replaceChildren();
       emptyState.hidden = false;
+      showFigure(emptyFigureClean, true);
       // The shell hides every view while no repository is open and shows the
       // welcome view instead, so an empty list here can only mean a clean
       // working copy. The no-repository wording lives in `views/welcome.ts`.
@@ -442,6 +450,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
       return;
     }
     emptyState.hidden = true;
+    showFigure(emptyFigureClean, false);
     listRows = buildRows(files, collapsedGroups);
     syncSelection();
     renderFileRows();
