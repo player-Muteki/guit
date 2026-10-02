@@ -156,6 +156,14 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .checkbox { display: inline-flex; align-items: center; gap: 0.35rem; font-size: var(--text-sm); color: var(--text-muted); cursor: pointer; }
 
 /* --- menus --- */
+/* The three depth tiers, and what each one is for. A layer is given a tier by
+   how much of the page it interrupts and how long it stays there, not by how
+   important it feels: a menu and a results layer answer a click and leave, so
+   they take the contact shadow that says "this is on top of the row you were
+   looking at"; a toast outlives the action that raised it and sits over
+   whatever the next one happens to be, so it gets reach; a dialog holds the
+   window until it is answered, and the backdrop behind it is already saying
+   that, so the shadow's job is to give the one card a wall to cast onto. */
 .menu {
   position: absolute;
   z-index: 40;
@@ -168,6 +176,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   background: var(--surface-raised);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
 }
 .menu[hidden] { display: none; }
 .menu.float { position: fixed; top: auto; right: auto; }
@@ -320,6 +329,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   background: var(--surface-raised);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
 }
 .search-results[hidden] { display: none; }
 .search-list { display: flex; flex-direction: column; }
@@ -713,6 +723,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   background: var(--surface-raised);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
   font-size: var(--text-sm);
   overflow: hidden;
 }
@@ -800,6 +811,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface-raised);
+  box-shadow: var(--shadow-3);
   color: var(--text);
   padding: 0.75rem 0.9rem 0.65rem;
   max-width: min(28rem, 92vw);
@@ -835,7 +847,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
    left edge: the left edge of a row is the 2px Git status rail, and a second
    meaning on the same edge would spend the one thing this window is loud
    about. */
-.toast { display: flex; align-items: flex-start; gap: 0.4rem; padding: 0.45rem 0.55rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-raised); font-size: var(--text-sm); }
+.toast { display: flex; align-items: flex-start; gap: 0.4rem; padding: 0.45rem 0.55rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-raised); box-shadow: var(--shadow-2); font-size: var(--text-sm); }
 .toast-error { border-color: var(--danger); background: var(--danger-soft); }
 .toast-warning { border-color: var(--status-modified); }
 .toast-info { border-color: var(--accent); }

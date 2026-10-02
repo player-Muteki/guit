@@ -164,6 +164,25 @@
   --radius-sm: 0.25rem;
   --transition: 120ms ease;
 
+  /* Depth. Three tiers, and only the things that genuinely float get one: a
+     menu, a results layer, a commit bubble, a toast, a dialog. A list row, a
+     panel and the page itself do not — they sit in the plane, and a shadow on
+     a surface that is already on the ground draws a second ground under it.
+
+     Each tier is two layers because one does not read at this size. The first
+     is the contact shadow, tight and close, which is what says the layer is
+     touching the thing below it rather than printed on it; the second is the
+     cast shadow, wider and weaker, which is what carries the height. A single
+     soft blur has to be tuned between those two jobs and does neither.
+
+     The hue is the deep aubergine of the dark surfaces rather than black:
+     a black shadow on warm cream reads as dirt, because every other colour in
+     this scheme is warm. Overridable by pointer, not by scheme — see the note
+     on the dark scheme's own set below. */
+  --shadow-1: 0 1px 2px rgba(58, 30, 50, 0.10), 0 2px 8px rgba(58, 30, 50, 0.07);
+  --shadow-2: 0 2px 4px rgba(58, 30, 50, 0.10), 0 8px 20px rgba(58, 30, 50, 0.09);
+  --shadow-3: 0 6px 14px rgba(58, 30, 50, 0.12), 0 24px 56px rgba(58, 30, 50, 0.16);
+
   --focus-ring: 0 0 0 2px var(--surface-panel), 0 0 0 4px var(--accent);
 }
 
@@ -216,6 +235,17 @@
     --graph-lane-5: #f0a3b4;
 
     --focus-ring: 0 0 0 2px var(--surface-panel), 0 0 0 4px var(--accent);
+
+    /* Depth inverts here in one way only. A shadow's job is to darken what is
+       under a lifted thing; on a ground that is already nearly black there is
+       little left to darken, so the same alpha reads as nothing. The dark set
+       therefore trades warmth for strength — a cool near-black, and a deeper
+       one than the light set would need — because the separation a raised layer
+       has on this ground comes from the shadow's *reach* rather than its
+       opacity. Two layers, same as the light set, same reasons. */
+    --shadow-1: 0 1px 3px rgba(4, 2, 8, 0.60), 0 2px 8px rgba(4, 2, 8, 0.45);
+    --shadow-2: 0 2px 6px rgba(4, 2, 8, 0.62), 0 10px 24px rgba(4, 2, 8, 0.50);
+    --shadow-3: 0 8px 20px rgba(4, 2, 8, 0.66), 0 28px 64px rgba(4, 2, 8, 0.58);
   }
 }
 
@@ -283,6 +313,13 @@
   --graph-lane-3: #e3c27a;
   --graph-lane-4: #e59ad6;
   --graph-lane-5: #f0a3b4;
+
+  /* The depth ladder restated, for the same reason every hue above is: an
+     explicit override has to be a complete scheme, not a partial one, or the
+     sheet says light in the places it forgot. */
+  --shadow-1: 0 1px 3px rgba(4, 2, 8, 0.60), 0 2px 8px rgba(4, 2, 8, 0.45);
+  --shadow-2: 0 2px 6px rgba(4, 2, 8, 0.62), 0 10px 24px rgba(4, 2, 8, 0.50);
+  --shadow-3: 0 8px 20px rgba(4, 2, 8, 0.66), 0 28px 64px rgba(4, 2, 8, 0.58);
 }
 
 /* An explicit override always beats the system preference, so these two

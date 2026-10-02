@@ -117,8 +117,17 @@ function shadowOf(node: HTMLElement): { layers: number; longest: number; cast: s
     return alpha !== null && Number(alpha[1]) > 0;
   });
   const spread = painted.map((one) => {
-    const lengths = (one.match(/(-?[\d.]+)px/g) ?? []).map(Number);
-    return lengths.length >= 4 ? Math.max(Math.abs(lengths[2]), Math.abs(lengths[3])) : 0;
+    // `String.match` with a global flag returns whole matches, groups only in
+    // an exec loop — so the obvious one-liner here hands `Number` the strings
+    // "8px" and yields NaN, and `Math.max` of a NaN serialises as `null` rather
+    // than raising. The reading then reports a length of `null` and looks like
+    // a parse miss instead of the two blurs the engine actually resolved.
+    const lengths: number[] = [];
+    const length = /(-?[\d.]+)px/g;
+    for (let hit = length.exec(one); hit !== null; hit = length.exec(one)) lengths.push(Number(hit[1]));
+    // A box-shadow length list is offset-x, offset-y, blur, spread: the blur is
+    // what gives the layer its reach, so that is the number worth reporting.
+    return lengths.length >= 4 ? Math.abs(lengths[2]) : 0;
   });
   return { layers: painted.length, longest: spread.length > 0 ? Math.max(...spread) : 0, cast: value };
 }
@@ -198,7 +207,22 @@ interface Floating {
   make: () => HTMLElement;
   /** The surface this shape is drawn over, in the panel's own flow. */
   over: string;
+  /** The depth tier the sheet is expected to give this shape, and the smallest
+   * blur that tier is allowed to have.
+   *
+   * The floor is what keeps "it has a box-shadow" from being the whole
+   * assertion. A shadow can be declared, counted, and still be too tight to
+   * separate anything at 340x400 — `0 1px 1px` is one that reads as a hairline
+   * rather than as height. So the check asks for the blur the tier promises,
+   * which is the number a reader would look at in review. */
+  tier: 1 | 2 | 3;
+  blurFloor: number;
 }
+
+/** The floor each tier has to clear: enough reach to read as height at the
+ * panel's minimum window, and rising with the tier because the tier exists
+ * precisely to say how far the layer is from the page. */
+const BLUR_FLOOR = [0, 6, 18, 48] as const;
 
 const FLOATING: ReadonlyArray<Floating> = [
   {
@@ -215,6 +239,8 @@ const FLOATING: ReadonlyArray<Floating> = [
       return menu;
     },
     over: ".view-body",
+    tier: 1,
+    blurFloor: BLUR_FLOOR[1],
   },
   {
     label: "search results layer",
@@ -223,6 +249,8 @@ const FLOATING: ReadonlyArray<Floating> = [
       el("div", { class: "search-footer" }, [el("span", { class: "search-summary" })]),
     ]),
     over: ".main-toolbar",
+    tier: 1,
+    blurFloor: BLUR_FLOOR[1],
   },
   {
     label: "commit bubble",
@@ -231,6 +259,8 @@ const FLOATING: ReadonlyArray<Floating> = [
       el("p", { class: "bubble-line" }),
     ]),
     over: ".history-view",
+    tier: 1,
+    blurFloor: BLUR_FLOOR[1],
   },
   {
     label: "dialog",
@@ -239,11 +269,15 @@ const FLOATING: ReadonlyArray<Floating> = [
       el("div", { class: "dialog-names" }),
     ]),
     over: ".view-body",
+    tier: 3,
+    blurFloor: BLUR_FLOOR[3],
   },
   {
     label: "toast",
     make: () => el("div", { class: "toast toast-error", role: "alert" }, [el("span", { class: "toast-message", text: "Something failed." })]),
     over: ".view-body",
+    tier: 2,
+    blurFloor: BLUR_FLOOR[2],
   },
 ];
 
@@ -319,6 +353,7 @@ function __probe(): string {
         return {
           layer: shape.label,
           drawnOver: shape.over,
+          tier: shape.tier,
           background: rgb(own),
           surfaceUnder: rgb(below),
           stepFromUnder: own !== null && below !== null ? channelStep(own, below) : null,
@@ -332,7 +367,9 @@ function __probe(): string {
       // flat rectangle — which is what every layer in this product was until
       // the depth ladder landed, and which review cannot see.
       for (const reading of readings) {
+        const shape = FLOATING.find((one) => one.label === reading.layer);
         check(`${scheme}/${reading.layer}: paints a colour and casts a shadow`, reading.background !== null && reading.shadow.layers > 0, reading);
+        check(`${scheme}/${reading.layer}: casts as deep as its tier promises`, reading.shadow.longest >= (shape?.blurFloor ?? 0), reading);
       }
       check(`REPORT ${scheme}: what separates each floating layer from the page`, true, readings);
 
