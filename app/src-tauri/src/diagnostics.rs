@@ -251,7 +251,12 @@ mod tests {
 
     #[test]
     fn error_feed_folds_home_and_bounds_the_summary() {
-        let home = std::env::var("HOME").expect("test host has a home");
+        // Resolve the home the same way `fold_home` does: a Windows shell sets
+        // `USERPROFILE` and not the POSIX `HOME`, so reading only the latter
+        // panicked on that runner while the redaction under test was working.
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .expect("test host has a home");
         if home.len() < 2 {
             return;
         }

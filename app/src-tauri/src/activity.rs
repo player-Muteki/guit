@@ -826,7 +826,14 @@ mod tests {
             std::fs::write(&path, b"body\n").unwrap();
             stamp(&path, *millis);
         }
-        (root, repo)
+        // Hand back the repository in the shape Git and the real watcher use. On
+        // Windows the temporary root can arrive as an 8.3 short path
+        // (`RUNNER~1`), while `rev-parse --show-toplevel` and `notify` both
+        // answer with the long form; a test that fed the short spelling as a
+        // watch event would miss the index and re-ask Git — the very cost these
+        // rounds count. `native_form` is the identity on unix, so this only
+        // changes anything on Windows.
+        (root, crate::util::native_form(&repo))
     }
 
     fn track(repo: &Path, message: &str) {

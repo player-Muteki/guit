@@ -42,6 +42,15 @@ release it belongs to did not measure.
   cases use names NTFS will actually hold (it refuses `*`), and the Linux-only
   retry around a freshly-written stand-in `git` is gated to `cfg(unix)` so it no
   longer reads as dead code on Windows.
+- Two more Windows-runner assumptions in the tests were corrected once the suite
+  actually ran there. The temporary repository can arrive as an 8.3 short path
+  (`RUNNER~1`) while `git rev-parse --show-toplevel` and the file-system watcher
+  both answer with the long form; the activity and session fixtures now hand back
+  the same long form `native_form` gives the production code, so a watch event
+  matches the index instead of silently costing a Git read. And the diagnostics
+  test read only `HOME`, which a Windows shell does not set, so it now resolves
+  the home directory the way the redaction under test does — `HOME` or
+  `USERPROFILE`.
 
 ### Known gaps at this version
 

@@ -840,7 +840,14 @@ mod tests {
         // config the host user happens to carry; on Windows an installed Git
         // defaults `core.autocrlf` to true and rewrites every checkout.
         repo::git_with(&repo, &[], &["config", "core.autocrlf", "false"]);
-        Fixture { root, repo }
+        // Report the repository in the form Git answers with: on Windows the
+        // temp root can be an 8.3 short path while `--show-toplevel` returns the
+        // long one, and `open_reports_branch_and_files` checks the reported root
+        // against this path. `native_form` is the identity on unix.
+        Fixture {
+            root,
+            repo: crate::util::native_form(&repo),
+        }
     }
 
     #[test]
