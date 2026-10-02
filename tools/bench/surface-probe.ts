@@ -389,9 +389,16 @@ function __probe(): string {
   // Asserted: every element resolved a parseable duration, so the reading is a
   // measurement rather than a null. Reported: which of them move at all.
 
-  const INTERACTIVE: ReadonlyArray<{ label: string; tag: "button" | "input"; className: string }> = [
+  const INTERACTIVE: ReadonlyArray<{ label: string; tag: "button" | "input"; className: string; within?: string }> = [
     { label: "file row", tag: "button", className: "file-row" },
-    { label: "commit row", tag: "button", className: "commit-row" },
+    // The graph's list row, not the commit box's row of the same name: the sheet
+    // styles it as `.history-list .commit-row`, so a bare `.commit-row` measured
+    // outside a list matches nothing and reads as a control with no transition —
+    // which is exactly what it reported before this wrapper was added. The two
+    // rows share a class name because they are both a commit; they are not the
+    // same control, and a probe that cannot tell them apart is measuring one of
+    // them twice.
+    { label: "commit row", tag: "button", className: "commit-row", within: "history-list" },
     { label: "group heading", tag: "button", className: "group-heading" },
     { label: "menu item", tag: "button", className: "menu-item" },
     { label: "search row", tag: "button", className: "search-row" },
@@ -404,7 +411,12 @@ function __probe(): string {
   const interactiveHost = host();
   const motion = INTERACTIVE.map((one) => {
     const node = el(one.tag, { class: one.className, type: one.tag === "button" ? "button" : undefined });
-    interactiveHost.append(node);
+    if (one.within !== undefined) {
+      const wrapper = el("div", { class: one.within }, [node]);
+      interactiveHost.append(wrapper);
+    } else {
+      interactiveHost.append(node);
+    }
     const style = getComputedStyle(node);
     const duration = style.transitionDuration.split(",")[0].trim();
     const reading = {
@@ -412,6 +424,10 @@ function __probe(): string {
       className: one.className,
       transitionProperty: style.transitionProperty,
       transitionDuration: style.transitionDuration,
+      millis: (() => {
+        const hit = /^(\d*\.?\d+)(m?s)$/.exec(duration);
+        return hit === null ? null : parseFloat(hit[1]) * (hit[2].endsWith("ms") ? 1 : 1000);
+      })(),
       moves: /^(\d*\.?\d+)(m?s)$/.test(duration) ? parseFloat(duration) * (duration.endsWith("ms") ? 1 : 1000) > 0 : null,
     };
     node.remove();
@@ -422,6 +438,25 @@ function __probe(): string {
     "every interactive element resolved a transition duration",
     motion.every((one) => one.moves !== null),
     motion.map((one) => `${one.className}=${one.transitionDuration}`),
+  );
+  // Knife 3. Asserted, not reported: an element that changes on hover and
+  // snaps there is a different control from one that eases there, and that
+  // difference is exactly what a screenshot cannot show. Nine elements, seven of
+  // which snapped, was the reading this gate was written against.
+  //
+  // The floor is the panel's own token rather than a literal, because
+  // `prefers-reduced-motion` zeroes `--transition` for a user who asked for
+  // that — and this probe runs with no preference, so it measures the 120ms the
+  // token actually resolves to.
+  const motionToken = getComputedStyle(document.documentElement).getPropertyValue("--transition").trim();
+  const motionFloor = (() => {
+    const hit = /(-?\d*\.?\d+)(m?s)/.exec(motionToken);
+    return hit === null ? 0 : parseFloat(hit[1]) * (hit[2].endsWith("ms") ? 1 : 1000);
+  })();
+  check(
+    "every interactive element answers a change with the panel's own transition",
+    motion.every((one) => one.moves === true && (one.millis ?? 0) >= motionFloor),
+    motion.map((one) => `${one.className}=${one.transitionDuration} (token ${motionToken}, floor ${motionFloor}ms)`),
   );
   check("REPORT which elements answer an interaction with a transition", true, motion);
   check("REPORT how many do not", true, `${motion.filter((one) => one.moves === false).length} of ${motion.length} change with no transition`);
@@ -446,11 +481,21 @@ function __probe(): string {
   const numberHost = host();
   const numerals = NUMBERED.map((one) => {
     const widths: Record<string, number> = {};
-    let variant = "";
+    // Read the variant from a node that is *in the document*. This read was
+    // originally off the detached node and answered "" for every element — and
+    // "" is indistinguishable from "the sheet declared no font-variant-numeric",
+    // so the reading could never have told a missing declaration from a missing
+    // node. The same detached read is why the three `ch`-aware numbers never
+    // moved: a node with no box measures whatever it measures, which is nothing.
+    // `contentWidth` appends before it measures, so the widths were honest; only
+    // this line was not, and it was the line the check reads.
+    let variant: string | null = null;
     for (const text of ["9", "10", "100"]) {
       const node = el("span", { class: one.className, text });
-      if (variant === "") variant = getComputedStyle(node).fontVariantNumeric;
+      numberHost.append(node);
+      if (variant === null) variant = getComputedStyle(node).fontVariantNumeric;
       widths[text] = Number(contentWidth(numberHost, node).toFixed(2));
+      node.remove();
     }
     const values = Object.values(widths);
     return {
@@ -462,6 +507,21 @@ function __probe(): string {
     };
   });
   check("every numbered element measured three widths", numerals.every((one) => Object.keys(one.widths).length === 3), numerals);
+  // Knife 3. Asserted: a number whose box changes width moves whatever is
+  // beside it, and on the smallest window whatever is beside it is often the
+  // only other thing on the line. Two things prevent that — fixed digits
+  // (`tabular-nums`) or a reserved box — and either is a correct answer, so
+  // the check asks that a moving number have one of them rather than asking for
+  // a particular mechanism.
+  //
+  // `.tab-badge` and `.detail-meta` pass the second way today: the badge
+  // reserves `3ch`, and the detail row is a block whose width never depended on
+  // its content. Both are correct, and neither needs `tabular-nums`.
+  check(
+    "a number that changes width is held to a fixed width or tabular figures",
+    numerals.every((one) => one.spread === 0 || (one.fontVariantNumeric ?? "").includes("tabular-nums")),
+    numerals.map((one) => `${one.className}: spread ${one.spread}, font-variant-numeric "${one.fontVariantNumeric}"`),
+  );
   check("REPORT whether a number that changes also changes width", true, numerals);
   numberHost.remove();
 
