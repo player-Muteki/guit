@@ -34,13 +34,20 @@ release it belongs to did not measure.
 
 The integrated title bar has build and source-test coverage, and its rendered
 layout has been measured in a real browser engine across nine window sizes and
-four interface sizes. What that does not cover is the window manager side:
-window dragging, edge resizing, the native window menu, always-on-top and the
-saved geometry have not yet been exercised in a running window, so no entry
-here claims them verified.
+four interface sizes. What that does not cover is the window manager side.
+Always-on-top has been exercised in a running window: the pin was toggled three
+times against a desktop session and the window manager's state followed each
+request. Window dragging, edge resizing, the native window menu and the saved
+geometry still have not been run in a window, so no entry here claims them
+verified.
 
 ### Fixed
 
+- On X11, the pin reads the window manager's state directly. A stale GTK
+  state no longer reports failure or leaves the pin button off when the
+  window is already above other windows. Measured in a running window: three
+  pin requests, each followed by the window manager's own state. Whether a
+  normal window can cover a pinned one still has no measurement on this host.
 - Linux selects X11/XWayland first for window controls, including when the
   launch environment specifies Wayland. Native Wayland remains a fallback
   when X11 is unavailable. Direct launches no longer require a terminal

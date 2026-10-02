@@ -33,7 +33,7 @@ window.__TAURI_INTERNALS__ = {
   // frontend reads when the backend has nothing to report, so the view takes its
   // existing no-answer path instead of a rejection.
   invoke: async (request, args) => {
-    if (request === "plugin:window|is_always_on_top") return topmost;
+    if (request === "window_is_always_on_top") return topmost;
     if (request === "plugin:window|set_always_on_top" && args && typeof args === "object" && "value" in args) {
       topmost = args.value === true;
     }

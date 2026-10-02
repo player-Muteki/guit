@@ -75,11 +75,11 @@ export async function setAlwaysOnTop(value: boolean): Promise<void> {
     }
     if (attempt < 10) await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
   }
-  throw new Error("The desktop did not apply the requested always-on-top setting.");
+  throw new Error("The desktop did not confirm the requested always-on-top setting.");
 }
 
 export async function syncAlwaysOnTop(): Promise<boolean> {
-  const actual = await currentWindow.isAlwaysOnTop();
+  const actual = await invoke<boolean>("window_is_always_on_top");
   setTopmost(actual);
   return actual;
 }

@@ -21,6 +21,7 @@ mod status;
 mod tags;
 mod util;
 mod watch;
+mod window_state;
 mod write;
 
 use probe::{Code, GitProbe, ProbeError, ToolProbe};
@@ -1064,6 +1065,13 @@ async fn export_diagnostics(app: tauri::AppHandle, path: String) -> Result<Strin
     .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
 }
 
+#[tauri::command]
+async fn window_is_always_on_top(window: tauri::Window) -> Result<bool, ProbeError> {
+    tauri::async_runtime::spawn_blocking(move || window_state::is_always_on_top(window))
+        .await
+        .map_err(|error| ProbeError::new("task_failed", error.to_string()))?
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     std::env::set_var("GDK_BACKEND", "x11,wayland");
@@ -1100,6 +1108,7 @@ fn main() {
             cancel_process_probe,
             save_window_settings,
             restore_window_settings,
+            window_is_always_on_top,
             open_repository,
             restore_repository,
             refresh_repository,

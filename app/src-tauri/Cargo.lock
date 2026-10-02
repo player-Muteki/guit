@@ -1219,6 +1219,8 @@ dependencies = [
 name = "guit"
 version = "0.0.2"
 dependencies = [
+ "gdkx11",
+ "gtk",
  "icu_normalizer",
  "libc",
  "notify",
@@ -1229,6 +1231,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "unicode-segmentation",
+ "x11",
 ]
 
 [[package]]

@@ -356,6 +356,7 @@ const NOT_SESSION_BOUND = [
   "list_recent_repositories",
   "save_window_settings",
   "restore_window_settings",
+  "window_is_always_on_top",
   "probe_git",
   "probe_external_tools",
   "run_process_probe",

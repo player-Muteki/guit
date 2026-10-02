@@ -115,7 +115,7 @@ test("the hold names the operation that is running and is released only by the b
 test("the pin reports the state the window is in, not the state that was asked for", () => {
   // The flag moves only through `setTopmost`, which announces to whoever is painted from
   // it: the app-bar button, and the Settings checkbox that owns the same fact.
-  assert.match(win, /const actual = await currentWindow\.isAlwaysOnTop\(\);\s*setTopmost\(actual\)/);
+  assert.match(win, /const actual = await invoke<boolean>\("window_is_always_on_top"\);\s*setTopmost\(actual\)/);
   // The flag is assigned in exactly two places: its own declaration, and the one writer
   // that announces it. Anything else that set it directly would move the state without
   // telling the button or the checkbox that are painted from it.
