@@ -27,7 +27,7 @@
 | `npm run bin:release` | 成功构建带 custom-protocol 的独立 Linux 二进制；构建成功不代表原生窗口行为通过 |
 | `tools/bench/layout-probe.mjs`（Edge 154.0.4258.48 无头 CDP，九档窗口 + 12/16/20/24px） | **637 条断言，fails=0**。详见下面 §1 与 §2 |
 | `tools/bench/read-budget.mjs` | **fails=0**；按键→"Searching…" p50 120.4 / p95 120.9ms，按键→首行画上 p50 120.8 / p95 121.2ms，对照导出的 120ms 等待。二十次按键恰好二十条 `search_repository` 与二十条 `cancel_search`，顶栏重构没有多发任何读 |
-| Linux GTK/WebKit/AT-SPI 原生窗口 | **仍未验证**。这台主机是无头 Wayland 会话，`Gtk.init_check()` 仍不可用，访问桌面的提升权限未获执行 |
+| Linux GTK/WebKit/AT-SPI 原生窗口 | **部分已验证，部分仍未闭合**。本行原来记的“仍不可用”不成立：实测 `DISPLAY=:0`、`Gtk.init_check()` → `True`、Atspi 绑定导入成功，用 release 二进制跑通了仓库自动恢复、置顶切换、最大化与还原、关闭、重启恢复五项。但拖动、八向缩放、双击最大化与原生菜单仍无证据，因为 AT-SPI 的合成输入在这台机器上返回 `True` 而实际无效。详见 [表面与深度](23-surface-depth.md) §1 |
 | Windows、macOS、CI | 本轮均未运行，不新增覆盖声明 |
 
 临时日志在 `/tmp/guit-topbar-*.log`，不会作为仓库交付物。

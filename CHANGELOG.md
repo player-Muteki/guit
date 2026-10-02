@@ -25,6 +25,12 @@ release it belongs to did not measure.
   change count reserves its width from zero through 99+.
 - Repository actions use the repository menu; committing and branch switching
   remain next to the content they act on.
+- The menu, the search results layer, the commit bubble, a toast and a dialog
+  each cast a shadow, so a floating layer reads as sitting above the page
+  instead of being a lighter rectangle drawn on it. Nothing that stays in the
+  plane — a row, a panel, the page — gained one. Each scheme has its own depth;
+  the dark one trades warmth for strength, because a shadow's job is to darken
+  what is under a lifted thing and a near-black ground has little left to give.
 
 The integrated title bar has build and source-test coverage, and its rendered
 layout has been measured in a real browser engine across nine window sizes and
