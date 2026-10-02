@@ -192,7 +192,10 @@ const STUB = `(() => {
   // the panel would correctly refuse to move.
   let issued = 0;
   const session = () => Object.assign({}, window.__SNAPSHOT__, { version: ++issued });
+  let topmost = true;
   const table = {
+    "plugin:window|is_always_on_top": () => topmost,
+    "plugin:window|set_always_on_top": (args) => { topmost = args.value; return null; },
     restore_repository: session,
     refresh_repository: session,
     open_repository: session,

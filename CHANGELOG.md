@@ -35,6 +35,13 @@ here claims them verified.
 
 ### Fixed
 
+- Linux prefers X11/XWayland for window controls, with native Wayland available
+  as a fallback or an explicit launch choice. This avoids relying on a
+  keep-above request that the Wayland backend may ignore.
+- The pin now follows the window's reported state after applying a request and
+  when focus changes. A request the desktop does not apply reports an error
+  instead of displaying the requested state as confirmed. A failed startup
+  restore preserves the saved preference for the next launch.
 - Height dragging measures the changes and history regions without counting
   the search bar. Grabbing the divider away from its top edge keeps that
   offset, including when the panel has scrolled. Keyboard adjustments start

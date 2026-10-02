@@ -13,7 +13,7 @@
 
 interface ProbeInternals {
   metadata: { currentWindow: { label: string } };
-  invoke(request: unknown): Promise<unknown>;
+  invoke(request: unknown, args?: unknown): Promise<unknown>;
   transformCallback(callback?: (value: unknown) => void): number;
 }
 
@@ -25,13 +25,20 @@ declare global {
 
 const callbacks = new Map<number, (value: unknown) => void>();
 let nextId = 1;
+let topmost = true;
 
 window.__TAURI_INTERNALS__ = {
   metadata: { currentWindow: { label: "main" } },
   // A command the panel would normally await is answered with the same value the
   // frontend reads when the backend has nothing to report, so the view takes its
   // existing no-answer path instead of a rejection.
-  invoke: async () => null,
+  invoke: async (request, args) => {
+    if (request === "plugin:window|is_always_on_top") return topmost;
+    if (request === "plugin:window|set_always_on_top" && args && typeof args === "object" && "value" in args) {
+      topmost = args.value === true;
+    }
+    return null;
+  },
   transformCallback: (callback?: (value: unknown) => void) => {
     const id = nextId;
     nextId += 1;

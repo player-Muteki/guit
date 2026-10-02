@@ -18,6 +18,7 @@ let saveTimer: number | undefined;
 let saveQueue: Promise<void> = Promise.resolve();
 let lastNormalBounds: Pick<WindowSettings, "width" | "height" | "frameWidth" | "frameHeight" | "x" | "y"> | undefined;
 let alwaysOnTop = false;
+let preferredOnTop = true;
 let previousSize: LogicalSize | undefined;
 let previouslyMaximized = false;
 let restoreEnabled = false;
@@ -47,7 +48,7 @@ export async function persistWindowSettings(): Promise<void> {
         settings: {
           ...bounds,
           schemaVersion: 1,
-          alwaysOnTop,
+          alwaysOnTop: preferredOnTop,
           maximized,
         } satisfies WindowSettings,
       });
@@ -64,18 +65,23 @@ export function scheduleWindowSave(): void {
 }
 
 export async function setAlwaysOnTop(value: boolean): Promise<void> {
-  const previous = alwaysOnTop;
-  try {
-    await currentWindow.setAlwaysOnTop(value);
-    setTopmost(value);
-    scheduleWindowSave();
-  } catch (error) {
-    // The window kept the state it was in, which is the one thing this module can say
-    // without asking the desktop: every request to change it came from the flag. So the
-    // flag goes back too, and the button reports the refusal rather than the wish.
-    setTopmost(previous);
-    throw error;
+  await currentWindow.setAlwaysOnTop(value);
+  for (let attempt = 0; attempt <= 10; attempt += 1) {
+    const actual = await syncAlwaysOnTop();
+    if (actual === value) {
+      preferredOnTop = value;
+      scheduleWindowSave();
+      return;
+    }
+    if (attempt < 10) await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
   }
+  throw new Error("The desktop did not apply the requested always-on-top setting.");
+}
+
+export async function syncAlwaysOnTop(): Promise<boolean> {
+  const actual = await currentWindow.isAlwaysOnTop();
+  setTopmost(actual);
+  return actual;
 }
 
 const topmostListeners = new Set<(value: boolean) => void>();
@@ -214,12 +220,7 @@ export function installWindowChrome(appbar: HTMLElement, onError: (error: unknow
 
 export async function restoreWindowState(): Promise<boolean> {
   const settings = await invoke<WindowSettings | null>("restore_window_settings");
-  // A run with nothing stored is a person who has never chosen, and the panel's whole
-  // use is being visible while something else has the focus — so the unchosen default
-  // is pinned. An explicit `false` in a stored record is the choice they did make, and
-  // is honoured by the same sentence. The window agrees because `tauri.conf.json`
-  // creates it pinned and the restore overwrites that with whatever it stored.
-  setTopmost(settings?.alwaysOnTop ?? true);
+  preferredOnTop = settings?.alwaysOnTop ?? true;
   lastNormalBounds = settings
     ? {
         width: settings.width,
@@ -230,6 +231,7 @@ export async function restoreWindowState(): Promise<boolean> {
         y: settings.y,
       }
     : undefined;
+  await setAlwaysOnTop(preferredOnTop);
   await syncMaximized();
   return alwaysOnTop;
 }
@@ -293,6 +295,7 @@ export async function installWindowHooks(hooks: WindowHooks): Promise<void> {
     });
     await currentWindow.onMoved(() => scheduleWindowSave());
     await currentWindow.onFocusChanged(({ payload }) => {
+      void syncAlwaysOnTop().catch(hooks.onError);
       if (payload) hooks.onFocus();
     });
     await currentWindow.onCloseRequested(async (event) => {

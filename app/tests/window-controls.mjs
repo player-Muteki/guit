@@ -115,7 +115,7 @@ test("the hold names the operation that is running and is released only by the b
 test("the pin reports the state the window is in, not the state that was asked for", () => {
   // The flag moves only through `setTopmost`, which announces to whoever is painted from
   // it: the app-bar button, and the Settings checkbox that owns the same fact.
-  assert.match(win, /catch \(error\) \{[\s\S]{0,300}setTopmost\(previous\);[\s\S]{0,200}throw error;/);
+  assert.match(win, /const actual = await currentWindow\.isAlwaysOnTop\(\);\s*setTopmost\(actual\)/);
   // The flag is assigned in exactly two places: its own declaration, and the one writer
   // that announces it. Anything else that set it directly would move the state without
   // telling the button or the checkbox that are painted from it.
@@ -123,7 +123,8 @@ test("the pin reports the state the window is in, not the state that was asked f
   assert.deepEqual(writes, ["let alwaysOnTop = false;", "alwaysOnTop = value;"]);
   const writer = win.slice(win.indexOf("function setTopmost"), win.indexOf("export function onAlwaysOnTopChange"));
   assert.match(writer, /alwaysOnTop = value;/, "the direct write must be inside the announcing writer");
-  assert.match(win, /setTopmost\(settings\?\.alwaysOnTop \?\? true\)/);
+  assert.match(win, /preferredOnTop = settings\?\.alwaysOnTop \?\? true/);
+  assert.match(win, /await setAlwaysOnTop\(preferredOnTop\)/);
   assert.match(shell, /onDispose\(onAlwaysOnTopChange\(\(\) => render\(\)\)\)/);
 });
 
@@ -183,4 +184,14 @@ test("the capability file grants the native actions the four buttons call", () =
   assert.match(win, /event\.detail === 2 \? toggleMaximized/);
   assert.match(win, /menu\.popup\(position\)/);
   assert.match(main, /onDispose\(installWindowChrome\(shell\.appbar, showError\)\)/);
+});
+
+test("Linux prefers X11 before GTK initializes while allowing an explicit Wayland choice", () => {
+  const entry = rust("src/main.rs");
+  const start = entry.indexOf("fn main()");
+  const backend = entry.indexOf('gdk::set_allowed_backends("x11,wayland")', start);
+  const runtime = entry.indexOf("tauri::Builder::default()", start);
+  assert.ok(backend > start && backend < runtime);
+  assert.match(entry.slice(start, backend), /#\[cfg\(target_os = "linux"\)\]/);
+  assert.match(rust("Cargo.toml"), /\[target\.'cfg\(target_os = "linux"\)'\.dependencies\][\s\S]*?gdk = "0\.18"/);
 });
