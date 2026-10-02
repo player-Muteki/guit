@@ -122,6 +122,7 @@ const BASE = {
   historyGeneration: 0,
   refsGeneration: 0,
   repo: {
+    displayName: "project",
     openPath: "/home/dev/project",
     root: "/home/dev/project",
     gitDir: "/home/dev/project/.git",
@@ -657,7 +658,7 @@ async function main() {
   check("a head move that advances both counters costs one read each",
     total(committed, GRAPH_READS) === 1 && total(committed, REFS_READS) === 1, JSON.stringify(committed));
 
-  const opened = await spent(`document.querySelector('.appbar-branch').click()`);
+  const opened = await spent(`document.querySelector('.appbar-repo').click(); document.querySelector('.repository-menu [aria-label="Branches and tags"]').click()`);
   check("opening the picker over a listing already read asks for nothing",
     total(opened, REFS_READS) === 0, JSON.stringify(opened));
 

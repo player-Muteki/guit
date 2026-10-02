@@ -175,9 +175,12 @@ test("the capability file grants the native actions the four buttons call", () =
   ]) {
     assert.ok(granted.has(permission), `${permission} is called from a window button`);
   }
-  // The native title bar stays, so the decoration owns moving the window. A drag region
-  // without this grant is a bar that does not drag; with it, a second handler for the
-  // same double-click that the decoration already answers.
-  assert.doesNotMatch(shell, /data-tauri-drag-region/);
-  assert.ok(!granted.has("core:window:allow-start-dragging"));
+  assert.equal(JSON.parse(rust("tauri.conf.json")).app.windows[0].decorations, false);
+  assert.ok(granted.has("core:window:allow-start-dragging"));
+  assert.ok(granted.has("core:window:allow-start-resize-dragging"));
+  assert.match(win, /currentWindow\.startDragging\(\)/);
+  assert.match(win, /currentWindow\.startResizeDragging\(direction\)/);
+  assert.match(win, /event\.detail === 2 \? toggleMaximized/);
+  assert.match(win, /menu\.popup\(position\)/);
+  assert.match(main, /onDispose\(installWindowChrome\(shell\.appbar, showError\)\)/);
 });

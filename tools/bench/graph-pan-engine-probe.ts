@@ -108,6 +108,7 @@ const snapshot = (version: number, sessionId: number): SnapshotView => ({
   historyGeneration: 0,
   refsGeneration: 0,
   repo: {
+    displayName: "project",
     openPath: "/home/dev/project",
     root: "/home/dev/project",
     gitDir: "/home/dev/project/.git",

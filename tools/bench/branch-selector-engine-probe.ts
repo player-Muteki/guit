@@ -186,6 +186,7 @@ const snapshot = (
   historyGeneration,
   refsGeneration,
   repo: {
+    displayName: "project",
     openPath: "/home/dev/project",
     root: "/home/dev/project",
     gitDir: "/home/dev/project/.git",

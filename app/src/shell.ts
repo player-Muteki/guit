@@ -1,11 +1,3 @@
-// The application shell: app bar (repo, branch chip, commit, the window cluster),
-// the two-page tab strip, the overlay the branch picker borrows, and
-// the status bar (running operation, watch mode, interface zoom). The shell
-// owns no Git semantics — every action is injected by `main.ts` so the views
-// stay the only place that talks to the backend. The window buttons are injected
-// for the same reason: this file draws what the desktop reports back, and never
-// asks the window for anything itself.
-
 import { el, icon } from "./dom";
 import { onDispose } from "./lifecycle";
 import {
@@ -21,10 +13,10 @@ import {
   watchStatus,
   type ViewId,
 } from "./state";
-import { aheadBehind, branchLabel } from "./headModel";
-import { railHint, VIEW_ICONS, VIEW_TITLES } from "./railModel";
+import { branchLabel } from "./headModel";
+import { railHint, VIEW_TITLES } from "./railModel";
 import { VIEW_HINTS } from "./viewHints";
-import { isAlwaysOnTop, isMaximized, onAlwaysOnTopChange, onMaximizedChange, setAlwaysOnTop } from "./window";
+import { isAlwaysOnTop, isMaximized, onAlwaysOnTopChange, onMaximizedChange } from "./window";
 
 export interface ViewDescriptor {
   id: ViewId;
@@ -35,7 +27,7 @@ export interface ShellActions {
   openRepository(): void;
   refresh(): void;
   closeRepository(): void;
-  commit(): void;
+  openRecent(path: string): void;
   cancelWrite(): void;
   cancelTool(): void;
   setOnTop(value: boolean): void;
@@ -73,101 +65,54 @@ export interface Shell {
   focusTabs(): void;
   /** Repaints only the status bar. See `main.ts`: a streamed progress line
    * must not cost a render of every view. */
+  renderRecents(paths: string[]): void;
   renderStatus(): void;
   render(): void;
   dispose(): void;
 }
 
-function repoName(): string | null {
-  const snapshot = currentSnapshot();
-  if (!snapshot) return null;
-  return snapshot.repo.root ?? snapshot.repo.gitDir;
-}
-
 export function createShell(actions: ShellActions): Shell {
-  // --- app bar ---
-  const wordmark = el("span", { class: "appbar-wordmark", text: "guit" });
-  const repoLabel = el("span", { class: "appbar-repo", text: "No repository" });
-  const branchChip = el("button", {
-    class: "appbar-branch",
-    type: "button",
-    "aria-label": "Switch branch",
+  const repoLabel = el("span", { class: "appbar-repo-name", text: "Open repository" });
+  const repoButton = el("button", {
+    class: "appbar-repo", type: "button", "aria-label": "Repository menu",
+    "aria-haspopup": "menu", "aria-expanded": "false", "aria-controls": "repository-menu",
+  }, [icon("folder"), repoLabel, el("span", { class: "repo-chevron", text: "▾", "aria-hidden": "true" })]);
+  const repoInfo = el("div", { class: "repository-info" });
+  const recentGroup = el("div", { role: "group", "aria-label": "Recent repositories", hidden: true });
+  const recentItems = el("div", { class: "repository-recents" });
+  recentGroup.append(el("div", { class: "repository-heading", text: "Recent repositories" }), recentItems);
+  const repositoryMenu = el("div", {
+    id: "repository-menu", class: "menu repository-menu", role: "menu", "aria-label": "Repository", hidden: true,
   });
-  // The three session buttons carry `appbar-session` because the More menu repeats them
-  // by the same words, and at the minimum window one of the two copies has to go: see
-  // `.window-controls` in the stylesheet.
-  const openButton = el("button", {
-    class: "icon-btn appbar-session",
-    type: "button",
-    "aria-label": "Open repository",
-    title: "Open repository… (Ctrl+O)",
-  }, [icon("folder")]);
-  const refreshButton = el("button", {
-    class: "icon-btn appbar-session",
-    type: "button",
-    "aria-label": "Refresh status",
-    title: "Refresh status (Ctrl+R)",
-  }, [icon("refresh")]);
-  const closeButton = el("button", {
-    class: "icon-btn appbar-session",
-    type: "button",
-    "aria-label": "Close session",
-    title: "Close the current session",
-  }, [icon("close")]);
-  const commitButton = el("button", {
-    class: "btn btn-primary appbar-commit",
-    type: "button",
-    text: "Commit",
+  const menuButton = (label: string, run: () => void): HTMLButtonElement => {
+    const entry = el("button", { class: "menu-item", type: "button", role: "menuitem", text: label, "aria-label": label.replace(/…$/, ""), tabIndex: -1 });
+    entry.addEventListener("click", () => { closeMenus(); run(); });
+    return entry;
+  };
+  const openButton = menuButton("Open repository…", actions.openRepository);
+  const refreshButton = menuButton("Refresh status", actions.refresh);
+  const closeButton = menuButton("Close session", actions.closeRepository);
+  const branchesButton = menuButton("Branches and tags…", () => {
+    setActiveView("main");
+    openOverlay();
   });
+  repositoryMenu.append(repoInfo, openButton, recentGroup, refreshButton, branchesButton, closeButton);
   const pinButton = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Always on top",
-    title: "Always on top",
+    class: "icon-btn", type: "button", "aria-label": "Always on top", title: "Always on top",
   }, [icon("pin")]);
-  const moreButton = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "More repository actions",
-  }, [icon("more")]);
-
-  // --- window controls ---
-  // The four actions the panel promises on both pages, in the order a title bar puts
-  // them: pin, minimise, maximise or restore, close. They belong to the shell rather
-  // than to a page, which is what makes them the same four on Settings as on Main.
-  //
-  // The native title bar is still there, so these are a second way onto the window's
-  // own actions, and the shell only forwards the request: `main.ts` waits for the
-  // desktop's answer, and what is painted below is the state the window reported, never
-  // the state that was asked for. A pin the desktop refused therefore reads as unpinned.
+  const minimizeButton = el("button", {
+    class: "icon-btn", type: "button", "aria-label": "Minimise", title: "Minimise",
+  }, [icon("minimize")]);
+  const maximizeButton = el("button", { class: "icon-btn", type: "button" }, [icon("maximize")]);
+  const quitButton = el("button", {
+    class: "icon-btn window-close", type: "button", "aria-label": "Close guit", title: "Close guit",
+  }, [icon("close")]);
   const windowControls = el("div", {
     class: "window-controls",
     role: "group",
     "aria-label": "Window",
   });
-  const minimizeButton = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Minimise",
-    title: "Minimise",
-  }, [icon("minimize")]);
-  const maximizeButton = el("button", { class: "icon-btn", type: "button" }, [icon("maximize")]);
-  const quitButton = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Close guit",
-    title: "Close guit — the window's size and the panel's choices are written down first",
-  }, [icon("close")]);
   windowControls.append(pinButton, minimizeButton, maximizeButton, quitButton);
-
-  // The maximise button is the one control here whose meaning depends on the state it
-  // is in, and the state moves without this shell being told: a double-click on the
-  // native title bar, `Alt+Space`, a refused maximise. So the label follows a listener
-  // on the window's answer rather than the last thing the button did.
-  //
-  // The two names are the app-bar's own: Settings carries a button called "Restore window
-  // size" that belongs to the compact-window test and means something else entirely, and
-  // a harness that finds a control by name cannot tell two identical names apart.
   const paintMaximize = (value: boolean): void => {
     maximizeButton.setAttribute("aria-label", value ? "Restore window" : "Maximise window");
     maximizeButton.title = value ? "Restore" : "Maximise";
@@ -175,101 +120,84 @@ export function createShell(actions: ShellActions): Shell {
   };
   paintMaximize(isMaximized());
   onDispose(onMaximizedChange(paintMaximize));
-  // The pin is the other control whose look is a fact about the window rather than about
-  // the last click: the stored preference is applied at boot by `restoreWindowState`, and
-  // a refused change is rolled back by `window.ts`. Both say so here, and `render` reads
-  // the answer into the button.
   onDispose(onAlwaysOnTopChange(() => render()));
-  const moreMenu = el("div", { class: "menu", role: "menu", hidden: true });
-  const moreItems: Array<{ label: string; run: () => void }> = [
-    { label: "Open repository…", run: actions.openRepository },
-    { label: "Refresh status", run: actions.refresh },
-    { label: "Close session", run: actions.closeRepository },
-  ];
-  for (const item of moreItems) {
-    const entry = el("button", { class: "menu-item", type: "button", role: "menuitem", text: item.label });
-    entry.addEventListener("click", () => {
-      closeMenus();
-      item.run();
-    });
-    moreMenu.append(entry);
-  }
-
   const appbar = el("header", { class: "appbar" }, [
-    wordmark,
-    repoLabel,
-    branchChip,
-    openButton,
-    refreshButton,
-    closeButton,
-    el("div", { class: "spacer" }),
-    commitButton,
-    moreButton,
-    moreMenu,
+    repoButton,
+    el("div", { class: "window-drag-region", "aria-hidden": "true" }),
+    repositoryMenu,
   ]);
-
-  // The app-bar menus are inline (not floating), so one Escape handler and one
-  // outside-click handler close all of them. Opening a menu moves focus to its
-  // first item, and every exit returns focus to the button that opened it.
-  let menuOpener: HTMLElement | null = null;
-  function closeMenus(): void {
-    const opener = menuOpener;
-    menuOpener = null;
-    moreMenu.hidden = true;
-    opener?.focus();
+  function closeMenus(restoreFocus = true): void {
+    if (repositoryMenu.hidden) return;
+    repositoryMenu.hidden = true;
+    repoButton.setAttribute("aria-expanded", "false");
+    if (restoreFocus) repoButton.focus({ preventScroll: true });
   }
-  function openMenu(next: HTMLElement, opener: HTMLElement): void {
-    const wasOpen = !next.hidden;
-    closeMenus();
-    if (wasOpen) return;
-    next.hidden = false;
-    menuOpener = opener;
-    (next.firstElementChild as HTMLElement | null)?.focus();
+  function menuEntries(): HTMLButtonElement[] {
+    return Array.from(repositoryMenu.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
   }
-
-  const dismissMenus = (event: MouseEvent): void => {
-    if (!(event.target as HTMLElement).closest(".appbar")) closeMenus();
+  function openMenu(last = false): void {
+    repositoryMenu.hidden = false;
+    repoButton.setAttribute("aria-expanded", "true");
+    const entries = menuEntries();
+    (last ? entries.at(-1) : entries[0])?.focus({ preventScroll: true });
+  }
+  repoButton.addEventListener("click", () => {
+    if (repositoryMenu.hidden) openMenu();
+    else closeMenus();
+  });
+  repoButton.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    openMenu(event.key === "ArrowUp");
+  });
+  repositoryMenu.addEventListener("keydown", (event) => {
+    const entries = menuEntries();
+    const position = entries.indexOf(document.activeElement as HTMLButtonElement);
+    let next: number;
+    if (event.key === "ArrowDown") next = (position + 1) % entries.length;
+    else if (event.key === "ArrowUp") next = (position + entries.length - 1) % entries.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = entries.length - 1;
+    else if (event.key === "Tab") { closeMenus(); return; }
+    else return;
+    event.preventDefault();
+    entries[next]?.focus();
+  });
+  const dismissMenus = (event: Event): void => {
+    const target = event.target as Node;
+    if (!repositoryMenu.contains(target) && !repoButton.contains(target)) closeMenus(false);
   };
-  // Escape walks down the stack: an app-bar menu first, then the overlay,
-  // and a modal dialog is never reached here because it cancels itself.
   const escapeStack = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return;
-    closeMenus();
-    closeOverlay();
+    if (!repositoryMenu.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenus();
+    } else closeOverlay();
   };
-
   document.addEventListener("click", dismissMenus);
+  document.addEventListener("focusin", dismissMenus);
   document.addEventListener("keydown", escapeStack);
   onDispose(() => {
     document.removeEventListener("click", dismissMenus);
+    document.removeEventListener("focusin", dismissMenus);
     document.removeEventListener("keydown", escapeStack);
   });
-
-  moreButton.addEventListener("click", (event) => {
-    event.stopPropagation();
-    openMenu(moreMenu, moreButton);
-  });
-  openButton.addEventListener("click", () => actions.openRepository());
-  refreshButton.addEventListener("click", () => actions.refresh());
-  closeButton.addEventListener("click", () => actions.closeRepository());
-  commitButton.addEventListener("click", () => actions.commit());
-  // The app-bar menu is anchored to the bar's right edge, which is where this cluster
-  // now sits, and a window action is not a way of answering the repository menu. So each
-  // of the four takes the menu down with it rather than leaving it open over a window
-  // that has just minimised. `closeMenus` returns focus to the button that opened the
-  // menu, which is the exit a keyboard user already gets from Escape.
-  const windowAction = (run: () => void): void => {
-    closeMenus();
-    run();
-  };
+  const windowAction = (run: () => void): void => { closeMenus(false); run(); };
   pinButton.addEventListener("click", () => windowAction(() => actions.setOnTop(!isAlwaysOnTop())));
   minimizeButton.addEventListener("click", () => windowAction(() => actions.minimize()));
   maximizeButton.addEventListener("click", () => windowAction(() => actions.toggleMaximize()));
   quitButton.addEventListener("click", () => windowAction(() => actions.closeWindow()));
-  branchChip.addEventListener("click", () => {
-    setActiveView("main");
-    openOverlay();
-  });
+  const renderRecents = (paths: string[]): void => {
+    const focused = recentItems.contains(document.activeElement);
+    recentItems.replaceChildren(...paths.map((path) => {
+      const entry = menuButton(path, () => actions.openRecent(path));
+      entry.title = path;
+      return entry;
+    }));
+    recentGroup.hidden = paths.length === 0;
+    if (focused) openButton.focus();
+  };
 
   // --- tabs ---
   // Exactly two pages, both reachable from a cold start: Main is the panel
@@ -285,7 +213,6 @@ export function createShell(actions: ShellActions): Shell {
   const badge = el("span", { class: "tab-badge", hidden: true });
   for (const id of VIEW_ORDER) {
     const children: Array<HTMLElement | SVGSVGElement> = [
-      icon(VIEW_ICONS[id]),
       el("span", { class: "tab-label", text: VIEW_TITLES[id] }),
     ];
     if (id === "main") children.push(badge);
@@ -304,12 +231,15 @@ export function createShell(actions: ShellActions): Shell {
     tabs.append(item);
   }
   appbar.append(tabs);
-  // The window cluster is the last thing on the bar, so the four actions sit against the
-  // top-right corner in the order a title bar puts them, on both pages. The native title
-  // bar stays, which is also why there is no drag region here: moving the window and
-  // double-clicking to maximise are already the decoration's job, and a second handler
-  // for the same gesture in the page would undo the first.
   appbar.append(windowControls);
+  const measureBar = (): void => {
+    const font = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const required = tabs.getBoundingClientRect().width + windowControls.getBoundingClientRect().width + font * 10;
+    appbar.classList.toggle("two-rows", appbar.clientWidth < required);
+  };
+  const barObserver = new ResizeObserver(measureBar);
+  for (const node of [appbar, tabs, windowControls]) barObserver.observe(node);
+  onDispose(() => barObserver.disconnect());
 
   // --- overlay ---
   // The one layer that covers the stage: the branch picker opens here. It is
@@ -387,22 +317,22 @@ export function createShell(actions: ShellActions): Shell {
     const snapshot = currentSnapshot();
     const active = activeView();
     const session = isSessionActive();
-    const name = repoName();
-    repoLabel.textContent = name ?? "No repository";
-    repoLabel.title = name ?? "";
-    const branch = snapshot?.branch ?? null;
-    branchChip.textContent = `${branchLabel(branch)}${aheadBehind(branch)}`;
-    branchChip.title = name ? `${name}\n${branchLabel(branch)}` : "No repository open";
-    branchChip.disabled = !session;
+    const name = snapshot?.repo.displayName ?? "Open repository";
+    const path = snapshot?.repo.root ?? snapshot?.repo.gitDir ?? "";
+    if (repoLabel.textContent !== name) repoLabel.textContent = name;
+    repoButton.title = path || "Open a local repository";
+    const info = session ? path + "\n" + branchLabel(snapshot?.branch ?? null) : "No repository open";
+    if (repoInfo.textContent !== info) repoInfo.textContent = info;
     refreshButton.disabled = !session;
     closeButton.disabled = !session;
-    commitButton.disabled = !session || isWriteRunning();
+    branchesButton.disabled = !session;
     pinButton.classList.toggle("active", isAlwaysOnTop());
     pinButton.setAttribute("aria-pressed", String(isAlwaysOnTop()));
 
     const pending = snapshot?.files.filter((file) => file.unstaged || file.untracked).length ?? 0;
     badge.hidden = pending === 0;
     badge.textContent = pending > 99 ? "99+" : String(pending);
+    badge.setAttribute("aria-label", String(pending) + " unstaged or untracked files");
 
     for (const [id, item] of tabButtons) {
       const selected = id === active;
@@ -482,6 +412,7 @@ export function createShell(actions: ShellActions): Shell {
     isOverlayOpen,
     focusCommit,
     focusTabs,
+    renderRecents,
     renderStatus,
     render,
     dispose() { closeMenus(); },

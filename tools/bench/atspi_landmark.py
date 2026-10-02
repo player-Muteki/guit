@@ -88,6 +88,15 @@ def find_button(name=None, contains=None, root=None):
     return None
 
 
+def find_menu_item(name, root=None):
+    for node in tree(root):
+        if _once(lambda: node.get_role().value_name, default="") != "ATSPI_ROLE_MENU_ITEM":
+            continue
+        if _once(lambda: node.get_name(), default="") == name:
+            return node
+    return None
+
+
 def click(button, attempts=5):
     for _ in range(attempts):
         if button is not None and _once(lambda: button.do_action(0), default=False):

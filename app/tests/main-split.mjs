@@ -40,17 +40,44 @@ test("a stored share is only trusted after the clamp", () => {
   assert.equal(readStoredSplit("140"), SPLIT_MAX);
 });
 
-test("a pointer position becomes a share of the panel", () => {
-  assert.equal(splitFromPointer(450, 1000), 45);
-  assert.equal(splitFromPointer(0, 1000), SPLIT_MIN);
-  assert.equal(splitFromPointer(-20, 1000), SPLIT_MIN);
-  assert.equal(splitFromPointer(1000, 1000), SPLIT_MAX);
-  assert.equal(splitFromPointer(900, 1000), SPLIT_MAX);
+test("a pointer position becomes a share of the two regions", () => {
+  const geometry = { changesTop: 0, regionsHeight: 1000, grabOffset: 0 };
+  assert.equal(splitFromPointer(450, geometry), 45);
+  assert.equal(splitFromPointer(0, geometry), SPLIT_MIN);
+  assert.equal(splitFromPointer(-20, geometry), SPLIT_MIN);
+  assert.equal(splitFromPointer(1000, geometry), SPLIT_MAX);
+  assert.equal(splitFromPointer(900, geometry), SPLIT_MAX);
 });
 
 test("an unmeasured panel keeps the default rather than inventing a share", () => {
-  assert.equal(splitFromPointer(100, 0), SPLIT_DEFAULT);
-  assert.equal(splitFromPointer(100, Number.NaN), SPLIT_DEFAULT);
+  for (const regionsHeight of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(splitFromPointer(100, { changesTop: 0, regionsHeight, grabOffset: 0 }), SPLIT_DEFAULT);
+  }
+});
+
+test("the search bar and app bar do not count toward a dragged region's height", () => {
+  const geometry = { changesTop: 130, regionsHeight: 600, grabOffset: 2.5 };
+  assert.equal(splitFromPointer(402.5, geometry), 45);
+  assert.ok(Math.abs(splitFromPointer(462.5, geometry) - 55) < 1e-9);
+});
+
+test("grabbing either edge of the handle leaves the split in place", () => {
+  for (const grabOffset of [-4, 0, 2.5, 9]) {
+    const geometry = { changesTop: 130, regionsHeight: 600, grabOffset };
+    assert.equal(splitFromPointer(400 + grabOffset, geometry), 45);
+  }
+});
+
+test("scrolling the panel keeps the pointer and regions in the same coordinates", () => {
+  const geometry = { changesTop: -70, regionsHeight: 600, grabOffset: 2.5 };
+  assert.equal(splitFromPointer(202.5, geometry), 45);
+  assert.equal(splitFromPointer(142.5, geometry), 35);
+});
+
+test("dragging away from a content floor starts at the rendered height", () => {
+  const geometry = { changesTop: 90, regionsHeight: 400, grabOffset: 2.5 };
+  assert.equal(splitFromPointer(352.5, geometry), 65);
+  assert.equal(splitFromPointer(372.5, geometry), 70);
 });
 
 test("keyboard steps stop at the same bounds as the pointer", () => {

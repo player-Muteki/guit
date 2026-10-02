@@ -37,6 +37,7 @@ export type WindowSettings = {
 };
 
 export type RepoView = {
+  displayName: string;
   openPath: string;
   root: string | null;
   gitDir: string;

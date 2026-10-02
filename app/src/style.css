@@ -27,91 +27,53 @@ body {
 
 .shell { display: flex; flex-direction: column; }
 
-/* --- app bar --- */
-/* The bar wraps rather than outgrow the window. Every shrink rule above it is
-   keyed to the viewport in CSS pixels, and the interface size changes the root
-   font without changing that number: measured at the shipped 720 width, the bar
-   fitted exactly at 16px, asked for 736 at 18px and 970 at the 24px ceiling, so
-   the four window buttons landed past the right edge of the frame and the panel
-   had to be scrolled sideways to reach its own close. A row cannot answer that
-   by squeezing, because the floors on it are controls — so the row gives way
-   downwards instead. The one-row bar keeps measuring the token it used to be
-   written with — 40px at the shipped size and 32px in the dense setting the tokens
-   define for a short window, both read off the header's own box — because
-   `min-height` lets the token floor the row without capping it, and the row's
-   tallest item is smaller than that floor at both sizes. */
 .appbar {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(1rem, 2rem) auto auto;
+  grid-template-areas: "repo drag tabs controls";
   align-items: center;
-  gap: 0.4rem;
+  column-gap: 0.35rem;
   row-gap: 0.25rem;
-  min-height: var(--appbar-height);
-  height: auto;
-  padding-inline: 0.5rem;
+  min-height: max(var(--appbar-height), 36px);
+  padding: 0.25rem 0.5rem;
   background: var(--surface-panel);
   border-bottom: 1px solid var(--line);
   position: relative;
   flex: 0 0 auto;
+  user-select: none;
 }
-.appbar-wordmark { font-weight: 700; letter-spacing: 0.02em; color: var(--accent); }
-/* The path is the only thing on this row that a reader can do without, and it is
-   the only one written in a length nobody controls: a deep repository path is a
-   hundred pixels of text that has to ellipise. `flex-basis: 0` is what keeps that
-   text out of the line-break decision — a wrapping row is broken by each item's
-   basis, not by the shrunken width it ends up with, so a basis written as the path
-   would drop the window cluster to a second line at the shipped size with nothing
-   else on the bar to blame. The item still grows into whatever room the row has
-   and still ellipsises at the same cap; what changed is that it asks for none of
-   the row up front. The four-character floor is separate and smaller on purpose:
-   an item that takes whatever is left can be left with five pixels, which is text
-   present on the page and undrawable — measured at 600 wide before the floor was
-   there. Four characters is the smallest share still worth painting an ellipsis
-   into, and it is in `ch` so it moves with the interface size rather than being a
-   pixel the zoom would walk past. */
+.appbar.two-rows {
+  grid-template-columns: minmax(0, 1fr) 1rem auto;
+  grid-template-areas: "repo drag controls" "tabs tabs tabs";
+}
 .appbar-repo {
-  color: var(--text-muted);
-  flex: 1 1 0;
-  min-width: 4ch;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.appbar-branch {
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  padding: 0.1rem 0.45rem;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-raised);
+  grid-area: repo;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.25rem 0.35rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--text);
+  font: inherit;
+  font-weight: 600;
   cursor: pointer;
-  max-width: 45%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* The bar centres its items, which let this button shrink to the text it
+     holds: on the smallest window at the smallest interface size that was
+     23.2px, under the 24px the other controls keep. Stretching it takes the
+     row height the window controls already set, so the menu is as easy to hit
+     as the buttons beside it at every size. */
+  align-self: stretch;
 }
-.appbar-branch:hover:not(:disabled) { background: var(--surface-hover); }
-.appbar-branch:disabled { cursor: default; opacity: 0.6; }
-.appbar-commit { padding: 0.2rem 0.7rem; }
+.appbar-repo:hover, .appbar-repo[aria-expanded="true"] { background: var(--surface-hover); }
+.appbar-repo > .icon, .repo-chevron { flex: 0 0 auto; color: var(--text-muted); }
+.appbar.two-rows .appbar-repo > .icon { display: none; }
+.appbar-repo-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repo-chevron { margin-inline-start: auto; }
+.window-drag-region { grid-area: drag; align-self: stretch; }
 .spacer { flex: 1 1 auto; }
-
-/* Every other item on this row carries text that is allowed to lose a tail: the
-   wordmark, the repository path and the branch chip are each capped by a
-   percentage and ellipsised. An icon button has no text to give way, so a bar
-   that runs out of width takes the squeeze out of it instead — measured at the
-   default 720x560 window, a button declared 1.75rem square was drawn 20x29, an
-   action whose whole box is its glyph plus two pixels. `flex: 0 0 auto` is said
-   for the same reason the window cluster says it: a control that loses its box
-   has lost the thing the pointer aims at, while a path that loses its tail keeps
-   the whole path in its tooltip. */
-.appbar .icon-btn { flex: 0 0 auto; }
-/* The branch chip is the other name on this row, and the narrow rules already
-   refuse to let it fall below a readable name. The same floor is what the bar
-   needs once the icons stop shrinking: at 720 the chip was being cut to 38px,
-   which shows a directory prefix and not the branch. */
-.appbar-branch { min-width: 7ch; }
 
 .icon-btn {
   display: inline-flex;
@@ -136,27 +98,26 @@ body {
    icon inside an icon -- or the rule matches nothing and the blobs come back. */
 svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
-/* --- window controls --- */
-/* The four actions a title bar has, as one group at the corner: pin, minimise, maximise
-   or restore, close. They are drawn tighter than the bar's own gap because they are read
-   together — a screen reader announces them as one "Window" group — and separated by a
-   rule so a repository button is never mistaken for one of them. `flex: 0 0 auto` is the
-   part that matters at the narrow width: the cluster may not be squeezed, because a
-   button that loses its box loses the way out of a bad theme too.
-   `margin-inline-start: auto` is what keeps it at the corner once the bar wraps. The
-   spacer takes the slack first, because it comes earlier in the row, so at every width
-   this panel fits on one line the cluster lands exactly where it always did; when the
-   line is full the cluster is the thing that goes down, and the auto margin is what
-   puts it back against the right edge instead of leaving it at the left of its own row. */
 .window-controls {
+  grid-area: controls;
   display: flex;
   align-items: center;
   gap: 0.1rem;
-  flex: 0 0 auto;
-  padding-inline-start: 0.4rem;
-  margin-inline-start: auto;
+  padding-inline-start: 0.35rem;
   border-left: 1px solid var(--line);
 }
+.window-controls .icon-btn { flex: 0 0 auto; width: max(1.75rem, 28px); height: max(1.75rem, 28px); }
+.window-controls .window-close:hover { background: var(--danger); color: var(--danger-text); }
+.window-resize { position: fixed; z-index: 70; }
+.window-resize[data-direction="North"] { top: 0; left: 8px; right: 8px; height: 4px; cursor: n-resize; }
+.window-resize[data-direction="South"] { bottom: 0; left: 8px; right: 8px; height: 4px; cursor: s-resize; }
+.window-resize[data-direction="West"] { left: 0; top: 8px; bottom: 8px; width: 4px; cursor: w-resize; }
+.window-resize[data-direction="East"] { right: 0; top: 8px; bottom: 8px; width: 4px; cursor: e-resize; }
+.window-resize[data-direction="NorthWest"] { left: 0; top: 0; width: 8px; height: 8px; cursor: nw-resize; }
+.window-resize[data-direction="NorthEast"] { right: 0; top: 0; width: 8px; height: 8px; cursor: ne-resize; }
+.window-resize[data-direction="SouthWest"] { left: 0; bottom: 0; width: 8px; height: 8px; cursor: sw-resize; }
+.window-resize[data-direction="SouthEast"] { right: 0; bottom: 0; width: 8px; height: 8px; cursor: se-resize; }
+.window-resize[hidden] { display: none; }
 
 /* --- buttons --- */
 .btn {
@@ -240,70 +201,65 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 /* --- shell body --- */
 .shell-body { display: flex; flex: 1 1 auto; min-height: 0; }
 
-/* --- tabs --- */
-/* The two pages sit at the right end of the app bar, just left of the window
-   cluster, so everything under the app bar belongs to whichever one is
-   selected. A tab keeps its label while the window has room for a word and
-   falls back to its icon when it does not; the accessible name is on the button
-   either way. */
 .tabs {
+  grid-area: tabs;
+  justify-self: start;
   display: flex;
   align-items: center;
   gap: 0.1rem;
   padding: 0.1rem;
-  flex: 0 0 auto;
   background: var(--surface-rail);
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
 .tab-item {
-  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 0.3rem;
   min-width: var(--tab-min-width);
-  height: var(--tab-item-size);
-  /* The trailing space is the pending count's gutter. The count hangs on the
-     tab's right corner and is as wide as the largest number it can show, so the
-     word gives that room up front: a badge that floats over the last letter
-     reads as one blob at 99+, and a gutter written down never has to be
-     re-measured when the count grows. */
-  padding-inline: 0.45rem 1.6rem;
+  min-height: max(1.6rem, 26px);
+  padding: 0.1rem 0.55rem;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font: inherit;
   font-size: var(--text-sm);
   cursor: pointer;
-  transition: color var(--transition), background var(--transition);
 }
 .tab-item:hover { color: var(--text); }
 .tab-item.selected { color: var(--accent); background: var(--surface-active); }
 .tab-label { white-space: nowrap; }
-@media (max-width: 560px) {
-  /* Icon-only tabs: the accessible name is still on the button, and the two
-     pages are told apart by their glyph and the selected colour. */
-  .tab-label { display: none; }
-  /* The gutter was for the word, and the word is gone: the count goes back to
-     sitting on the corner of the glyph, which is what a superscript is for. */
-  .tab-item { min-width: 0; padding-inline: 0.45rem; }
-}
 .tab-badge {
-  position: absolute;
-  top: -0.15rem;
-  right: -0.15rem;
-  min-width: 0.9rem;
-  padding: 0 0.2rem;
-  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 3ch;
+  width: 3ch;
+  border-radius: var(--radius-sm);
   background: var(--accent);
-  color: #fff;
-  font-size: 0.625rem;
-  line-height: 0.9rem;
-  text-align: center;
+  color: var(--text-inverse);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
 }
-.tab-badge[hidden] { display: none; }
+.tab-badge[hidden] { display: inline-flex; visibility: hidden; }
+.repository-menu {
+  left: 0.5rem;
+  right: auto;
+  top: 100%;
+  width: min(25rem, calc(100vw - 1rem));
+  min-width: 0;
+  max-height: var(--menu-cap);
+  overflow-y: auto;
+  user-select: text;
+}
+.repository-info { padding: 0.4rem 0.6rem; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-muted); font-size: var(--text-xs); border-bottom: 1px solid var(--line); }
+.repository-heading { padding: 0.4rem 0.6rem 0.15rem; color: var(--text-muted); font-size: var(--text-xs); }
+.repository-recents .menu-item { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repository-menu .menu-item:disabled { color: var(--text-faint); cursor: default; }
+.repository-menu [hidden] { display: none; }
 
 .stage { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; position: relative; }
 
@@ -329,7 +285,9 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .main-panel > .history-view { flex: calc(100 - var(--main-split, 45)) 1 0; min-height: calc(var(--main-graph-floor) + var(--region-chrome, 0px)); }
 .main-panel > .changes-view .file-list { min-height: var(--main-list-floor); }
 .main-panel > .history-view .history-list { min-height: var(--main-graph-floor); }
-.main-splitter { position: relative; }
+.main-splitter { position: relative; touch-action: none; user-select: none; }
+.main-panel.is-resizing, .main-panel.is-resizing * { cursor: row-resize; user-select: none; }
+.main-panel.is-resizing > .main-splitter { background: var(--accent-soft); border-color: var(--accent); }
 /* The bar reads as a hairline and is grabbed as a handle: the hit area is
    taller than the line, so a drag starts without the panel growing a second
    divider the user did not ask for. */
@@ -341,7 +299,9 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
    drawn above the page rather than in it. Same elevation for the same job.
    It hangs off the bar's own box instead of the document, so it moves with the
    panel it belongs to and cannot outlive the session that filled it. */
-.search-view { position: relative; flex: 0 0 auto; padding: 0.35rem var(--gutter) 0; }
+.main-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.7rem; padding: 0.35rem var(--gutter); border-bottom: 1px solid var(--line); flex: 0 0 auto; position: relative; }
+.search-view { position: static; flex: 1 1 14rem; min-width: 0; }
+.main-toolbar .search-field { max-width: none; }
 .search-view[hidden] { display: none; }
 .search-bar { display: flex; align-items: center; gap: 0.4rem; }
 .search-field { flex: 1 1 auto; min-width: 0; max-width: 22rem; }
@@ -559,7 +519,7 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
    row. It answers to the clock and to the activity push, and to nothing else —
    so it is not a live region: text that changes on a timer would have the
    screen reader announce every tick over everything else in the window. */
-.activity-line { margin: 0; padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--line); font-size: var(--text-sm); color: var(--text-muted); overflow-wrap: anywhere; flex: 0 0 auto; }
+.activity-line { margin: 0; font-size: var(--text-xs); color: var(--text-muted); overflow-wrap: anywhere; flex: 0 1 auto; margin-inline-start: auto; }
 .activity-line[hidden] { display: none; }
 .banner { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.75rem; background: var(--accent-soft); border-bottom: 1px solid var(--line); flex: 0 0 auto; }
 .banner[hidden] { display: none; }
@@ -884,30 +844,8 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
 .toast-close { border: none; background: transparent; color: var(--text-faint); cursor: pointer; padding: 0; display: inline-flex; }
 .toast-close:hover { color: var(--text); }
 
-/* --- narrow windows (<=480px) ---
-   The narrow layout is the one that has to work: 340x400 is the declared
-   minimum. Three things were fighting for the same pixels and the branch chip
-   lost, ending up as "m…" — the one piece of context the user cannot do
-   without, reduced to an ellipsis. So the wordmark goes (the native title bar
-   already names the app), the app bar's own Commit goes (the Changes view
-   owns the primary action, next to the message box it acts on), the icons
-   tighten up, and the chip is given a floor it can only go below when a
-   branch name is genuinely long. */
 @media (max-width: 480px) {
-  .appbar-repo, .view-subtitle { display: none; }
-  .appbar-wordmark, .appbar-commit { display: none; }
-  /* The window cluster is four more buttons on a bar that was already at its width, and
-     it cannot be the thing that gets pushed past the corner: it is the only place the
-     panel's own promises about minimising and closing are kept. So the three session
-     icons go, and they go somewhere that already holds them — the More menu repeats all
-     three by the same words, and two of them have a shortcut. The affordance survives,
-     not both copies of it, which is the same trade the Commit button already makes. */
-  .appbar-session { display: none; }
-  .appbar { gap: 0.3rem; }
-  .appbar .icon-btn { width: 1.55rem; height: 1.55rem; }
-  /* `flex: 0 1 auto` with a floor: the chip never collapses below a readable
-     name, and the full name stays available as the button's tooltip. */
-  .appbar-branch { flex: 0 1 auto; min-width: 7ch; max-width: 30%; }
+  .view-subtitle { display: none; }
   .history-detail { max-height: var(--list-cap); }
   .view-tools, .create-row { gap: 0.25rem; }
   .row-action { opacity: 1; }
@@ -1007,8 +945,6 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
    worst case: 480px of viewport is only 20rem. Everything that claims a fixed
    pixel share of the width has to give some of it back there. */
 @media (max-width: 480px) {
-  .tab-item { padding-inline: 0.3rem; }
-  .appbar .icon-btn { width: 1.5rem; height: 1.5rem; }
   .file-status { min-width: 2.25ch; }
   .file-name, .ref-name { min-width: 6ch; }
   /* At this width the fixed columns would leave the subject — the one field

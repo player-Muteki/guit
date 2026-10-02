@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "guit", "width": 720, "height": 560, "minWidth": 340, "minHeight": 400, "alwaysOnTop": true }]
+    "windows": [{ "title": "guit", "width": 720, "height": 560, "minWidth": 340, "minHeight": 400, "alwaysOnTop": true, "decorations": false }]
   },
   "bundle": {
     "active": true,

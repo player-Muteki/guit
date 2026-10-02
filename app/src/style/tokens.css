@@ -29,6 +29,7 @@
    restate a scheme where it must *win* over the system preference. */
 
 :root {
+  --menu-cap: 70vh;
   color-scheme: light dark;
 
   /* surfaces — the macaron part: pistachio cream and warm paper.
@@ -481,4 +482,3 @@
 @media (prefers-reduced-motion: reduce) {
   :root { --transition: 0ms; }
 }
-

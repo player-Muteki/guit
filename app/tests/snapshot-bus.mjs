@@ -51,7 +51,7 @@ const snapshot = (over = {}) => ({
   sessionId: 1,
   historyGeneration: 0,
   refsGeneration: 0,
-  repo: { openPath: "/tmp/one", root: "/tmp/one", gitDir: "/tmp/one/.git", bare: false, linkedWorktree: false },
+  repo: { displayName: "project", openPath: "/tmp/one", root: "/tmp/one", gitDir: "/tmp/one/.git", bare: false, linkedWorktree: false },
   branch: branch({}),
   files: [],
   operation: null,

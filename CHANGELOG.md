@@ -6,6 +6,46 @@ SemVer. This file is the record of what changed; what has never been verified
 is stated in the entry that introduces it, and no entry claims coverage the
 release it belongs to did not measure.
 
+## [Unreleased]
+
+### Added
+
+- A repository menu with recent repositories, open, refresh, close session and
+  branch/tag management. The backend supplies the repository's short name.
+- An integrated title bar with window dragging, double-click maximise, edge
+  resizing and a window menu available by right-click or Alt+Space.
+- Double-click the divider between changes and history to restore its default
+  height split. The divider's tooltip names this shortcut.
+
+### Changed
+
+- Main and Settings keep their text labels at narrow widths. The title bar
+  switches to two rows when needed, keeping its four window controls together.
+- Search and latest-file-modification age share the Main toolbar. The pending
+  change count reserves its width from zero through 99+.
+- Repository actions use the repository menu; committing and branch switching
+  remain next to the content they act on.
+
+The integrated title bar has build and source-test coverage, and its rendered
+layout has been measured in a real browser engine across nine window sizes and
+four interface sizes. What that does not cover is the window manager side:
+window dragging, edge resizing, the native window menu, always-on-top and the
+saved geometry have not yet been exercised in a running window, so no entry
+here claims them verified.
+
+### Fixed
+
+- Height dragging measures the changes and history regions without counting
+  the search bar. Grabbing the divider away from its top edge keeps that
+  offset, including when the panel has scrolled. Keyboard adjustments start
+  from the displayed split when a region has reached its minimum height.
+- The divider keeps its resize cursor and highlight during a drag. A cancelled
+  pointer or lost pointer capture ends the drag and saves the chosen split.
+- The repository name in the title bar was a 23.2px-tall target on the smallest
+  window at the smallest interface size, under the 24px the four window
+  controls keep. It now takes the row height beside it, so the repository menu
+  is as easy to hit as the buttons next to it at every size.
+
 ## [0.0.2] - 2026-10-02
 
 ### Fixed

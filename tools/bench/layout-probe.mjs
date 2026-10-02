@@ -144,6 +144,7 @@ const BASE = {
   historyGeneration: 0,
   refsGeneration: 0,
   repo: {
+    displayName: "project",
     openPath: "/home/dev/project",
     root: "/home/dev/project",
     gitDir: "/home/dev/project/.git",
@@ -304,7 +305,11 @@ const STUB = `(() => {
   // reach, which is the opposite of what a layout gate is for.
   window.__BAR__ = (label) => {
     const button = document.querySelector('.appbar [aria-label="' + label + '"]');
-    if (button) button.click();
+    if (button) {
+      const menu = button.closest(".repository-menu");
+      if (menu?.hidden) document.querySelector(".appbar-repo").click();
+      button.click();
+    }
     return !!button;
   };
   window.__TAB__ = (label) => {
@@ -582,7 +587,10 @@ const MEASURE = `(() => {
     // that matters is the one drawn against the *painted* rect: the layer is
     // only keeping its promise if some rows are cut and none are lost.
     search: (() => {
-      const results = document.querySelector(".main-panel > .search-view .search-results");
+      // The top bar refactor moved the search field into the main toolbar, so the
+      // search view is a child of .main-toolbar rather than of .main-panel;
+      // the results layer still hangs off the field itself.
+      const results = document.querySelector(".main-toolbar .search-view .search-results");
       if (!results) return null;
       const rows = Array.from(results.querySelectorAll(".search-row"));
       const drawn = rows.filter((row) => {
@@ -617,7 +625,7 @@ const MEASURE = `(() => {
         // The bar it hangs off is the reason the layer starts where it does: a
         // layer drawn over its own bar would be a layer pushing the page down.
         overBar: (() => {
-          const bar = document.querySelector(".main-panel > .search-view .search-bar");
+          const bar = document.querySelector(".main-toolbar .search-view .search-bar");
           if (!bar) return null;
           return box.top < bar.getBoundingClientRect().bottom - 1;
         })(),
@@ -709,7 +717,7 @@ const NAMES = `(() => {
 })()`;
 
 const PAGES = {
-  Main: ["Main", "Settings", "Open repository", "Refresh status", "More repository actions",
+  Main: ["Main", "Settings", "Open repository", "Refresh status", "Repository menu",
          "Switch branch", "Changed files", "Commit message", "Commit history"],
   // The layer is a third thing on the page, and it is the only screen with
   // these controls.
@@ -897,7 +905,7 @@ async function main() {
   // interface cannot arrive at, which is the opposite of what this is for.
   const SCREENS = [
     { key: "Main", enter: 'window.__TAB__("Main")' },
-    { key: "Picker", enter: 'window.__TAB__("Main"); document.querySelector(".appbar-branch").click()' },
+    { key: "Picker", enter: 'window.__TAB__("Main"); window.__BAR__("Branches and tags")' },
     { key: "Search", enter: 'window.__TAB__("Main"); window.__SEARCH__("commit")' },
     { key: "Settings", enter: 'window.__TAB__("Settings")' },
     { key: "Welcome", enter: 'window.__TAB__("Main"); window.__BAR__("Close session")' },
@@ -947,18 +955,18 @@ async function main() {
     // Read the handoff once per size, with the menu opened and closed again by
     // its own controls: at the widths where nothing is handed over this stays an
     // empty list, so no screen can borrow a pass from a menu it never opened.
-    const carried = size.width <= 480 ? await evaluate(`(() => {
-      const button = document.querySelector('.appbar [aria-label="More repository actions"]');
+    const carried = await evaluate(`(() => {
+      const button = document.querySelector('.appbar [aria-label="Repository menu"]');
       if (!button) return [];
       button.click();
-      const names = Array.from(document.querySelectorAll(".menu .menu-item"))
+      const names = Array.from(document.querySelectorAll(".repository-menu .menu-item"))
         .filter((node) => node.getClientRects().length > 0)
         .map((node) => (node.textContent || "").trim());
       document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
       return names;
-    })()`): [];
-    if (size.width <= 480) {
-      check(`[${size.label}] the bar hands its three icons to a menu that holds all three`,
+    })()`);
+    {
+      check(`[${size.label}] the repository menu contains open, refresh and close`,
             HANDED_OVER.every((name) => carried.includes(name) || carried.includes(name + "…")),
             carried.join(", "));
     }
@@ -1055,7 +1063,7 @@ async function main() {
       const unreachable = missing.filter((name) => !handed.includes(name));
       check(`${where}: every action it offers is reachable`, unreachable.length === 0,
             [unreachable.join(", "),
-             handed.length > 0 ? "in the More menu instead: " + handed.join(", ") : ""]
+             handed.length > 0 ? "in the repository menu: " + handed.join(", ") : ""]
               .filter(Boolean).join(" | "));
     }
 
@@ -1155,7 +1163,7 @@ async function main() {
           `main=${pagesByKeys.main} settings=${pagesByKeys.settings}`);
 
     const layer = await evaluate(`(() => {
-      document.querySelector(".appbar-branch").click();
+      window.__BAR__("Branches and tags");
       const opened = !document.querySelector(".overlay").hidden;
       document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
       return {
@@ -1173,8 +1181,8 @@ async function main() {
     // only thing telling a user which tab they are on.
     if (size.width <= 560) {
       const tabs = (await evaluate(MEASURE)).tabs;
-      check(`[${size.label}] a strip without its words still has its names`,
-            tabs.labelled.some((t) => t.wordsVisible === false)
+      check(`[${size.label}] both tabs retain their words and accessible names`,
+            tabs.labelled.every((t) => t.wordsVisible === true)
             && tabs.labelled.every((t) => !!t.name),
             JSON.stringify(tabs.labelled));
     }
@@ -1229,8 +1237,8 @@ async function main() {
     // At the widths where the bar hands its icons over, the tree is read with
     // that menu open: an action whose only copy lives in a closed menu is not in
     // the tree a screen reader walks, which is the failure this checks for.
-    if (size.width <= 480) {
-      await evaluate(`document.querySelector('.appbar [aria-label="More repository actions"]').click()`);
+    {
+      await evaluate(`document.querySelector('.appbar [aria-label="Repository menu"]').click()`);
       await sleep(250);
     }
     let axNames = null;
@@ -1243,7 +1251,7 @@ async function main() {
     } catch (error) {
       axError = String(error.message || error);
     }
-    if (size.width <= 480) {
+    {
       await evaluate(`document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))`);
       await sleep(150);
     }
@@ -1305,19 +1313,10 @@ async function main() {
           cascade.rootRules > 0 && cascade.hasMetric && cascade.token !== "",
           `top-level :root rules=${cascade.rootRules}, --appbar-height="${cascade.token}"`);
 
-    if (size.height <= 440) {
-      check(`[${size.label}] a very short window compacts each line of the app bar twice`,
-            perLineRem !== null && perLineRem <= 2.05,
-            `${barShape} (base 2.5rem, 440px breakpoint 2rem)`);
-    } else if (size.height <= 560) {
-      check(`[${size.label}] a short window compacts each line of the app bar`,
-            perLineRem !== null && perLineRem <= 2.3,
-            `${barShape} (base 2.5rem, 560px breakpoint 2.25rem)`);
-    } else {
-      check(`[${size.label}] a roomy window keeps the full app bar`,
-            perLineRem !== null && perLineRem > 2.4,
-            `${barShape} (base 2.5rem)`);
-    }
+    check("the top bar keeps one or two deliberate rows",
+          barLines === 1 || barLines === 2, barShape);
+    check("each top bar row remains compact and readable",
+          perLineRem !== null && perLineRem >= 1.5 && perLineRem <= 2.8, barShape);
 
     // The macaron scheme must reach the running document, in both schemes.
     // Judged against the value the document itself declares for the token on a
@@ -1343,6 +1342,84 @@ async function main() {
     check(`[${size.label}] the colour scheme reaches the rendered document`,
           surface.used !== "" && surface.declared.includes(surface.used),
           `--surface-app="${surface.used}" of [${surface.declared.join(",")}]`);
+
+    if ([340, 420, 720].includes(size.width)) {
+      await evaluate('window.__TAB__("Main")');
+      for (const font of [12, 16, 20, 24]) {
+        await evaluate(`document.documentElement.style.fontSize = "${font}px"`);
+        await sleep(150);
+        const header = await evaluate(`(() => {
+          const bounds = (node) => {
+            const box = node.getBoundingClientRect();
+            return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+          };
+          const nodes = [document.querySelector('.appbar-repo'), ...document.querySelectorAll('.tab-item'), ...document.querySelectorAll('.window-controls button')];
+          const boxes = nodes.map(bounds);
+          const intersects = (first, second) => first.right > second.left + 1 && second.right > first.left + 1 && first.bottom > second.top + 1 && second.bottom > first.top + 1;
+          return {
+            boxes,
+            inside: boxes.every((box) => box.left >= 0 && box.right <= innerWidth + 1 && box.height >= 24),
+            overlap: boxes.some((first, index) => boxes.slice(index + 1).some((second) => intersects(first, second))),
+            labels: [...document.querySelectorAll('.tab-label')].every((node) => getComputedStyle(node).display !== 'none' && node.scrollWidth <= node.clientWidth + 1),
+            repo: bounds(document.querySelector('.appbar-repo-name')),
+            bar: bounds(document.querySelector('.appbar')),
+            controls: bounds(document.querySelector('.window-controls')),
+          };
+        })()`);
+        check(`[${size.label}/${font}px] top bar controls fit without overlap`, header.inside && !header.overlap, JSON.stringify(header.boxes));
+        check(`[${size.label}/${font}px] tab words and repository identity stay visible`, header.labels && header.repo.width >= font * 2, JSON.stringify(header.repo));
+        check(`[${size.label}/${font}px] window controls remain on the first row`, header.controls.top < header.bar.top + font, JSON.stringify(header.controls));
+      }
+      await evaluate('document.documentElement.style.fontSize = "16px"');
+      await sleep(150);
+      const beforeCount = await evaluate('document.querySelector(".tabs").getBoundingClientRect().width');
+      await evaluate('window.__PENDING__(0)');
+      await sleep(150);
+      const emptyCount = await evaluate('document.querySelector(".tabs").getBoundingClientRect().width');
+      await evaluate('window.__PENDING__(120)');
+      await sleep(150);
+      const fullCount = await evaluate('document.querySelector(".tabs").getBoundingClientRect().width');
+      check(`[${size.label}] zero and 99+ counts reserve the same width`, Math.abs(emptyCount - fullCount) < 0.1 && Math.abs(beforeCount - fullCount) < 0.1, `${beforeCount}/${emptyCount}/${fullCount}`);
+      await evaluate('window.__PENDING__(null)');
+      await evaluate(`window.__SNAPSHOT__.repo.displayName = "仓库-very-long-repository-name-".repeat(8); window.__BAR__("Refresh status")`);
+      await sleep(150);
+      const longName = await evaluate(`(() => {
+        const name = document.querySelector('.appbar-repo-name');
+        const bar = document.querySelector('.appbar');
+        return name.textContent.length > 100 && name.scrollWidth > name.clientWidth && bar.scrollWidth <= bar.clientWidth + 1;
+      })()`);
+      check(`[${size.label}] long repository names truncate within the header`, longName);
+      await evaluate('document.querySelector(".appbar-repo").focus()');
+      for (const key of ['ArrowDown', 'End', 'Escape']) {
+        await session.call('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key });
+        await session.call('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key });
+        const focus = await evaluate(`({ name: document.activeElement.getAttribute('aria-label'), open: !document.querySelector('.repository-menu').hidden })`);
+        const expected = key === 'ArrowDown' ? 'Open repository' : key === 'End' ? 'Close session' : 'Repository menu';
+        check(`[${size.label}] repository keyboard ${key}`, focus.name === expected && focus.open === (key !== 'Escape'), JSON.stringify(focus));
+      }
+    }
+
+    if (size.width === 720) {
+      await evaluate('document.querySelector(".main-splitter").scrollIntoView({ block: "center" })');
+      const drag = await evaluate(`(() => {
+        const splitter = document.querySelector('.main-splitter').getBoundingClientRect();
+        const changes = document.querySelector('.changes-view').getBoundingClientRect();
+        const history = document.querySelector('.history-view').getBoundingClientRect();
+        return { x: splitter.left + splitter.width / 2, y: splitter.top + splitter.height / 2, start: splitter.top, top: changes.top, height: changes.height + history.height };
+      })()`);
+      await session.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: drag.x, y: drag.y });
+      await session.call('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, x: drag.x, y: drag.y });
+      await session.call('Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, x: drag.x, y: drag.y + 25 });
+      await session.call('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1, x: drag.x, y: drag.y + 25 });
+      const moved = await evaluate(`({ value: Number(document.querySelector('.main-splitter').getAttribute('aria-valuenow')), stored: Number(localStorage.getItem('guit.mainSplit')), active: document.querySelector('.main-panel').classList.contains('is-resizing') })`);
+      const expectedSplit = Math.max(15, Math.min(85, (drag.start - drag.top + 25) / drag.height * 100));
+      check(`[${size.label}] pointer dragging measures only the two regions`, Math.abs(moved.value - expectedSplit) < 0.01, `${moved.value}/${expectedSplit}`);
+      check(`[${size.label}] pointer dragging persists and releases capture`, moved.value === moved.stored && !moved.active, JSON.stringify(moved));
+      const reset = await evaluate(`(() => { const box = document.querySelector('.main-splitter').getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; })()`);
+      await session.call('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 2, ...reset });
+      await session.call('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 2, ...reset });
+      check(`[${size.label}] double-click restores the default split`, await evaluate('Number(localStorage.getItem("guit.mainSplit"))') === 45);
+    }
   }
 
   if (session) session.close();

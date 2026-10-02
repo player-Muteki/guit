@@ -83,11 +83,12 @@ test("the field is a region of the Main page, not a fourth tab and not the app b
   // that only ever means something while a repository is open.
   assert.match(
     panel,
-    /export function createMainPanel\(\s*search: HTMLElement,\s*changes: HTMLElement,\s*history: HTMLElement,?\s*\)/,
+    /export function createMainPanel\(\s*search: HTMLElement,\s*changes: HTMLElement,\s*history: HTMLElement,\s*activity\?: HTMLElement,?\s*\)/,
   );
-  assert.match(panel, /el\("section", \{ class: "main-panel" \}, \[search, changes, splitter, history\]\)/,
-    "the search is the panel's first child, ahead of the split the user drags");
-  assert.match(main, /createMainPanel\(search\.element, changes\.element, history\.element\)/);
+  assert.match(panel, /class: "main-toolbar".*\[search, activity\]/);
+  assert.match(panel, /el\("section", \{ class: "main-panel" \}, \[toolbar, changes, splitter, history\]\)/,
+    "the search and activity toolbar precedes the regions whose height is adjustable");
+  assert.match(main, /createMainPanel\(search\.element, changes\.element, history\.element, changes\.activityElement\)/);
   // It is chrome of the panel, not a page: the panel is still what is registered.
   assert.doesNotMatch(main, /registerView\(search/, "the search view is never registered as a view of its own");
   // And it goes away with the session rather than sitting empty above it.

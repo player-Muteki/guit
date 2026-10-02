@@ -195,6 +195,7 @@ const snapshot = (sessionId: number, head: BranchView | null): SnapshotView => {
     historyGeneration: 0,
     refsGeneration: 0,
     repo: {
+      displayName: "project",
       openPath: "/home/dev/project",
       root: "/home/dev/project",
       gitDir: "/home/dev/project/.git",

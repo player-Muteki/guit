@@ -101,8 +101,10 @@ try:
 
     # The branch picker: a layer over Main. AT-SPI cannot tell a covering layer
     # from the page under it, so the picture is the check.
-    chip = A.find_button(name="Switch branch")
-    assert chip and A.click(chip), "no branch chip to open the picker"
+    assert A.click(A.find_button(name="Repository menu")), "no repository menu"
+    time.sleep(0.3)
+    chip = A.find_menu_item("Branches and tags")
+    assert chip and A.click(chip), "no branch management entry"
     assert A.wait_for(r"Filter branches and tags", 15), "the picker never opened"
     time.sleep(0.5)
     shot("04-branch-picker")

@@ -63,6 +63,7 @@ export interface ChangesDeps {
 // the age line honest.
 export interface ChangesView {
   element: HTMLElement;
+  activityElement: HTMLElement;
   render(): void;
   renderActivity(): void;
   /** The period the age line is currently being recomputed on. */
@@ -146,7 +147,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     el("div", { class: "reset-row" }, [resetTarget, resetButton]),
   ]);
 
-  element.append(activityLine, operationBanner, fileList, emptyState, commitFooter);
+  element.append(operationBanner, fileList, emptyState, commitFooter);
 
   let listRows: ListRow[] = [];
   let currentFiles: FileView[] = [];
@@ -635,5 +636,5 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
     return { ...choice, persisted };
   };
 
-  return { element, render, renderActivity, currentInterval: () => intervalSeconds, applyInterval };
+  return { element, activityElement: activityLine, render, renderActivity, currentInterval: () => intervalSeconds, applyInterval };
 }

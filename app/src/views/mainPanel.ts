@@ -38,6 +38,7 @@ export function createMainPanel(
   search: HTMLElement,
   changes: HTMLElement,
   history: HTMLElement,
+  activity?: HTMLElement,
 ): ViewDescriptor {
   const splitter = el("div", {
     class: "splitter main-splitter",
@@ -48,7 +49,8 @@ export function createMainPanel(
     "aria-valuemin": SPLIT_MIN,
     "aria-valuemax": SPLIT_MAX,
   });
-  const element = el("section", { class: "main-panel" }, [search, changes, splitter, history]);
+  const toolbar = el("div", { class: "main-toolbar" }, activity ? [search, activity] : [search]);
+  const element = el("section", { class: "main-panel" }, [toolbar, changes, splitter, history]);
 
   let stored: string | null;
   try {
@@ -62,7 +64,7 @@ export function createMainPanel(
   const apply = (save: boolean): void => {
     element.style.setProperty("--main-split", String(split));
     splitter.setAttribute("aria-valuenow", String(split));
-    splitter.title = `Changes ${split}%, history ${100 - split}%`;
+    splitter.title = `Changes ${Math.round(split)}%, history ${Math.round(100 - split)}%. Drag to resize; double-click to reset.`;
     if (!save) return;
     try {
       localStorage.setItem(SPLIT_KEY, String(split));
@@ -120,42 +122,62 @@ export function createMainPanel(
     }
   }
 
-  // The pointer answers "how far down the panel", measured against everything
-  // the panel holds: a scrolled panel keeps its content and its share in step,
-  // so grabbing the bar twice in a row does not jump.
-  const shareAt = (clientY: number): number =>
-    splitFromPointer(clientY - element.getBoundingClientRect().top + element.scrollTop, element.scrollHeight);
+  const shareAt = (clientY: number, grabOffset: number): number => {
+    const changesBox = changes.getBoundingClientRect();
+    const historyBox = history.getBoundingClientRect();
+    return splitFromPointer(clientY, {
+      changesTop: changesBox.top,
+      regionsHeight: changesBox.height + historyBox.height,
+      grabOffset,
+    });
+  };
 
-  let dragging = false;
+  let drag: { pointerId: number; grabOffset: number } | null = null;
   splitter.addEventListener("pointerdown", (event) => {
-    dragging = true;
+    if (drag !== null || !event.isPrimary || event.button !== 0) return;
+    drag = {
+      pointerId: event.pointerId,
+      grabOffset: event.clientY - splitter.getBoundingClientRect().top,
+    };
     splitter.setPointerCapture(event.pointerId);
-    // The bar takes focus on being grabbed, so a drag that ends can be
-    // finished with the arrow keys without tabbing back to it.
-    splitter.focus();
+    element.classList.add("is-resizing");
+    splitter.focus({ preventScroll: true });
     event.preventDefault();
   });
   splitter.addEventListener("pointermove", (event) => {
-    if (!dragging) return;
-    split = shareAt(event.clientY);
+    if (drag === null || event.pointerId !== drag.pointerId) return;
+    split = shareAt(event.clientY, drag.grabOffset);
     apply(false);
   });
-  const endDrag = (event: PointerEvent): void => {
-    if (!dragging) return;
-    dragging = false;
-    splitter.releasePointerCapture(event.pointerId);
+  const finishDrag = (): void => {
+    if (drag === null) return;
+    const { pointerId } = drag;
+    drag = null;
+    element.classList.remove("is-resizing");
+    if (splitter.hasPointerCapture(pointerId)) splitter.releasePointerCapture(pointerId);
     apply(true);
+  };
+  const endDrag = (event: PointerEvent): void => {
+    if (event.pointerId === drag?.pointerId) finishDrag();
   };
   splitter.addEventListener("pointerup", endDrag);
   splitter.addEventListener("pointercancel", endDrag);
+  splitter.addEventListener("lostpointercapture", endDrag);
+  onDispose(finishDrag);
+
+  splitter.addEventListener("dblclick", () => {
+    split = SPLIT_DEFAULT;
+    apply(true);
+  });
 
   splitter.addEventListener("keydown", (event) => {
+    const current = shareAt(splitter.getBoundingClientRect().top, 0);
     let next: number;
     switch (event.key) {
-      case "ArrowDown": next = stepSplit(split, SPLIT_STEP); break;
-      case "ArrowUp": next = stepSplit(split, -SPLIT_STEP); break;
-      case "PageDown": next = stepSplit(split, SPLIT_PAGE); break;
-      case "PageUp": next = stepSplit(split, -SPLIT_PAGE); break;
+      case "ArrowDown": next = stepSplit(current, SPLIT_STEP); break;
+      case "ArrowUp": next = stepSplit(current, -SPLIT_STEP); break;
+      case "PageDown": next = stepSplit(current, SPLIT_PAGE); break;
+      case "PageUp": next = stepSplit(current, -SPLIT_PAGE); break;
       case "Home": next = SPLIT_MIN; break;
       case "End": next = SPLIT_MAX; break;
       case "Enter":

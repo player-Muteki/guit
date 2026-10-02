@@ -29,10 +29,14 @@ export function stepSplit(value: number, delta: number): number {
   return clampSplit(value + delta);
 }
 
-// Where a pointer sits inside the panel decides the share: the distance from
-// the top of the panel's content, as a percentage of everything the panel
-// holds. An empty or unmeasured panel has no answer, so it keeps the default.
-export function splitFromPointer(offset: number, contentHeight: number): number {
-  if (!(contentHeight > 0)) return SPLIT_DEFAULT;
-  return clampSplit((offset / contentHeight) * 100);
+export interface SplitGeometry {
+  changesTop: number;
+  regionsHeight: number;
+  grabOffset: number;
+}
+
+export function splitFromPointer(pointerY: number, geometry: SplitGeometry): number {
+  const { changesTop, regionsHeight, grabOffset } = geometry;
+  if (!(regionsHeight > 0) || !Number.isFinite(regionsHeight)) return SPLIT_DEFAULT;
+  return clampSplit(((pointerY - changesTop - grabOffset) / regionsHeight) * 100);
 }

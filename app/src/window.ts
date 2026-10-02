@@ -1,15 +1,15 @@
 // Window behaviour: always-on-top, bounds persistence (viewport pixels plus
 // measured frame, which is what survives a scale change), focus refresh, the
 // compact/restore size test used by Settings, and the four actions behind the
-// app bar's window buttons. The native title bar stays — this module never sets
-// `decorations: false` — so the buttons are a second way onto the same native
-// actions, and every one of them is awaited rather than fired: a control that
+// app bar's window buttons. Every native action is awaited: a control that
 // shows the state it asked for, whatever the desktop made of the request, is a
 // control that can be trusted when it says the window is pinned.
 
-import { LogicalSize } from "@tauri-apps/api/dpi";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { CheckMenuItem, Menu, MenuItem } from "@tauri-apps/api/menu";
 import { invoke } from "@tauri-apps/api/core";
+import { el } from "./dom";
 import type { WindowSettings } from "./types";
 
 const currentWindow = getCurrentWindow();
@@ -144,6 +144,72 @@ export async function toggleMaximized(): Promise<void> {
  * would close the window and lose the size it was asked to keep. */
 export async function closeWindow(): Promise<void> {
   await currentWindow.close();
+}
+
+export function installWindowChrome(appbar: HTMLElement, onError: (error: unknown) => void): () => void {
+  let disposed = false;
+  const attempt = (action: () => Promise<void>): void => { void action().catch(onError); };
+  let menuPromise: Promise<{ menu: Menu; pin: CheckMenuItem; maximize: MenuItem; items: Array<MenuItem | CheckMenuItem> }> | null = null;
+  const showMenu = async (position: LogicalPosition): Promise<void> => {
+    menuPromise ??= (async () => {
+      const pin = await CheckMenuItem.new({ text: "Always on top", checked: isAlwaysOnTop(), action: () => attempt(() => setAlwaysOnTop(!isAlwaysOnTop())) });
+      const minimize = await MenuItem.new({ text: "Minimise", action: () => attempt(minimizeWindow) });
+      const maximize = await MenuItem.new({ text: "Maximise", action: () => attempt(toggleMaximized) });
+      const close = await MenuItem.new({ text: "Close guit", action: () => attempt(closeWindow) });
+      const items = [pin, minimize, maximize, close];
+      const menu = await Menu.new({ items });
+      return { menu, pin, maximize, items };
+    })().catch((error) => { menuPromise = null; throw error; });
+    const { menu, pin, maximize } = await menuPromise;
+    if (disposed) return;
+    await pin.setChecked(isAlwaysOnTop());
+    await maximize.setText(await syncMaximized() ? "Restore window" : "Maximise window");
+    await menu.popup(position);
+  };
+  const isDragTarget = (target: EventTarget | null): boolean => target instanceof Element
+    && !target.closest("button, input, textarea, select, a, [role=menu]");
+  const drag = (event: MouseEvent): void => {
+    if (event.button !== 0 || !isDragTarget(event.target)) return;
+    event.preventDefault();
+    attempt(event.detail === 2 ? toggleMaximized : () => currentWindow.startDragging());
+  };
+  const context = (event: MouseEvent): void => {
+    if (!isDragTarget(event.target)) return;
+    event.preventDefault();
+    attempt(() => showMenu(new LogicalPosition(event.clientX, event.clientY)));
+  };
+  const keys = (event: KeyboardEvent): void => {
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.code !== "Space") return;
+    event.preventDefault();
+    attempt(() => showMenu(new LogicalPosition(8, appbar.offsetHeight)));
+  };
+  appbar.addEventListener("mousedown", drag);
+  appbar.addEventListener("contextmenu", context);
+  document.addEventListener("keydown", keys);
+  const directions = ["North", "South", "East", "West", "NorthEast", "NorthWest", "SouthEast", "SouthWest"] as const;
+  const handles = directions.map((direction) => {
+    const handle = el("div", { class: "window-resize", "data-direction": direction, "aria-hidden": "true", hidden: isMaximized() });
+    handle.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      attempt(() => currentWindow.startResizeDragging(direction));
+    });
+    document.body.append(handle);
+    return handle;
+  });
+  const unlisten = onMaximizedChange((value) => handles.forEach((handle) => { handle.hidden = value; }));
+  return () => {
+    disposed = true;
+    appbar.removeEventListener("mousedown", drag);
+    appbar.removeEventListener("contextmenu", context);
+    document.removeEventListener("keydown", keys);
+    unlisten();
+    handles.forEach((handle) => handle.remove());
+    void menuPromise?.then(async ({ menu, items }) => {
+      await menu.close();
+      await Promise.all(items.map((item) => item.close()));
+    }).catch(onError);
+  };
 }
 
 export async function restoreWindowState(): Promise<boolean> {

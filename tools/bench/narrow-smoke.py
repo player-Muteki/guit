@@ -49,8 +49,8 @@ import atspi_landmark as A  # noqa: E402
 # strip shows its glyph only, and the name is the accessible label rather than
 # the word, so the same two names have to be present at both sizes.
 TABS = {"Main", "Settings"}
-APPBAR = {"Open repository", "Refresh status", "Close session", "Commit",
-          "Always on top", "More repository actions",
+APPBAR = {"Repository menu",
+          "Always on top",
           "Minimise", "Maximise window", "Close guit"}
 # The four the outline promises at the corner of every window this panel can be
 # shrunk to. Asked for on both pages rather than once per run: the app bar belongs
@@ -230,7 +230,11 @@ def main():
                      f"{len(TABS & narrow)}/{len(TABS)} visible")
         report.check("the app bar's primary actions survive 340x400", APPBAR_NARROW <= narrow,
                      ",".join(sorted(APPBAR_NARROW - narrow)))
-        report.check("the branch chip survives 340x400", "Switch branch" in narrow)
+        A.click(A.find_button(name="Repository menu"))
+        time.sleep(0.3)
+        for name in ("Open repository", "Refresh status", "Close session", "Branches and tags"):
+            report.check(f"repository menu reaches {name} at 340x400", A.find_menu_item(name) is not None)
+        A.click(A.find_button(name="Repository menu"))
 
         A.click(A.find_button(name="Main"))
         time.sleep(1.2)

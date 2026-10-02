@@ -36,7 +36,7 @@ import { createPreviewController } from "./dialogs/preview";
 import { createToastLayer } from "./dialogs/toast";
 import { startAppearance, currentFontPx, applyFontPx, FONT_DEFAULT } from "./font";
 import { disableTheme, startTheme, verifyThemeLaunch } from "./theme";
-import { closeWindow, installWindowHooks, minimizeWindow, restoreWindowState, setAlwaysOnTop, toggleMaximized } from "./window";
+import { closeWindow, installWindowChrome, installWindowHooks, minimizeWindow, restoreWindowState, setAlwaysOnTop, toggleMaximized } from "./window";
 import { createChangesView } from "./views/changes";
 import { createHistoryView } from "./views/history";
 import { createBranchesView } from "./views/branches";
@@ -122,10 +122,13 @@ async function closeRepository(): Promise<void> {
 
 async function renderRecent(): Promise<void> {
   try {
-    welcome.renderRecents(await invoke<string[]>("list_recent_repositories"));
+    const paths = await invoke<string[]>("list_recent_repositories");
+    welcome.renderRecents(paths);
+    shell.renderRecents(paths);
   } catch (error) {
     showError(error);
     welcome.renderRecents([]);
+    shell.renderRecents([]);
   }
 }
 
@@ -179,9 +182,9 @@ const settings = createSettingsView({
 // --- shell ---
 shell = createShell({
   openRepository: () => void pickRepository(),
+  openRecent: (path) => void openRepository(path),
   refresh: () => void refreshSession(false),
   closeRepository: () => void closeRepository(),
-  commit: () => shell.focusCommit(),
   cancelWrite: () => void invoke("cancel_write"),
   cancelTool: () => void invoke("cancel_exttool"),
   // The four window actions are awaited and a refusal is shown as the failure it is;
@@ -205,7 +208,7 @@ shell = createShell({
 // The main panel and the branch overlay are the only two places a repository
 // view goes: the files and the graph share one page, the picker covers it.
 shell.registerView({ id: "welcome", element: welcome.element });
-shell.registerView(createMainPanel(search.element, changes.element, history.element));
+shell.registerView(createMainPanel(search.element, changes.element, history.element, changes.activityElement));
 shell.registerView(settings.descriptor);
 // The picker reads the names on the way in, which is what lets a snapshot pass
 // over it while it is closed.
@@ -220,6 +223,8 @@ app.replaceChildren(
 );
 
 // --- rendering ---
+onDispose(installWindowChrome(shell.appbar, showError));
+
 let lastRenderedVersion = -2;
 
 function render(): void {

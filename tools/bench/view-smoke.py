@@ -192,8 +192,10 @@ def main():
         # It is opened from the app bar and it must not swallow the chrome: the
         # tab strip stays reachable over it, which is what tells the layer apart
         # from a modal dialog and from a page of its own.
-        chip = A.find_button(name="Switch branch")
-        report.check("the app bar carries the branch chip", chip is not None)
+        A.click(A.find_button(name="Repository menu"))
+        time.sleep(0.3)
+        chip = A.find_menu_item("Branches and tags")
+        report.check("the repository menu reaches branches and tags", chip is not None)
         if chip is not None:
             A.click(chip)
             time.sleep(1.0)

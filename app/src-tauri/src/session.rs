@@ -267,6 +267,7 @@ impl SessionState {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoView {
+    pub display_name: String,
     pub open_path: String,
     pub root: Option<String>,
     pub git_dir: String,
@@ -276,7 +277,9 @@ pub struct RepoView {
 
 impl RepoView {
     fn from_identity(identity: &RepoIdentity) -> RepoView {
+        let path = identity.work_root.as_deref().unwrap_or(&identity.git_dir);
         RepoView {
+            display_name: repo::to_display(path.file_name().map(Path::new).unwrap_or(path)),
             open_path: repo::to_display(&identity.candidate),
             root: identity.work_root.as_deref().map(repo::to_display),
             git_dir: repo::to_display(&identity.git_dir),
@@ -924,6 +927,7 @@ mod tests {
         let state = SessionState::default();
         let snapshot = open(&state, &bare).unwrap();
         assert!(snapshot.repo.bare);
+        assert_eq!(snapshot.repo.display_name, "bare.git");
         assert!(snapshot.repo.root.is_none());
         assert!(snapshot.branch.is_none());
         assert!(snapshot.files.is_empty());
@@ -941,6 +945,34 @@ mod tests {
         assert!(third.version > second.version);
         assert!(second.files.iter().any(|f| f.display == "new-file.txt"));
         assert_eq!(third.files, second.files);
+    }
+
+    #[test]
+    fn repository_name_comes_from_the_work_tree_not_the_open_directory() {
+        let fixture = fixture();
+        let nested = fixture.repo.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let snapshot = open(&SessionState::default(), &nested).unwrap();
+        assert_eq!(
+            snapshot.repo.display_name,
+            repo::to_display(Path::new(fixture.repo.file_name().unwrap()))
+        );
+        assert_ne!(snapshot.repo.display_name, "nested");
+    }
+
+    #[test]
+    fn linked_worktree_name_comes_from_its_own_root() {
+        let fixture = fixture();
+        commit(&fixture.repo, "first.txt");
+        let linked = fixture.repo.with_file_name("linked-工作树");
+        repo::git_with(
+            &fixture.repo,
+            &[],
+            &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
+        );
+        let snapshot = open(&SessionState::default(), &linked).unwrap();
+        assert!(snapshot.repo.linked_worktree);
+        assert_eq!(snapshot.repo.display_name, "linked-工作树");
     }
 
     fn commit(repo: &Path, name: &str) {
