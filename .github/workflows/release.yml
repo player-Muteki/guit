@@ -1,9 +1,13 @@
 name: Release
 
 # Publishing a version is a deliberate act: push a tag like `v0.0.1`.
-# The release is published after bundle builds succeed. Until the Windows/macOS
-# runtime lanes are exercised, the release body states the verified platform
-# scope explicitly.
+# The release is published after bundle builds succeed. macOS is deliberately
+# left out of this matrix: a `git mergetool` continuous-integration case is
+# still red on that runner, and because `publish` needs the whole matrix, one
+# red leg would hold the release behind it. macOS is still built and tested by
+# the CI workflow on every push; it is only withheld from the published
+# packages until its lane is green. The release body states the verified
+# platform scope explicitly.
 
 on:
   push:
@@ -21,8 +25,6 @@ jobs:
         include:
           - os: ubuntu-24.04
             bundles: deb,rpm,appimage
-          - os: macos-latest
-            bundles: app,dmg
           - os: windows-latest
             bundles: nsis,msi
     runs-on: ${{ matrix.os }}
@@ -58,7 +60,6 @@ jobs:
             app/src-tauri/target/release/bundle/deb/*.deb
             app/src-tauri/target/release/bundle/rpm/*.rpm
             app/src-tauri/target/release/bundle/appimage/*.AppImage
-            app/src-tauri/target/release/bundle/macos/*.dmg
             app/src-tauri/target/release/bundle/nsis/*.exe
             app/src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: ignore
@@ -82,8 +83,14 @@ jobs:
 
           - **Linux** — install trial, click-through and recovery smoke verified on
             Ubuntu 26.04 with WebKitGTK / GTK 3, on that one host only.
-          - **macOS / Windows** — artifacts are built by this pipeline but have
-            **not** been runtime-verified; treat them as untested previews.
+          - **Windows** — the release executable was driven in a real window against a
+            disposable repository: the saved session reopened, a file-system change
+            appeared with no user action, and a stage/unstage round-trip agreed with
+            git status. Multi-monitor and non-default scale factors were not exercised,
+            and no real external diff or merge tool was launched (tests use a stand-in).
+          - **macOS** — not shipped in this release. A git mergetool test is still red
+            on that runner, so macOS is left out of the published packages while the CI
+            workflow keeps building and testing it on every push.
 
           Changes: https://github.com/${REPO}/blob/master/CHANGELOG.md
           EOF
