@@ -16,7 +16,10 @@ asserted here against the stylesheet itself, where they are cheap and total:
 - the two axes are both covered: a stylesheet that only asks `max-width` has
   no answer for a wide, short window;
 - no `min-width` in px sits on a text-bearing element, because a px floor is
-  the one thing that cannot give its space back when the window shrinks.
+  the one thing that cannot give its space back when the window shrinks;
+- every custom property the two sheets reference is declared, because a
+  `var()` with nothing behind it drops its whole declaration silently and
+  leaves the property reading whatever it inherited.
 
     Usage: responsive-check.py [<style.css> [<tokens.css>]]
 """
@@ -145,6 +148,40 @@ def main():
     # 7. Zoom range and the stylesheet's largest fixed text size have to be
     #    able to coexist with the minimum window, or the app bar clips.
     report.check("text sizes are tokens, not hard-coded px", not re.search(r"font-size:\s*[\d.]+px", stripped))
+
+    # 8. Every custom property the sheets reference is declared somewhere.
+    #
+    #    A `var()` with no declaration is not an error: the cascade drops the
+    #    whole declaration and the property falls back to whatever it inherited,
+    #    so the rule silently stops saying anything. Nothing else here notices —
+    #    `color-contrast.py` reads the tokens it names in its own table, and a
+    #    declaration that vanished takes no colour with it when the token it
+    #    wanted does exist. This is the same failure the sheet has already had
+    #    twice in a different disguise: a `:root` block that quietly outranked
+    #    every `@media` override of it, and a `//` line that a parser folded
+    #    into the next selector. Both looked correct in review and in the built
+    #    bundle; only something that counts caught them.
+    #
+    #    Runtime-set properties are named here with the line that sets them,
+    #    rather than declared in the sheet as a dummy, because a declaration
+    #    that exists only to satisfy this check would give the property a value
+    #    in every context that does not set one.
+    runtime_set = {
+        "--region-chrome": "app/src/views/mainPanel.ts",
+    }
+    declared = set(re.findall(r"(--[a-z0-9-]+)\s*:", token_css))
+    referenced = set(re.findall(r"var\(\s*(--[a-z0-9-]+)", stripped)) | set(
+        re.findall(r"var\(\s*(--[a-z0-9-]+)", re.sub(r"/\*.*?\*/", "", token_css, flags=re.S)))
+    undeclared = sorted(referenced - declared - set(runtime_set))
+    report.check("every custom property the sheets reference is declared",
+                 not undeclared,
+                 " ".join(f"{name} (set by {runtime_set[name]})" if name in runtime_set else name
+                          for name in sorted(referenced - declared)))
+    stale = sorted(name for name in runtime_set if name in declared or name not in referenced)
+    report.check("each runtime-set exemption is still needed and still undeclared",
+                 not stale,
+                 "; ".join(f"{name} is {('declared' if name in declared else 'no longer referenced')}"
+                           for name in stale))
 
     print(f"\nfails={len(report.fails)}: {report.fails}")
     return 1 if report.fails else 0
