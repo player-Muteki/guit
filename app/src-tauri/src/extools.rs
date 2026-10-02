@@ -565,6 +565,11 @@ mod tests {
             &[],
             &["init", "--quiet", "--initial-branch=main"],
         );
+        // Line endings are a property of the fixture, not of whichever global
+        // config the host user happens to carry (Git for Windows defaults
+        // `core.autocrlf` to true, and its conversion warnings would crowd
+        // the tool's own stderr out of the assertions).
+        repo::git_with(directory.path(), &[], &["config", "core.autocrlf", "false"]);
         directory
     }
 

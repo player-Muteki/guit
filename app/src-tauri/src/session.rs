@@ -836,6 +836,10 @@ mod tests {
             ],
             &["init", "--quiet", "--initial-branch=main"],
         );
+        // Line endings are a property of the fixture, not of whichever global
+        // config the host user happens to carry; on Windows an installed Git
+        // defaults `core.autocrlf` to true and rewrites every checkout.
+        repo::git_with(&repo, &[], &["config", "core.autocrlf", "false"]);
         Fixture { root, repo }
     }
 

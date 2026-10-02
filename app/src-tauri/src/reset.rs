@@ -1230,6 +1230,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
         git(dir, &["init", "--quiet", "--initial-branch=main"]);
+        git(dir, &["config", "core.autocrlf", "false"]);
         git(dir, &["config", "user.name", "guit test"]);
         git(dir, &["config", "user.email", "test@example.invalid"]);
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();
@@ -1456,9 +1457,24 @@ mod tests {
                 std::fs::write(&path, payload).unwrap();
                 paths.push(path);
             }
-            let mut argv: Vec<&str> = vec!["hash-object", "-t", "commit", "-w", "--"];
-            argv.extend(paths.iter().map(|path| path.to_str().unwrap()));
-            let listed = read(dir, &argv);
+            // Windows caps one command line at 32767 wide characters, so the
+            // 1500 payloads are hashed in chunks there and the listings are
+            // joined; every platform gets the same 1500 ids either way.
+            let chunk_limit = if cfg!(windows) {
+                250
+            } else {
+                paths.len().max(1)
+            };
+            let mut listed = String::new();
+            for chunk in paths.chunks(chunk_limit) {
+                let mut argv: Vec<&str> = vec!["hash-object", "-t", "commit", "-w", "--"];
+                argv.extend(chunk.iter().map(|path| path.to_str().unwrap()));
+                let part = read(dir, &argv);
+                if !listed.is_empty() && !part.is_empty() {
+                    listed.push('\n');
+                }
+                listed.push_str(&part);
+            }
             for path in &paths {
                 std::fs::remove_file(path).ok();
             }
@@ -1560,6 +1576,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
         git(dir, &["init", "--quiet", "--initial-branch=main"]);
+        git(dir, &["config", "core.autocrlf", "false"]);
         let (writes, sessions, version) = state_and_session(dir);
         let soft = reset(&writes, &sessions, version, ModeArg::Soft, "main").unwrap();
         assert_eq!(soft.outcome, Outcome::Rejected);
@@ -1653,6 +1670,7 @@ mod tests {
 
     fn init(dir: &Path) {
         git(dir, &["init", "--quiet", "--initial-branch=main"]);
+        git(dir, &["config", "core.autocrlf", "false"]);
         git(dir, &["config", "user.name", "guit test"]);
         git(dir, &["config", "user.email", "test@example.invalid"]);
     }
@@ -2053,6 +2071,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
         git(dir, &["init", "--quiet", "--initial-branch=main"]);
+        git(dir, &["config", "core.autocrlf", "false"]);
         let (writes, sessions, version) = state_and_session(dir);
         let refusal = preview_restore(&writes, &sessions, version, "0000000")
             .expect_err("an unborn head has no restore");

@@ -356,6 +356,7 @@ mod tests {
     /// only hide a genuine "text busy" for a real executable. Retrying a spawn
     /// that never happened cannot mask anything either — a fixture that really
     /// fails to start still fails once the attempts run out.
+    #[cfg(unix)]
     fn retry_transient_spawn<T, E>(mut attempt_once: impl FnMut() -> Result<T, E>) -> Result<T, E> {
         const ATTEMPTS: usize = 5;
         let mut attempt = 0;
@@ -371,6 +372,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn git_at_freshly_written(executable: &OsStr) -> Result<GitProbe, ProbeError> {
         // Any failure to spawn is retried, which is only ever a spawn that did
         // not happen: once the script runs, `git_at` reports a misbehaving one
