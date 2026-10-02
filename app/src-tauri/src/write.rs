@@ -882,33 +882,52 @@ pub(crate) fn clean_candidates(
     work_root: &Path,
     scope: &[Vec<u8>],
 ) -> Result<Vec<(Vec<u8>, bool)>, ProbeError> {
-    let mut command = repo::user_git_command(work_root);
-    command.args(["clean", "-nd"]);
-    if !scope.is_empty() {
-        let specs = scope
-            .iter()
-            .map(|raw| raw_to_os(&quote_pathspec(raw)))
-            .collect::<Result<Vec<OsString>, ProbeError>>()?;
-        command.arg("--");
-        command.args(specs);
+    let specs = scope
+        .iter()
+        .map(|raw| raw_to_os(&quote_pathspec(raw)))
+        .collect::<Result<Vec<OsString>, ProbeError>>()?;
+    // Scoped asks can name thousands of paths; keep every process' command
+    // line inside the platform's launch limit, as the removal itself does.
+    let mut listed = Vec::new();
+    let mut truncated = false;
+    for batch in command_line_batches(specs) {
+        let mut command = repo::user_git_command(work_root);
+        command.args(["clean", "-nd"]);
+        if !batch.is_empty() {
+            command.arg("--");
+            command.args(&batch);
+        }
+        let output = runner::run_with_limit(
+            command,
+            &AtomicBool::new(false),
+            Duration::ZERO,
+            Duration::from_secs(60),
+            runner::DEFAULT_OUTPUT_LIMIT,
+            |_, _| {},
+        )?;
+        if !output.status.success() {
+            return Err(ProbeError::new(
+                "clean_preview_failed",
+                "git clean could not list the untracked files.",
+            ));
+        }
+        truncated |= output.truncated;
+        let remaining = runner::DEFAULT_OUTPUT_LIMIT.saturating_sub(listed.len());
+        let keep = output.stdout.len().min(remaining);
+        listed.extend_from_slice(&output.stdout[..keep]);
+        // A listing is one statement about the repository however many
+        // processes carried it: past the capture limit it is untrustworthy
+        // on every platform, exactly as one oversized process is on Linux.
+        truncated |= output.stdout.len() > keep;
     }
-    let output = runner::run_with_limit(
-        command,
-        &AtomicBool::new(false),
-        Duration::ZERO,
-        Duration::from_secs(60),
-        runner::DEFAULT_OUTPUT_LIMIT,
-        |_, _| {},
-    )?;
-    if !output.status.success() || output.truncated {
+    if truncated {
         return Err(ProbeError::new(
             "clean_preview_failed",
             "git clean could not list the untracked files.",
         ));
     }
     let mut candidates = Vec::new();
-    for line in output
-        .stdout
+    for line in listed
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
     {
@@ -1114,10 +1133,61 @@ pub(crate) fn run_git_paths(
         .iter()
         .map(|target| raw_to_os(&quote_pathspec(target)))
         .collect::<Result<Vec<OsString>, ProbeError>>()?;
-    repo::git(
-        work_root,
-        repo::GitRun::paths(git_prefix, &paths, cancelled),
-    )
+    let mut combined: Option<runner::CapturedOutput> = None;
+    for batch in command_line_batches(paths) {
+        let output = repo::git(
+            work_root,
+            repo::GitRun::paths(git_prefix, &batch, cancelled),
+        )?;
+        combined = Some(match combined {
+            None => output,
+            Some(mut previous) => {
+                previous.stdout.extend_from_slice(&output.stdout);
+                previous.stderr.extend_from_slice(&output.stderr);
+                previous.truncated |= output.truncated;
+                // The first failure is the verdict; a later success does not
+                // hide it, mirroring the one process that stops at nothing and
+                // exits non-zero for the path it could not serve.
+                if previous.status.success() {
+                    previous.status = output.status;
+                }
+                previous
+            }
+        });
+    }
+    Ok(combined.expect("the batching never yields zero batches"))
+}
+
+/// Splits path arguments so one process' command line stays inside the
+/// platform's launch limit. Windows counts wide characters against a hard
+/// 32767 in `CreateProcessW` and quoting can double what a path costs, so
+/// batches stop at a budget with room for that. Other platforms inherit the
+/// kernel's far larger limit and keep running every path in one process.
+fn command_line_batches(paths: Vec<OsString>) -> Vec<Vec<OsString>> {
+    let budget = if cfg!(windows) {
+        Some(15_000usize)
+    } else {
+        None
+    };
+    let mut batches = Vec::new();
+    match budget {
+        None => batches.push(paths),
+        Some(limit) => {
+            let mut current: Vec<OsString> = Vec::new();
+            let mut used = 0usize;
+            for path in paths {
+                let cost = path.as_encoded_bytes().len() * 2 + 8;
+                if used + cost > limit && !current.is_empty() {
+                    batches.push(std::mem::take(&mut current));
+                    used = 0;
+                }
+                used += cost;
+                current.push(path);
+            }
+            batches.push(current);
+        }
+    }
+    batches
 }
 
 pub(crate) fn raw_to_os(raw: &[u8]) -> Result<OsString, ProbeError> {
@@ -1168,6 +1238,10 @@ mod tests {
             &[],
             &["init", "--quiet", "--initial-branch=main"],
         );
+        // Line endings are a property of the fixture, not of whichever global
+        // config the host user happens to carry (Git for Windows defaults
+        // `core.autocrlf` to true and rewrites every checkout).
+        repo::git_with(directory.path(), &[], &["config", "core.autocrlf", "false"]);
         directory
     }
 
@@ -2079,15 +2153,17 @@ mod tests {
     }
 
     /// Git reads a bare pathspec as a pattern, so `git restore --worktree
-    /// -- 's*.txt'` reverts every dirty file whose name fits (measured on Git
-    /// 2.53). One confirmed file then discards a family nobody confirmed, and
-    /// the preview — which lists paths, never patterns — cannot show it.
+    /// -- 's[a].txt'` reverts every dirty file whose name fits (measured on
+    /// Git 2.53). One confirmed file then discards a family nobody confirmed,
+    /// and the preview — which lists paths, never patterns — cannot show it.
+    /// `s*.txt` would say the same, but NTFS refuses a `*` in a name, so the
+    /// character class carries the test on every platform.
     #[test]
     fn discarding_one_file_never_reverts_a_file_whose_name_its_pattern_matches() {
-        let repository = repo_with_base(&[("s*.txt", "star\n"), ("s1.txt", "one\n")]);
+        let repository = repo_with_base(&[("s[a].txt", "star\n"), ("sa.txt", "one\n")]);
         let root = repository.path();
-        std::fs::write(root.join("s*.txt"), "star dirty\n").unwrap();
-        std::fs::write(root.join("s1.txt"), "one dirty\n").unwrap();
+        std::fs::write(root.join("s[a].txt"), "star dirty\n").unwrap();
+        std::fs::write(root.join("sa.txt"), "one dirty\n").unwrap();
 
         let sessions = session::SessionState::default();
         let view = session::open(&sessions, root).unwrap();
@@ -2096,24 +2172,24 @@ mod tests {
             &writes,
             &sessions,
             view.version,
-            &[file_id(&view, "s*.txt")],
+            &[file_id(&view, "s[a].txt")],
         )
         .unwrap();
         assert_eq!(
             preview.candidates,
-            vec!["s*.txt".to_string()],
+            vec!["s[a].txt".to_string()],
             "the ticket is bound to the one selected file"
         );
 
         let result = discard_files(&writes, &sessions, preview.nonce).unwrap();
         assert_eq!(result.outcome, Outcome::Success);
         assert_eq!(
-            std::fs::read_to_string(root.join("s*.txt")).unwrap(),
+            std::fs::read_to_string(root.join("s[a].txt")).unwrap(),
             "star\n",
             "the selected file is reverted"
         );
         assert_eq!(
-            std::fs::read_to_string(root.join("s1.txt")).unwrap(),
+            std::fs::read_to_string(root.join("sa.txt")).unwrap(),
             "one dirty\n",
             "a file nobody selected keeps its work-tree changes"
         );
@@ -2291,14 +2367,15 @@ mod tests {
     }
 
     /// The hazard a glob-shaped file name carries: unquoted, `clean -fd --
-    /// 's*.txt'` removes every untracked file whose name fits. Measured on Git
-    /// 2.53, and the same quoting covers `restore` and `add`.
+    /// 's[a].txt'` removes every untracked file whose name fits. Measured on
+    /// Git 2.53, and the same quoting covers `restore` and `add`. The name
+    /// uses a character class because NTFS refuses `*` in a file name.
     #[test]
     fn a_file_name_that_is_also_a_pattern_cleans_only_itself() {
         let repository = repo_with_base(&[("base.txt", "one\n")]);
         let root = repository.path();
-        std::fs::write(root.join("s*.txt"), "star\n").unwrap();
-        std::fs::write(root.join("s1.txt"), "one untracked\n").unwrap();
+        std::fs::write(root.join("s[a].txt"), "star\n").unwrap();
+        std::fs::write(root.join("sa.txt"), "one untracked\n").unwrap();
         std::fs::write(root.join("s2.txt"), "two untracked\n").unwrap();
 
         let sessions = session::SessionState::default();
@@ -2308,15 +2385,15 @@ mod tests {
             &writes,
             &sessions,
             view.version,
-            &[file_id(&view, "s*.txt")],
+            &[file_id(&view, "s[a].txt")],
         )
         .unwrap();
-        assert_eq!(preview.candidates, vec!["s*.txt".to_string()]);
+        assert_eq!(preview.candidates, vec!["s[a].txt".to_string()]);
 
         let result = clean_files(&writes, &sessions, preview.nonce).unwrap();
         assert_eq!(result.outcome, Outcome::Success);
-        assert!(!root.join("s*.txt").exists());
-        for name in ["s1.txt", "s2.txt"] {
+        assert!(!root.join("s[a].txt").exists());
+        for name in ["sa.txt", "s2.txt"] {
             assert!(
                 root.join(name).exists(),
                 "{name} matches the pattern but nobody confirmed it"
