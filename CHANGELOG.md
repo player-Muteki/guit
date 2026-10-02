@@ -6,7 +6,7 @@ SemVer. This file is the record of what changed; what has never been verified
 is stated in the entry that introduces it, and no entry claims coverage the
 release it belongs to did not measure.
 
-## [Unreleased]
+## [0.0.2] - 2026-10-02
 
 ### Fixed
 
