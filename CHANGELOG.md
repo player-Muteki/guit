@@ -6,6 +6,57 @@ SemVer. This file is the record of what changed; what has never been verified
 is stated in the entry that introduces it, and no entry claims coverage the
 release it belongs to did not measure.
 
+## [Unreleased]
+
+### Fixed
+
+- Path comparison on Windows. Git reports repository paths in forward-slash
+  form, the file-system watcher reports them in backslash form, and the
+  standard library's canonicalization prefixes them with `\\?\`; the three did
+  not always agree, so a change detected by the watcher could not be matched
+  to the snapshot it belonged to and every event fell back to re-asking Git for
+  the whole repository. Identity paths are now normalized once at detection,
+  path equality on Windows ignores case as the file system does, and watcher
+  keys are held in the same shape the snapshot uses, restoring incremental
+  updates instead of full re-reads.
+- Destructive writes over many paths. A single stage, unstage, discard or
+  clean whose scope held more than a few hundred files could fail outright on
+  Windows, where one command line is capped at 32 767 wide characters. The
+  write lane now splits such a scope into batches that each fit the cap and
+  reports their combined result; the same batching applies to the untracked
+  listing a clean reads before it acts.
+- A `git hash-object` call in the reset tests that passed every colliding path
+  in one argument list, which trips the same Windows command-line cap; it is
+  now fed in chunks.
+
+### Testing
+
+- The external-tool helper now reads a Windows empty-side path (`nul`) as empty
+  content, the way it already read `/dev/null`. This turns the deleted-file
+  difftool case green on Windows — one of the two continuous-integration tests
+  the 0.0.1 entry recorded as red off Linux. The other, a `git mergetool`
+  `trustExitCode` case, is red on macOS and passes on Windows; it is unchanged.
+- Test fixtures that assumed a POSIX file system were made honest here rather
+  than skipped: repository fixtures pin `core.autocrlf` off so line-ending
+  rewriting cannot change a file a test is checking, two pattern-versus-filename
+  cases use names NTFS will actually hold (it refuses `*`), and the Linux-only
+  retry around a freshly-written stand-in `git` is gated to `cfg(unix)` so it no
+  longer reads as dead code on Windows.
+
+### Known gaps at this version
+
+- **Windows is now run and tested, not merely configured to build.** The full
+  suite passes there — 418 JavaScript tests, 342 Rust tests, `cargo fmt` and
+  `cargo clippy` clean — and the release executable was driven in a real window
+  against a disposable repository: the saved session reopened on its own, a
+  change made outside the app appeared in the list with no user action, and
+  Stage and Unstage round-tripped a file with `git status` agreeing after each.
+  What this does not claim: no Windows installer artifact was built or
+  installed, multi-monitor and non-default scale factors were not exercised,
+  and a real external diff or merge tool was not launched — those paths are
+  covered by tests with a stand-in, not by a hand. macOS and the rest of the
+  0.0.1 limits are unchanged.
+
 ## [0.0.1] - 2026-10-01
 
 Runtime verification is limited to Linux (Ubuntu, GTK/WebKit); Windows and
