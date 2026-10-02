@@ -19,13 +19,13 @@
 // already moves with (see the row-height contract in `fileModel.ts`), so a step
 // stays a step under interface zoom instead of drifting off it.
 //
-// WHY IT IS SKIPPED. The body below is finished and correct; the sheet has not
-// been moved onto the scale yet, because that is a geometry change and a
-// geometry change is only safe to make with `layout-probe.mjs` able to run
-// against it. Arming this before that would turn a known, planned, mechanical
-// remapping of fourteen values into a red suite on a tree where nobody can
-// measure. It is skipped rather than absent so the scale is reviewed now and
-// enforced the moment the sheet is on it.
+// ARMED. The body below was finished and correct while the gate was still
+// skipped; it was skipped because the sheet had not been moved onto the scale
+// yet, and a geometry change is only safe to make with `layout-probe.mjs` able
+// to run against it. The remapping has since landed — one hundred and five
+// lengths folded, none more than 1.6px from where it was at the default
+// interface size — and the nine-window layout probe answered with its own
+// assertions green, so the gate now runs on every fixture pass.
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -80,14 +80,7 @@ function sheets() {
   ];
 }
 
-test(
-  "every spacing length comes from the declared scale",
-  {
-    // Armed by the rhythm knife, together with the remapping that puts the
-    // sheet on it. Until then this documents the debt rather than failing on it.
-    skip: "the sheet still uses fourteen ad-hoc lengths; the remapping lands with the scale",
-  },
-  () => {
+test("every spacing length comes from the declared scale", () => {
     const offenders = [];
     for (const sheet of sheets()) {
       for (const declaration of declarations(sheet.text)) {
@@ -103,8 +96,7 @@ test(
       `${offenders.length} spacing lengths are off the scale; the scale is ${SCALE.join(", ")}\n` +
         offenders.join("\n"),
     );
-  },
-);
+});
 
 test("the scale itself is a scale: every step is bigger than the one before", () => {
   for (let index = 1; index < SCALE.length; index += 1) {

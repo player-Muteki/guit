@@ -160,8 +160,16 @@
   --commit-refs-width: 9rem;
   --commit-author-width: 7rem;
   --commit-date-width: 5.5rem;
+  /* Three corner steps, and the size of a surface picks its own: a control or
+     a row is `--radius-sm`, a menu or a results layer is `--radius`, and the
+     two surfaces big enough to be a card rather than a chip — the commit
+     bubble and the dialog — are `--radius-lg`. The sheet gave the dialog the
+     same radius as a menu, which reads as a scaling mistake at 28rem: the
+     corner is a constant fraction of the thing it belongs to, and it should
+     get *less* round as the thing gets bigger, not stay put. */
   --radius: 0.375rem;
   --radius-sm: 0.25rem;
+  --radius-lg: 0.5rem;
   --transition: 120ms ease;
 
   /* Depth. Three tiers, and only the things that genuinely float get one: a
