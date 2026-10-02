@@ -1,6 +1,33 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+
+/// Normalizes a directory path that Git reported (POSIX form, `C:/Users/...`)
+/// into the shape the filesystem, `notify` events and later string
+/// comparisons use. Windows comparisons of prefixes and stored paths need one
+/// shape: without this, every watcher event mismatches the Git-reported root,
+/// `strip_prefix` fails, and the incremental paths silently fall back to
+/// re-asking Git. Resolves through `canonicalize` where possible (drive-letter
+/// case, junctions), then drops the extended-length prefix so the result stays
+/// usable as a display path and with tools that reject `\\?\`.
+pub fn native_form(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let resolved = std::fs::canonicalize(path)
+            .unwrap_or_else(|_| PathBuf::from(path.to_string_lossy().replace('/', "\\")));
+        let text = resolved.to_string_lossy().into_owned();
+        let text = match text.strip_prefix(r"\\?\UNC\") {
+            Some(unc) => format!(r"\\{unc}"),
+            None => text
+                .strip_prefix(r"\\?\")
+                .map(str::to_owned)
+                .unwrap_or(text),
+        };
+        PathBuf::from(text)
+    }
+    #[cfg(not(windows))]
+    path.to_path_buf()
+}
 
 /// Compares two filesystem paths through canonicalization. Returns `None`
 /// when either side cannot be resolved, so callers can distinguish "same",
@@ -10,7 +37,7 @@ pub fn same_path(a: &Path, b: &Path) -> Option<bool> {
         return None;
     };
     #[cfg(windows)]
-    return Some(a.eq_ignore_ascii_case(&b));
+    return Some(a.as_os_str().eq_ignore_ascii_case(b.as_os_str()));
     #[cfg(not(windows))]
     return Some(a == b);
 }

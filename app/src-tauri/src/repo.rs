@@ -261,16 +261,21 @@ fn finish_detect(
     if !facts.inside_work_tree && !facts.is_bare {
         return Err(not_repository());
     }
-    let git_dir = as_path(&facts.git_dir_raw);
-    let common_dir = if as_path(&facts.common_dir_raw).is_absolute() {
-        as_path(&facts.common_dir_raw)
+    let git_dir = crate::util::native_form(&as_path(&facts.git_dir_raw));
+    let common_dir_reported = as_path(&facts.common_dir_raw);
+    let common_dir_joined = candidate.join(&facts.common_dir_raw);
+    let common_dir = crate::util::native_form(if common_dir_reported.is_absolute() {
+        &common_dir_reported
     } else {
-        candidate.join(facts.common_dir_raw)
-    };
+        &common_dir_joined
+    });
     let work_root = if facts.is_bare {
         None
     } else {
-        facts.toplevel_raw.as_deref().map(as_path)
+        facts
+            .toplevel_raw
+            .as_deref()
+            .map(|root| crate::util::native_form(&as_path(root)))
     };
     if !git_dir.exists() {
         return Err(ProbeError::new(
@@ -564,7 +569,7 @@ mod tests {
         let identity = detect(&repo).unwrap();
         assert!(identity.is_bare);
         assert!(identity.work_root.is_none());
-        assert_eq!(identity.git_dir, repo.canonicalize().unwrap());
+        assert_eq!(crate::util::same_path(&identity.git_dir, &repo), Some(true));
     }
 
     #[test]
@@ -759,7 +764,8 @@ mod tests {
     /// left out of the listing while the command still reports success, and the
     /// only sign is that stderr is not empty. Nothing here reads the text — the
     /// first line of it has no `warning:` prefix and all of it changes with the
-    /// locale — because emptiness is the whole signal.    #[cfg(unix)]
+    /// locale — because emptiness is the whole signal.
+    #[cfg(unix)]
     #[test]
     fn a_directory_git_cannot_open_is_reported_as_a_warning() {
         use std::os::unix::fs::PermissionsExt;

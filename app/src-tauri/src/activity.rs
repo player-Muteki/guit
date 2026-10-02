@@ -308,11 +308,11 @@ impl ActivityTracker {
     ) -> ActivityView {
         let started = Instant::now();
         self.generation += 1;
-        let work_root = identity.work_dir().ok().and_then(|root| {
-            root.canonicalize()
-                .ok()
-                .or_else(|| Some(root.to_path_buf()))
-        });
+        // The identity holds native-form paths (see `util::native_form`); a
+        // second `canonicalize` here would re-add the `\\?\` prefix that
+        // watcher events do not carry, and every prefix comparison would
+        // silently fail.
+        let work_root = identity.work_dir().ok().map(|root| root.to_path_buf());
         let view = match &work_root {
             // A bare repository has no working tree to amend a record of, and
             // saying so is a one-line answer rather than a walk.
@@ -644,7 +644,18 @@ fn is_git_internal(path: &Path, git_dirs: [&Path; 2]) -> bool {
 /// its entries, and guessing would be worse than asking again.
 fn relative(path: &Path, work_root: &Path) -> Option<OsString> {
     let stripped = path.strip_prefix(work_root).ok()?;
-    (!stripped.as_os_str().is_empty()).then(|| stripped.as_os_str().to_os_string())
+    if stripped.as_os_str().is_empty() {
+        return None;
+    }
+    #[cfg(windows)]
+    // Git enumerates candidates with '/' separators no matter what the
+    // filesystem uses; an event-derived key has to reach the same shape or
+    // every nested name looks unknown and costs an enumeration.
+    return Some(OsString::from(
+        stripped.as_os_str().to_string_lossy().replace('\\', "/"),
+    ));
+    #[cfg(not(windows))]
+    Some(stripped.as_os_str().to_os_string())
 }
 
 /// Ask Git which file outside the repository carries its ignore rules. `--null`
@@ -806,6 +817,7 @@ mod tests {
         let repo = root.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         repo::git_with(&repo, &[], &["init", "-q"]);
+        repo::git_with(&repo, &[], &["config", "core.autocrlf", "false"]);
         for (name, millis) in files {
             let path = repo.join(name);
             if let Some(parent) = path.parent() {
