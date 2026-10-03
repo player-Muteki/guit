@@ -115,16 +115,17 @@ def boxes_by_role():
 
 
 def control_box(name):
-    """The box of one window-cluster control.
+    """The box of one named control on the bar.
 
-    Two roles answer for a control on this bar: an HTML `button` reaches the bus as
-    `ATSPI_ROLE_BUTTON`, and the pin carries `aria-pressed`, which the engine reports
-    as a toggle button. Matching one role alone reads as a control that is drawn in
-    full going missing, so such a guess would fail for the wrong reason.
+    Three roles answer for a control here: an HTML `button` reaches the bus as
+    `ATSPI_ROLE_BUTTON`, the pin carries `aria-pressed`, which the engine reports as a
+    toggle button, and the repository menu carries `aria-haspopup`, which it reports as
+    a combo box. Matching one role alone reads as a control that is drawn in full going
+    missing, so such a guess would fail for the wrong reason.
     """
     for node in A.tree(A.app_root()):
         role = A._once(lambda: node.get_role().value_name, default="") or ""
-        if not role.endswith("_BUTTON"):
+        if not (role.endswith("_BUTTON") or role == "ATSPI_ROLE_COMBO_BOX"):
             continue
         if (A._once(lambda: node.get_name(), default="") or "") != name:
             continue
@@ -146,8 +147,10 @@ def on_one_line(left, right):
     A row that has wrapped puts its second group below the first, so the two boxes
     stop sharing a vertical band. This is a shape claim read off two extents, not a
     height compared to a number: the bar's own height is a token that denser
-    settings change, while "the close button is beside the branch, not under it" is
-    the fact the shipped look rests on.
+    settings change, while "the close button is beside the repository, not under it"
+    is the fact the shipped look rests on. The branch selector is not the left-hand
+    anchor any more — it leads the graph head now — so the pair is read across the
+    bar's own two ends.
     """
     a, b = control_box(left), control_box(right)
     if a is None or b is None:
@@ -219,8 +222,8 @@ def main():
         # asked for — so the one-line shape is asserted here, at the size it must hold.
         click_named("Main")
         time.sleep(1.0)
-        shipped = on_one_line("Switch branch", "Always on top")
-        report.check("the app bar keeps the window cluster beside the branch at the shipped size",
+        shipped = on_one_line("Repository menu", "Always on top")
+        report.check("the app bar keeps the window cluster beside the repository menu at the shipped size",
                      shipped is True, f"same_line={shipped!r}")
         click_named("Settings")
         time.sleep(1.0)
@@ -251,7 +254,7 @@ def main():
             time.sleep(1.0)
             frame = frame_box()
             page_width = (boxes_by_role().get("document_web") or (None,))[0]
-            line = on_one_line("Switch branch", "Always on top")
+            line = on_one_line("Repository menu", "Always on top")
             walk.append((after, page_width, frame.width if frame else None, line))
             if frame is not None and page_width is not None and page_width > frame.width:
                 overflowed.append(after)

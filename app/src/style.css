@@ -592,6 +592,14 @@ svg.icon { display: block; stroke: currentColor; stroke-width: 1.25; fill: none;
   opacity: 0;
 }
 .file-row:hover .row-more, .file-row:focus-within .row-more, .file-row.selected .row-more { opacity: 1; }
+/* A heading's batch verbs give up their buttons one at a time as the row runs out of
+   room, so when the last of them lives only in this menu, the menu's door has to be as
+   visible as those buttons were. */
+.group-heading .row-more { opacity: 1; }
+/* The rule above sets `display`, which an author sheet wins over the sheet every
+   browser ships for `[hidden]`, so a door told to hide has to be told so again —
+   otherwise a heading with room for its button draws this one beside it. */
+.row-more[hidden] { display: none; }
 .row-more:hover { background: var(--surface-hover); color: var(--text); }
 
 /* --- changes view --- */

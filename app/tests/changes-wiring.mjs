@@ -25,6 +25,7 @@ const source = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url)
 
 const changes = source("views/changes.ts");
 const preview = source("dialogs/preview.ts");
+const styles = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
 
 // --- the commit draft ---
 
@@ -103,11 +104,45 @@ test("an untracked row is offered a delete, and it asks for that path alone", ()
   assert.match(scoped[0], /danger: true/, "a removal is marked as one");
   // The whole-group entry asks for everything untracked instead, which is the
   // one shape a row cannot ask for.
-  assert.match(changes, /button\("Clean…", \(\) => requestClean\(\[\]\)/,
+  assert.match(changes, /label: "Clean…",\s*run: \(\) => requestClean\(\[\]\)/,
     "the untracked group heading asks for the repository-wide clean");
   // An untracked file is never a discard: it has nothing to revert to.
   assert.doesNotMatch(changes, /if \(file\.untracked\)[\s\S]{0,80}requestDiscard/,
     "a discard must not be offered for an untracked path");
+});
+
+test("a heading's batch verbs give way by measurement, not by a size written here", () => {
+  // The row is one line of a list that scrolls by a fixed height: it can neither
+  // wrap nor grow, and `overflow: hidden` cut the button in half at the window's
+  // edge — a destructive action drawn where no pointer can reach it. Every verb is
+  // built twice, and which drawing survives is decided against the row's own box.
+  const heading = changes.match(/const verbs: Array<\{[\s\S]*?\n      return rowElement;/);
+  assert.ok(heading, "one block builds the heading's verbs and both of their drawings");
+  assert.match(heading[0], /rowElement\.append\(\.\.\.buttons, more\);/, "and puts them all in the row");
+  assert.match(heading[0], /class: "row-more"/, "the fallback drawing is the row's own menu");
+  // The menu is read when it opens, so it holds exactly the verbs the row gave up on.
+  assert.match(heading[0], /\.filter\(\(_verb, position\) => buttons\[position\]\.hidden\)/,
+    "a verb that kept its button is not offered twice");
+
+  const fit = changes.match(/const fitHeadingVerbs = \(\): void => \{[\s\S]*?\n {2}\};/);
+  assert.ok(fit, "the view owns one fit pass over the heading rows");
+  assert.match(fit[0], /row\.scrollWidth <= row\.clientWidth \+ 1/,
+    "it asks the row how much it needed, so no pixel constant decides the layout");
+  assert.match(fit[0], /\.reverse\(\)/,
+    "the last verb drawn — the destructive one — is the first to give way");
+  assert.match(fit[0], /verb\.hidden = true;\s*door\.hidden = false;/,
+    "and a verb only leaves its button for the menu that can hold it");
+  // The answer is only knowable once the row is in the document, and every cause
+  // of a new width re-renders these rows, so the pass runs at the end of one.
+  const render = changes.match(/const renderFileRows = \(\): void => \{[\s\S]*?\n {2}\};/);
+  assert.ok(render, "the view owns one row render");
+  assert.ok(render[0].indexOf("fitHeadingVerbs();") > render[0].indexOf("replaceChildren(fragment);"),
+    "the fit is measured after the rows are in the document, never while they are built");
+
+  const tucked = styles.match(/\.group-heading \.row-more \{ opacity: 1; \}/);
+  assert.ok(tucked, "a heading's tucked door stays visible, or the verbs have no way out");
+  assert.match(styles, /\.row-more\[hidden\] \{ display: none; \}/,
+    "and the class that sets a display has to be told to hide, or it draws anyway");
 });
 
 test("both clean shapes hand the live file list to the ticket that needs it", () => {

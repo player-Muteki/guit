@@ -110,8 +110,20 @@ def showing_names():
     return names
 
 
+def named_node(name):
+    """The node carrying this accessible name, whatever role it answers with.
+
+    A region is not a control: the commit history reaches the bus as a list, so a
+    button-only lookup reads the region's own name as absent from the tree.
+    """
+    for node in A.tree(A.app_root()):
+        if (A._once(lambda: node.get_name(), default="") or "") == name:
+            return node
+    return None
+
+
 def reach(name):
-    """Whether the control named can actually be got to, by focus if need be.
+    """Whether the thing named can actually be got to, by focus if need be.
 
     SHOWING is a statement about the current scroll position, not about the
     control: a Settings page taller than a 400px window is allowed to keep a row
@@ -124,7 +136,7 @@ def reach(name):
     This is only ever used for page content. The app bar and the status bar are
     pinned, so for them SHOWING is honest and the ordinary name-set applies.
     """
-    node = A.find_button(name=name)
+    node = named_node(name)
     if node is None:
         return "absent from the tree"
     states = A._once(lambda: [s.value_name for s in node.get_state_set().get_states()], default=[]) or []
@@ -230,11 +242,23 @@ def main():
                      f"{len(TABS & narrow)}/{len(TABS)} visible")
         report.check("the app bar's primary actions survive 340x400", APPBAR_NARROW <= narrow,
                      ",".join(sorted(APPBAR_NARROW - narrow)))
-        A.click(A.find_button(name="Repository menu"))
-        time.sleep(0.3)
+        # The repository menu carries `aria-haspopup`, which the engine reports as a
+        # combo box, so a button-only lookup never matched it and the press below was
+        # never made. Four checks then reported the menu's contents as missing for the
+        # reason that its door was never knocked on. The press's own answer is asserted
+        # first so a silent no-op can never pass as an empty menu again.
+        menu = A.find_control(name="Repository menu")
+        opened = menu is not None and A.click(menu)
+        report.check("the repository menu opens at 340x400", opened,
+                     f"control_found={menu is not None}")
+        time.sleep(0.5)
         for name in ("Open repository", "Refresh status", "Close session", "Branches and tags"):
-            report.check(f"repository menu reaches {name} at 340x400", A.find_menu_item(name) is not None)
-        A.click(A.find_button(name="Repository menu"))
+            item = A.find_menu_item(name)
+            report.check(f"repository menu reaches {name} at 340x400",
+                         opened and item is not None,
+                         "" if item is not None else "not on the bus")
+        if menu is not None:
+            A.click(menu)
 
         A.click(A.find_button(name="Main"))
         time.sleep(1.2)
@@ -250,8 +274,9 @@ def main():
         # not reachability — the node reports SHOWING the moment focus brings
         # it into view. A check that read absence here would be reporting the
         # scroll offset as a missing region.
+        history = reach("Commit history")
         report.check("the commit history shares the page at 340x400",
-                     reach("Commit history") is not None, "reached by focus")
+                     history in ("on screen", "reached by focus"), history)
         report.check("a file row's actions survive 340x400",
                      any(name.startswith("More actions for ") for name in narrow))
 

@@ -179,6 +179,27 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
   // Fixed-height virtual list: only the rows intersecting the viewport (plus
   // overscan) exist in the DOM, so a repository with tens of thousands of
   // changed files costs the same as one with dozens.
+  // Whether a heading row has room for its batch verbs, read off the row once it
+  // is in the document: the row is as wide as the list, and the list is as wide as
+  // whatever just moved — a dragged split, an interface zoom, a narrower window. Each
+  // of those re-renders these rows, so the question is asked again for every layout
+  // rather than answered once where the row is built.
+  const fitHeadingVerbs = (): void => {
+    for (const row of Array.from(fileRowsHost.querySelectorAll<HTMLElement>(".group-heading"))) {
+      const door = row.querySelector<HTMLElement>(".row-more");
+      const verbs = Array.from(row.querySelectorAll<HTMLElement>(".row-action")).reverse();
+      if (door === null || verbs.length === 0) continue;
+      // Give way one verb at a time, from the last one drawn back — the destructive
+      // batch first, the staging batch after it — and stop the moment the row fits, so
+      // a row that only needs one of them to move keeps the other as a button.
+      for (const verb of verbs) {
+        if (row.scrollWidth <= row.clientWidth + 1) break;
+        verb.hidden = true;
+        door.hidden = false;
+      }
+    }
+  };
+
   const renderFileRows = (): void => {
     const viewport = fileList.clientHeight || 320;
     const slice = visibleWindow(listRows.length, fileList.scrollTop, viewport, rowHeight(), OVERSCAN);
@@ -189,6 +210,7 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
       fragment.append(createRow(listRows[index], index));
     }
     fileRowsHost.replaceChildren(fragment);
+    fitHeadingVerbs();
     if (selectedRow >= slice.startIndex && selectedRow < slice.endIndex) {
       fileList.setAttribute("aria-activedescendant", `file-row-${selectedRow}`);
     } else {
@@ -330,34 +352,75 @@ export function createChangesView(deps: ChangesDeps): ChangesView {
       rowElement.addEventListener("click", () => toggleGroup(row.group));
       const batchAction: "stage" | "unstage" | null =
         row.group === "conflict" ? null : row.group === "staged" ? "unstage" : "stage";
+      const verbs: Array<{
+        label: string;
+        run: () => void;
+        danger: boolean;
+        title?: string;
+        blocked: boolean;
+      }> = [];
       if (batchAction) {
-        rowElement.append(
-          button(batchAction === "stage" ? "Stage all" : "Unstage all", () => {
+        verbs.push({
+          label: batchAction === "stage" ? "Stage all" : "Unstage all",
+          run: () => {
             // IDs come from the live snapshot; the backend rejects the whole
             // batch if any one of them has gone stale.
             const ids = currentFiles.filter((file) => file.group === row.group).map((file) => file.id);
             if (ids.length > 0) void runWrite(batchAction === "stage" ? "stage_files" : "unstage_files", ids);
-          }, { class: "row-action", disabled: isWriteRunning() }),
-        );
+          },
+          danger: false,
+          blocked: isWriteRunning(),
+        });
       }
-      if (row.group === "worktree") {
-        rowElement.append(
-          button("Discard all", () => {
-            const ids = currentFiles
-              .filter((file) => file.group === "worktree" && discardEligible(file))
-              .map((file) => file.id);
-            if (ids.length > 0) requestDiscard(ids);
-          }, { class: "row-action danger", disabled: isWriteRunning() || pendingPreview() !== null }),
-        );
-      }
-      if (row.group === "untracked") {
-        rowElement.append(
-          button("Clean…", () => requestClean([]), {
-            class: "row-action danger",
+      if (row.group === "worktree" || row.group === "untracked") {
+        verbs.push(row.group === "worktree"
+          ? {
+            label: "Discard all",
+            run: () => {
+              const ids = currentFiles
+                .filter((file) => file.group === "worktree" && discardEligible(file))
+                .map((file) => file.id);
+              if (ids.length > 0) requestDiscard(ids);
+            },
+            danger: true,
+            blocked: isWriteRunning() || pendingPreview() !== null,
+          }
+          : {
+            label: "Clean…",
+            run: () => requestClean([]),
+            danger: true,
             title: "Delete untracked files after confirmation",
-            disabled: isWriteRunning() || pendingPreview() !== null,
-          }),
-        );
+            blocked: isWriteRunning() || pendingPreview() !== null,
+          });
+      }
+      if (verbs.length > 0) {
+        // Each verb is drawn two ways: a button beside the group name while the row
+        // has the room for it, and an entry in the row's own `⋯` when it does not. The
+        // row is one line of a list that scrolls by a fixed height, so it can neither
+        // wrap nor grow, and its `overflow: hidden` was cutting a button in half at the
+        // window's edge — a destructive action drawn where no pointer can reach it.
+        const buttons = verbs.map((verb) => button(verb.label, () => verb.run(), {
+          class: verb.danger ? "row-action danger" : "row-action",
+          title: verb.title,
+          disabled: verb.blocked,
+        }));
+        const more = el("button", {
+          class: "row-more",
+          type: "button",
+          "aria-label": `More actions for ${row.label}`,
+          hidden: true,
+        }, [icon("more", 14)]);
+        // The door is inert only when everything it could hold is inert. Like a row's
+        // own menu, its items are read at the moment it opens, and a click that lands
+        // on a busy panel is answered by the refusal the ask itself carries.
+        more.disabled = verbs.every((verb) => verb.blocked);
+        more.addEventListener("click", (event) => {
+          event.stopPropagation();
+          openMenu(more, verbs
+            .filter((_verb, position) => buttons[position].hidden)
+            .map((verb) => ({ label: verb.label, run: () => verb.run(), danger: verb.danger })));
+        });
+        rowElement.append(...buttons, more);
       }
       return rowElement;
     }

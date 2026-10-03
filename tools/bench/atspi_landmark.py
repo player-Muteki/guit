@@ -88,6 +88,24 @@ def find_button(name=None, contains=None, root=None):
     return None
 
 
+def find_control(name, roles=("button", "combo_box"), root=None):
+    """The node named, accepting any of several roles rather than only a button.
+
+    A control that carries `aria-haspopup` reaches the bus as a combo box, so a harness
+    that has to *open* something needs both roles. Matching one alone leaves the click
+    unmade, and every later reading of the opened state is then empty — which looks like
+    contents that are missing rather than like a door that was never knocked on.
+    """
+    wanted = {"ATSPI_ROLE_" + role.upper() for role in roles}
+    for node in tree(root):
+        role = _once(lambda: node.get_role().value_name, default="") or ""
+        if role not in wanted:
+            continue
+        if (_once(lambda: node.get_name(), default="") or "") == name:
+            return node
+    return None
+
+
 def find_menu_item(name, root=None):
     for node in tree(root):
         if _once(lambda: node.get_role().value_name, default="") != "ATSPI_ROLE_MENU_ITEM":

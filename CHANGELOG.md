@@ -74,6 +74,16 @@ verified.
   window at the smallest interface size, under the 24px the four window
   controls keep. It now takes the row height beside it, so the repository menu
   is as easy to hit as the buttons next to it at every size.
+- A changes group heading no longer draws its batch verb past the window's
+  edge. The heading is one line of a list that scrolls by a fixed height, so it
+  can neither wrap nor grow, and `overflow: hidden` cut `Discard all` in half at
+  the minimum window with a large interface size — a destructive action drawn
+  where no pointer could reach it. Each heading verb now keeps its button while
+  the row has room for it and gives way to that row's own `⋯` menu when it does
+  not, measured against the row after every layout, so a dragged split, an
+  interface zoom and a narrower window all ask the same question. Measured in a
+  real window from 12px to 24px: nothing drawn leaves the frame at 340×400 or
+  wider, and a tucked verb still opens its confirmation from the menu.
 
 ## [0.0.2] - 2026-10-02
 
