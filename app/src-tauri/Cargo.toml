@@ -1,6 +1,6 @@
 [package]
 name = "guit"
-version = "0.0.2"
+version = "0.0.3"
 description = "Lightweight Git desktop client"
 license = "MIT"
 edition = "2021"
